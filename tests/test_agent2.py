@@ -1,0 +1,164 @@
+"""
+Agent2（策略参谋员）模块测试
+覆盖：3 个典型场景 + 1 个边界场景
+"""
+
+import os
+import sys
+
+
+# ---------- 与仓库根对齐的导入路径 ----------
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+
+from backend.agents.agent2.strategist import recommend
+from backend.tools.agent2_tools import match_rules, query_buyer_profile, search_similar_cases
+from schemas import (
+    BuyerProfile,
+    FactOutput,
+    MatchedRule,
+    StrategyInput,
+    STRATEGY_COMPENSATE,
+    STRATEGY_DEFEND,
+    STRATEGY_NEGOTIATE,
+)
+
+
+# ---------- recommend：三典型策略 + 无规则无判例边界 ----------
+class TestAgent2Recommend:
+    def test_recommend_compensate_when_high_quality_defect(self):
+        """高质量瑕疵证据，倾向认赔。"""
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="破洞",
+            evidence_quality="high",
+            logistics_normal=True,
+        )
+        matched_rules = [
+            MatchedRule(
+                rule_id="R002",
+                rule_summary="买家提供清晰瑕疵图片，平台倾向支持退款",
+                condition_result="规则条件全部满足；建议策略:compensate",
+            )
+        ]
+        profile = BuyerProfile(buyer_id="buyer_loyal", dispute_rate=0.06, credit_level="high")
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=matched_rules,
+            similar_cases=search_similar_cases("破洞退款纠纷", top_k=3),
+            order_amount=128.0,
+        )
+
+        output = recommend(input_data)
+        assert output.strategy == STRATEGY_COMPENSATE, f"期望 compensate，实际 {output.strategy}"
+        assert 0.0 <= output.estimated_win_rate <= 1.0
+        assert output.policy_ref and "R002" in output.policy_ref
+
+    def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self):
+        """证据不足且买家风险高，倾向抗辩。"""
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="无瑕疵",
+            has_tag_visible=True,
+            evidence_quality="low",
+            missing_evidence=["商品照片"],
+            red_flags=["疑似二次损坏"],
+        )
+        matched_rules = [
+            MatchedRule(
+                rule_id="R004",
+                rule_summary="证据不足，商家可申诉补证",
+                condition_result="规则条件全部满足；建议策略:defend",
+            )
+        ]
+        profile = BuyerProfile(
+            buyer_id="buyer_high_risk",
+            dispute_rate=0.55,
+            return_rate=0.48,
+            malicious_flags=2,
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=matched_rules,
+            similar_cases=search_similar_cases("吊牌完整但要求退款", top_k=2),
+            order_amount=99.0,
+        )
+
+        output = recommend(input_data)
+        assert output.strategy == STRATEGY_DEFEND, f"期望 defend，实际 {output.strategy}"
+        assert output.risk_factors, "期望输出风险因素列表"
+
+    def test_recommend_negotiate_for_medium_evidence_color_diff(self):
+        """色差且证据中等，倾向协商。"""
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="色差",
+            evidence_quality="medium",
+            logistics_normal=True,
+        )
+        matched_rules = [
+            MatchedRule(
+                rule_id="R007",
+                rule_summary="色差类纠纷证据中等，建议协商",
+                condition_result="规则条件全部满足；建议策略:negotiate",
+            )
+        ]
+        profile = BuyerProfile(buyer_id="buyer_mid", dispute_rate=0.12, credit_level="medium")
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=matched_rules,
+            similar_cases=search_similar_cases("色差纠纷希望退部分款", top_k=3),
+            order_amount=168.0,
+        )
+
+        output = recommend(input_data)
+        assert output.strategy == STRATEGY_NEGOTIATE, f"期望 negotiate，实际 {output.strategy}"
+        assert "综合判断" in output.reasoning or "规则与画像出现冲突" in output.reasoning
+
+    def test_recommend_boundary_with_empty_rules_and_cases(self):
+        """边界场景：无规则无判例时仍应输出合法策略。"""
+        facts = FactOutput(evidence_quality="medium")
+        profile = BuyerProfile(buyer_id="buyer_unknown")
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=[],
+            similar_cases=[],
+            order_amount=0.0,
+        )
+
+        output = recommend(input_data)
+        assert output.strategy in {STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE}
+        assert 0.0 <= output.confidence <= 1.0
+
+
+# ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
+class TestAgent2Tools:
+    def test_match_rules_should_hit_known_rule(self):
+        """规则匹配应至少命中一条已知规则。"""
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="破洞",
+            evidence_quality="high",
+            logistics_normal=True,
+        )
+        matched = match_rules(facts)
+        assert matched, "期望至少命中一条规则"
+        assert any(rule.rule_id == "R002" for rule in matched), "期望命中 R002"
+
+    def test_query_buyer_profile_should_return_default_when_unknown(self):
+        """未知买家 ID 返回默认画像。"""
+        profile = query_buyer_profile("unknown_buyer")
+        assert profile.buyer_id == "unknown_buyer"
+        assert profile.purchase_count >= 0
+
+    def test_search_similar_cases_top_k(self):
+        """判例检索应按 top_k 截断结果。"""
+        cases = search_similar_cases("物流异常退款", top_k=2)
+        assert len(cases) == 2
+        assert cases[0].similarity >= cases[1].similarity
