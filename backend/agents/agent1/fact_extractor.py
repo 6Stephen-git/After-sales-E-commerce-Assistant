@@ -16,6 +16,7 @@ from backend.tools.platform_api import query_logistics
 LOG_PREFIX = "[Agent1]"
 
 
+# ---------- 纠纷材料解析：图片 URL 与可检索文本上下文 ----------
 def _collect_image_urls(materials: dict[str, Any]) -> list[str]:
     """
     从 materials 中收集所有图片 URL。
@@ -67,6 +68,7 @@ def _collect_text(materials: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+# ---------- 事实推断辅助：收货判断、证据档位、置信度 ----------
 def _infer_goods_received(text_context: str, logistics_signed: bool | None) -> bool | None:
     """
     推断买家是否已收到货（三态：是 / 否 / 未知）。
@@ -144,6 +146,7 @@ def _derive_confidence(evidence_quality: str, red_flag_count: int) -> float:
     return max(0.0, min(1.0, base - red_flag_count * 0.12))
 
 
+# ---------- 主入口：物流 + 多模态 + 规则化疑点，输出 FactOutput ----------
 def extract(materials: dict[str, Any]) -> FactOutput:
     """
     从纠纷材料中提取结构化事实，输出严格符合 schemas.FactOutput。
