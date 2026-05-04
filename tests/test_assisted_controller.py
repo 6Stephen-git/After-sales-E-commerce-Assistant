@@ -1,0 +1,126 @@
+"""
+辅助模式控制器集成测试。
+
+覆盖：全链路、增量缓存、空材料边界、多纠纷缓存隔离；依赖 `clear_cache` 保证用例独立。
+"""
+
+import os
+import sys
+
+
+# ---------- 与 Agent 单测一致：保证可从仓库根导入 schemas 与 backend ----------
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from backend.controllers.assisted_controller import clear_cache, run
+from schemas import EVIDENCE_LOW
+
+
+# ---------- 每个用例前：清空进程内缓存 ----------
+def setup_function() -> None:
+    """
+    每个用例前清空控制器缓存，避免互相污染。
+    """
+    clear_cache()
+
+
+# ---------- 场景一：首次全量材料，三 Agent 串行产出完整报告 ----------
+def test_run_full_chain_should_return_valid_report() -> None:
+    """
+    完整材料首次调用，返回合法 AnalysisReport。
+    """
+    report = run(
+        dispute_id="DISPUTE-C-001",
+        new_materials={
+            "order_id": "ORDER10001",
+            "buyer_id": "buyer_loyal",
+            "order_amount": 129.0,
+            "buyer_text": "我收到了衣服，袖子有破洞",
+            "chat_history": [{"role": "buyer", "content": "已经签收，存在质量问题"}],
+            "image_urls": ["mock://tear-tag"],
+        },
+    )
+
+    assert report.dispute_id == "DISPUTE-C-001"
+    assert report.facts.defect_type == "破洞"
+    assert report.strategy.strategy in {"defend", "negotiate", "compensate"}
+    assert report.scripts.recommended_version in {
+        "defense_version",
+        "negotiate_version",
+        "compensate_version",
+    }
+
+
+# ---------- 场景二：同 dispute_id 二次调用仅追加图片/消息，事实层应更新 ----------
+def test_run_should_append_incremental_materials() -> None:
+    """
+    第二次调用追加新图片后，事实输出应感知到新增举证。
+    """
+    first_report = run(
+        dispute_id="DISPUTE-C-002",
+        new_materials={
+            "order_id": "ORDER10002",
+            "buyer_id": "buyer_loyal",
+            "order_amount": 88.0,
+            "buyer_text": "收到商品但有问题",
+            "chat_history": [{"role": "buyer", "content": "请处理一下"}],
+            "image_urls": [],
+        },
+    )
+    second_report = run(
+        dispute_id="DISPUTE-C-002",
+        new_materials={
+            "chat_history": [{"role": "buyer", "content": "补充了图片"}],
+            "image_urls": ["mock://tear-tag"],
+        },
+    )
+
+    assert first_report.facts.defect_type is None
+    assert second_report.facts.defect_type == "破洞"
+    assert all("缺少举证图片" not in item for item in second_report.facts.missing_evidence)
+
+
+# ---------- 场景三：空 dict 材料，链路仍返回合法低证据报告 ----------
+def test_run_should_handle_empty_materials_boundary() -> None:
+    """
+    空材料边界：不崩溃且返回合法低证据报告。
+    """
+    report = run(dispute_id="DISPUTE-C-003", new_materials={})
+
+    assert report.dispute_id == "DISPUTE-C-003"
+    assert report.facts.evidence_quality == EVIDENCE_LOW
+    assert report.strategy.strategy in {"defend", "negotiate", "compensate"}
+    assert report.scripts.defense_version.strip() != ""
+
+
+# ---------- 场景四：不同 dispute_id 并行缓存互不影响 ----------
+def test_run_should_isolate_cache_by_dispute_id() -> None:
+    """
+    不同 dispute_id 的缓存隔离，互不干扰。
+    """
+    run(
+        dispute_id="DISPUTE-C-004-A",
+        new_materials={
+            "order_id": "ORDER10004",
+            "buyer_id": "buyer_loyal",
+            "buyer_text": "A 纠纷",
+            "image_urls": ["mock://tear-tag"],
+        },
+    )
+    run(
+        dispute_id="DISPUTE-C-004-B",
+        new_materials={
+            "order_id": "ORDER10005",
+            "buyer_id": "buyer_high_risk",
+            "buyer_text": "B 纠纷",
+            "image_urls": ["mock://stain-no-tag"],
+        },
+    )
+
+    report_a = run(dispute_id="DISPUTE-C-004-A", new_materials={})
+    report_b = run(dispute_id="DISPUTE-C-004-B", new_materials={})
+
+    assert report_a.facts.defect_type == "破洞"
+    assert report_b.facts.defect_type == "污渍"
+
