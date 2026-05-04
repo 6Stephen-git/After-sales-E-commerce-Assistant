@@ -1,0 +1,105 @@
+{
+  "version": "1.0",
+  "description": "电商纠纷平台规则库初版，供 Agent 2 的 match_rules 工具使用",
+  "rules": [
+    {
+      "rule_id": "R001",
+      "name": "商家已发货签收后退款规则",
+      "conditions": {
+        "goods_received": true,
+        "defect_type": null,
+        "logistics_normal": true
+      },
+      "rule_summary": "买家已签收且物流正常，退款需提供商品瑕疵证明",
+      "platform_ref": "平台交易规则第12条",
+      "outcome_suggestion": "defend",
+      "weight": 0.9
+    },
+    {
+      "rule_id": "R002",
+      "name": "商品瑕疵退款规则",
+      "conditions": {
+        "goods_received": true,
+        "defect_type": "破洞",
+        "evidence_quality": "high"
+      },
+      "rule_summary": "买家提供清晰瑕疵图片且证据质量高，平台倾向支持买家退款",
+      "platform_ref": "平台消费者保障规则第5条",
+      "outcome_suggestion": "compensate",
+      "weight": 0.8
+    },
+    {
+      "rule_id": "R003",
+      "name": "物流异常退款规则",
+      "conditions": {
+        "goods_received": false,
+        "logistics_normal": false,
+        "is_abnormal": true
+      },
+      "rule_summary": "物流显示异常且买家未签收，商家有责任处理物流问题",
+      "platform_ref": "平台物流纠纷处理规则第3条",
+      "outcome_suggestion": "compensate",
+      "weight": 0.85
+    },
+    {
+      "rule_id": "R004",
+      "name": "图片证据不充分规则",
+      "conditions": {
+        "evidence_quality": "low",
+        "missing_evidence": ["商品照片"]
+      },
+      "rule_summary": "买家提供的图片证据不足或模糊，商家可申诉要求补充证据",
+      "platform_ref": "平台纠纷举证规则第8条",
+      "outcome_suggestion": "defend",
+      "weight": 0.75
+    },
+    {
+      "rule_id": "R005",
+      "name": "商品无瑕疵抗辩规则",
+      "conditions": {
+        "defect_type": "无瑕疵",
+        "has_tag_visible": true
+      },
+      "rule_summary": "图片未显示明显瑕疵且吊牌可见，商家可提出商品完好抗辩",
+      "platform_ref": "平台交易规则第15条",
+      "outcome_suggestion": "defend",
+      "weight": 0.7
+    },
+    {
+      "rule_id": "R006",
+      "name": "穿着痕迹疑似恶意退款规则",
+      "conditions": {
+        "wear_signs": "明显穿着痕迹",
+        "defect_edge": "整齐"
+      },
+      "rule_summary": "商品图片显示明显穿着痕迹且破损整齐，疑似人为损坏后退款",
+      "platform_ref": "平台消费者诚信规则第2条",
+      "outcome_suggestion": "defend",
+      "weight": 0.8
+    },
+    {
+      "rule_id": "R007",
+      "name": "协商部分退款规则",
+      "conditions": {
+        "evidence_quality": "medium",
+        "defect_type": "色差"
+      },
+      "rule_summary": "色差类纠纷证据质量中等，建议协商部分退款以降低升级风险",
+      "platform_ref": "平台调解规则第6条",
+      "outcome_suggestion": "negotiate",
+      "weight": 0.65
+    },
+    {
+      "rule_id": "R008",
+      "name": "物流停滞超期规则",
+      "conditions": {
+        "logistics_normal": false,
+        "stagnant_days_gte": 7
+      },
+      "rule_summary": "物流停滞超过7天，买家有权申请退款，商家须积极跟进物流",
+      "platform_ref": "平台物流纠纷处理规则第5条",
+      "outcome_suggestion": "negotiate",
+      "weight": 0.8
+    }
+  ]
+}
