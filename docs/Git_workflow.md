@@ -1,7 +1,6 @@
 # Git 工作流规范
 
-> 本文件为项目的 Git 操作规范。Coding Agent 不直接执行 git 命令，但会基于此规范为你生成建议的提交信息和 Changelog 条目。
-
+> 本文件为项目的 Git 操作规范。Coding Agent 不直接执行 git 命令。
 ## 分支策略
 
 
