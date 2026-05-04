@@ -2,4 +2,10 @@
 alwaysApply: true
 ---
 
+<!--
+本文件：Cursor 工作区「开发前必读」规则（alwaysApply）。
+作用：规定新模块开发前须阅读的文档顺序与架构约束入口，避免脱离项目约定实现。
+说明：若文档路径或阅读顺序变更，请同步更新本段与正文。
+-->
+
 每次开发新模块前，先读取 docs/agent.md 和 docs/Architecture.md 了解相关文档和项目结构位置。然后根据 docs/Roadmap.md 确定当前开发顺序，并严格遵循 docs/Global_rules.md 中所有架构约束。
