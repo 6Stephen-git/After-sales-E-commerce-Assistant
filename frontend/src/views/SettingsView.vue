@@ -32,7 +32,8 @@
 
     <div class="action-row">
       <el-button :loading="loading" @click="load_config">刷新配置</el-button>
-      <el-button type="primary" :loading="loading" @click="save_config">保存配置</el-button>
+      <!-- 保存操作：success 为绿色主按钮，区分默认灰的「刷新配置」 -->
+      <el-button type="success" :loading="loading" @click="save_config">保存配置</el-button>
     </div>
   </el-card>
 </template>

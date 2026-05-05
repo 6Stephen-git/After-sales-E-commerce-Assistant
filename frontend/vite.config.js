@@ -1,8 +1,14 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 
+// ---------- Vite + Vitest 配置：开发与单元测试共用同一插件链 ----------
 export default defineConfig({
   plugins: [vue()],
+  // ---------- Vitest：纯工具函数使用 node 环境，避免拉起浏览器 DOM ----------
+  test: {
+    environment: 'node',
+    include: ['src/**/*.{test,spec}.js']
+  },
   server: {
     port: 5173,
     // 开发环境代理，将 /api 请求转发到 FastAPI 后端
