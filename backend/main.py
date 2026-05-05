@@ -2,11 +2,16 @@
 商家应诉助手 — FastAPI 后端入口
 """
 
+import logging
 import sys
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+
+from backend.db import init_db
+from backend.routers import analyze_router, merchants_router
 
 # 加载环境变量
 load_dotenv()
@@ -23,6 +28,37 @@ app = FastAPI(
     description="电商纠纷辅助分析系统 API",
     version="0.1.0",
 )
+API_LOG_PREFIX = "[API]"
+logger = logging.getLogger(__name__)
+
+
+# ---------- 生命周期：启动时初始化数据库 ----------
+@app.on_event("startup")
+def on_startup() -> None:
+    """
+    启动事件：初始化数据库表结构。
+    """
+    logger.info("%s 应用启动，开始初始化数据库", API_LOG_PREFIX)
+    init_db()
+    logger.info("%s 应用启动完成", API_LOG_PREFIX)
+
+
+# ---------- 全局异常处理：统一返回结构 ----------
+@app.middleware("http")
+async def exception_middleware(request: Request, call_next):
+    """
+    统一捕获未处理异常并返回标准错误响应。
+    """
+    try:
+        return await call_next(request)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s 未处理异常，path=%s，原因=%s", API_LOG_PREFIX, request.url.path, exc)
+        return JSONResponse(status_code=500, content={"error": f"服务内部异常：{exc}"})
+
+
+# ---------- 路由注册：阶段四 API 端点 ----------
+app.include_router(analyze_router)
+app.include_router(merchants_router)
 
 
 @app.get("/health")

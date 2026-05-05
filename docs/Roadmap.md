@@ -51,28 +51,28 @@
 
 ### Agent 4 情绪监控员
 
-- [ ] 下载并配置本地 BERT 模型
-- [ ] 实现 `agents/agent4/` 模块
-- [ ] 编写内嵌测试用例并全部通过
-- [ ] 核心里程碑：Agent 4 独立可运行
-- [ ] **合并到 dev，打 tag `v0.3.1-agent4`，更新 Changelog**
+- [x] 下载并配置本地 BERT 模型
+- [x] 实现 `agents/agent4/` 模块
+- [x] 编写内嵌测试用例并全部通过
+- [x] 核心里程碑：Agent 4 独立可运行
+- [x] **合并到 dev，打 tag `v0.3.1-agent4`，更新 Changelog**
 
 ### Agent 5 复盘分析师
 
-- [ ] 搭建 Celery + Redis 任务队列
-- [ ] 实现 `agents/agent5/` 模块
-- [ ] 编写内嵌测试用例并全部通过
-- [ ] 核心里程碑：Agent 5 独立可运行
-- [ ] **合并到 dev，打 tag `v0.3.2-agent5`，更新 Changelog**
+- [x] 搭建 Celery + Redis 任务队列
+- [x] 实现 `agents/agent5/` 模块
+- [x] 编写内嵌测试用例并全部通过
+- [x] 核心里程碑：Agent 5 独立可运行
+- [x] **合并到 dev，打 tag `v0.3.2-agent5`，更新 Changelog**
 
 ## 阶段四：后端 API 服务
 
-- [ ] MySQL 表结构创建（商家配置含 `mode` 字段、判例库、买家画像、规则库、话术模板）
-- [ ] FastAPI 端点实现
-- [ ] `/analyze` 端点内部调用 AssistedController
-- [ ] 后端接口测试全部通过
-- [ ] 核心里程碑：后端 API 完整可用
-- [ ] **合并到 dev，打 tag `v0.4.0-api`，更新 Changelog**
+- [x] MySQL 表结构创建（商家配置含 `mode` 字段、判例库、买家画像、规则库、话术模板）
+- [x] FastAPI 端点实现
+- [x] `/analyze` 端点内部调用 AssistedController
+- [x] 后端接口测试全部通过
+- [x] 核心里程碑：后端 API 完整可用
+- [x] **合并到 dev，打 tag `v0.4.0-api`，更新 Changelog**
 
 ## 阶段五：前端界面
 
