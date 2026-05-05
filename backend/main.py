@@ -3,8 +3,9 @@
 """
 
 import logging
-import sys
 import os
+import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -23,24 +24,28 @@ if ROOT_DIR not in sys.path:
 
 import schemas  # noqa: E402（依赖路径注入，必须在 sys.path 调整后导入）
 
-app = FastAPI(
-    title="商家应诉助手",
-    description="电商纠纷辅助分析系统 API",
-    version="0.1.0",
-)
 API_LOG_PREFIX = "[API]"
 logger = logging.getLogger(__name__)
 
 
 # ---------- 生命周期：启动时初始化数据库 ----------
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     """
-    启动事件：初始化数据库表结构。
+    应用生命周期：在 yield 之前执行启动逻辑（初始化数据库），之后可扩展关闭逻辑。
     """
     logger.info("%s 应用启动，开始初始化数据库", API_LOG_PREFIX)
     init_db()
     logger.info("%s 应用启动完成", API_LOG_PREFIX)
+    yield
+
+
+app = FastAPI(
+    title="商家应诉助手",
+    description="电商纠纷辅助分析系统 API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 
 # ---------- 全局异常处理：统一返回结构 ----------
