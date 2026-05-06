@@ -85,11 +85,11 @@
 
 ## 阶段六：端到端集成测试
 
-- [ ] 全链路集成测试（模拟碎片化对话：首次分析 + 多轮纯文本后再次请求帮助）
-- [ ] 验收标准见 `Evaluation.md`
-- [ ] 核心里程碑：辅助模式 MVP 可交付
-- [ ] **合并到 dev，打 tag `v0.6.0-integration`，更新 Changelog**
-- [ ] **合并 dev 到 main，打 tag `v1.0.0-mvp`，Changelog 记录正式发布**
+- [x] 全链路集成测试（模拟碎片化对话：首次分析 + 多轮纯文本后再次请求帮助）
+- [x] 验收标准见 `Evaluation.md`
+- [x] 核心里程碑：辅助模式 MVP 可交付
+- [x] **合并到 dev，打 tag `v0.6.0-integration`，更新 Changelog**
+- [x] **合并 dev 到 main，打 tag `v1.0.0-mvp`，Changelog 记录正式发布**
 
 ## 阶段七：智能模式
 
