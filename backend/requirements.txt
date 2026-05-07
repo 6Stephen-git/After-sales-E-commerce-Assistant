@@ -8,3 +8,4 @@ celery==5.6.2
 redis==7.4.0
 sqlalchemy==2.0.44
 pymysql==1.1.2
+selenium==4.38.0

@@ -1,0 +1,13 @@
+[
+  {
+    "_说明": "本数组为「列表接口 JSON → rule_crawl_targets」的导入配置。enabled=false 的条目仅作文档，不参与导入。",
+    "enabled": false
+  },
+  {
+    "_说明": "单条 bundle：response_file 指向 F12 导出的 mtop 列表响应（可多段 JSON 拼接在同一文件）。category、c_id 仅在 model 缺分类或缺 lastCategoryId 时兜底；正常以响应内 model.category、lastCategoryId 为准。",
+    "enabled": true,
+    "category": "交易管理/物流规范",
+    "c_id": 1149,
+    "response_file": "data/rule_list_exports/example_mtop_rule_list.json"
+  }
+]

@@ -14,11 +14,22 @@
     </div>
 
     <div class="input-container">
+      <div class="sender-row">
+        <span class="sender-label">以身份发送</span>
+        <el-radio-group
+          :model-value="sender_role"
+          size="small"
+          @update:model-value="emit_update_sender_role"
+        >
+          <el-radio-button label="merchant">商家</el-radio-button>
+          <el-radio-button label="buyer">买家（自测）</el-radio-button>
+        </el-radio-group>
+      </div>
       <el-input
         :model-value="input_text"
         type="textarea"
         :rows="3"
-        placeholder="输入要发送给买家的内容"
+        :placeholder="input_placeholder"
         @update:model-value="emit_update_input_text"
       />
       <el-button type="success" @click="emit_send_message">发送</el-button>
@@ -27,10 +38,11 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import MessageItem from './MessageItem.vue'
 
-// ---------- 组件输入：聊天数据与加载状态 ----------
-defineProps({
+// ---------- 组件输入：聊天数据、发送身份与加载状态 ----------
+const props = defineProps({
   messages: {
     type: Array,
     required: true
@@ -39,21 +51,37 @@ defineProps({
     type: String,
     default: ''
   },
+  sender_role: {
+    type: String,
+    default: 'merchant'
+  },
   loading: {
     type: Boolean,
     default: false
   }
 })
 
-// ---------- 组件输出：上抛输入、发送与分析触发事件 ----------
-const emit = defineEmits(['update:input_text', 'send_message', 'request_ai_help'])
+// ---------- 组件输出：上抛输入、身份、发送与分析触发事件 ----------
+const emit = defineEmits(['update:input_text', 'update:sender_role', 'send_message', 'request_ai_help'])
+
+// ---------- 输入框占位：随商家/买家身份切换提示文案 ----------
+const input_placeholder = computed(() =>
+  props.sender_role === 'buyer'
+    ? '以买家身份输入对话内容（用于自行模拟买家）'
+    : '以商家身份输入要发送给买家的内容'
+)
 
 // ---------- 输入同步：把文本变化同步到上层状态 ----------
 function emit_update_input_text(value) {
   emit('update:input_text', value)
 }
 
-// ---------- 手动发送：保持商家主动发送控制权 ----------
+// ---------- 发送身份：同步到父组件（商家 / 买家） ----------
+function emit_update_sender_role(value) {
+  emit('update:sender_role', value)
+}
+
+// ---------- 上抛发送：由父组件按当前 sender_role 写入消息 ----------
 function emit_send_message() {
   emit('send_message')
 }
@@ -96,5 +124,17 @@ function emit_request_ai_help() {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.sender-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sender-label {
+  color: #606266;
+  font-size: 13px;
 }
 </style>

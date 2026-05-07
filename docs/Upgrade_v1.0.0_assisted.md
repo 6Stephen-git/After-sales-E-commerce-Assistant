@@ -63,7 +63,7 @@
 ### M5 — 买家角色扮演（人工自测）
 
 - **文件**：`frontend/src/components/chat/ChatPanel.vue`、`frontend/src/composables/useDispute.js`。
-- **要点**：输入区「商家 / 买家」切换，发送消息对应 `role`；可选「测试场景」下拉，预填消息与 `order_amount`、`buyer_id`、`image_urls` 等（前端硬编码 3 套，无需新后端）。
+- **要点**：输入区「商家 / 买家」切换，发送消息对应 `role`；由用户自行输入扮演买家，不设预置场景下拉。
 - **依赖**：无；建议最先做以便联调。
 
 ### M6 — 前端展示补全
@@ -107,7 +107,7 @@ flowchart LR
 | M4-1 | 淘宝规则       | 抓取并生成 JSON          | `scripts/fetch_taobao_rules.py`、`data/dispute_rules.json`        | 无     | 大     | 条数与溯源字段满足约定        |
 | M4-2 | 画像落库       | DB 优先 + seed        | `backend/tools/agent2_tools.py`、`scripts/seed_buyer_profiles.py` | 无     | 小     | 命中 DB 画像           |
 | M4-3 | 判例检索       | 查表 + Mock 兜底        | `backend/tools/agent2_tools.py`                                  | M3-2  | 小     | 有数据走 DB            |
-| M5   | 角色扮演 UI    | 切换买家/商家 + 场景        | `ChatPanel.vue`、`useDispute.js`                                  | 无     | 小     | 自测流转顺畅             |
+| M5   | 角色扮演 UI    | 切换买家/商家             | `ChatPanel.vue`、`useDispute.js`                                  | 无     | 小     | 切身份后消息 role 正确     |
 | M6-1 | FactCard   | 字段补全                | `FactCard.vue`                                                   | M3    | 小     | 关键事实可见             |
 | M6-2 | ScriptCard | `usage_tip`         | `ScriptCard.vue`                                                 | M3    | 极小    | 展示 usage_tip       |
 
@@ -119,21 +119,21 @@ flowchart LR
 约定：`状态` 取 `pending` | `in_progress` | `done` | `blocked`；`备注` 可写 PR 分支、阻塞原因、完成日期。
 
 
-| 编号   | 状态      | 备注  |
-| ---- | ------- | --- |
-| M1   | pending |     |
-| M2-1 | pending |     |
-| M2-2 | pending |     |
-| M2-3 | pending |     |
-| M2-4 | pending |     |
-| M3-1 | pending |     |
-| M3-2 | pending |     |
-| M4-1 | pending |     |
-| M4-2 | pending |     |
-| M4-3 | pending |     |
-| M5   | pending |     |
-| M6-1 | pending |     |
-| M6-2 | pending |     |
+| 编号   | 状态      | 备注                |
+| ---- | ------- | ----------------- |
+| M1   | pending |                   |
+| M2-1 | pending |                   |
+| M2-2 | pending |                   |
+| M2-3 | pending |                   |
+| M2-4 | pending |                   |
+| M3-1 | pending |                   |
+| M3-2 | pending |                   |
+| M4-1 | pending |                   |
+| M4-2 | pending |                   |
+| M4-3 | pending |                   |
+| M5   | done    | 已实现商家/买家切换，无场景下拉。 |
+| M6-1 | pending |                   |
+| M6-2 | pending |                   |
 
 
 ---
@@ -144,5 +144,6 @@ flowchart LR
 | 日期         | 说明                           |
 | ---------- | ---------------------------- |
 | 2026-05-06 | 初版：淘宝规则抓取入库、人工扮演买家、计划总表与状态表。 |
+| 2026-05-06 | M5：去掉测试场景下拉，仅保留发送身份切换；已实现前端。 |
 
 

@@ -1,0 +1,2000 @@
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+    "empty": false,
+    "model": [
+      {
+        "category": {
+          "categoryId": 1148,
+          "categoryName": "交易管理",
+          "childCategory": [
+            {
+              "categoryId": 1149,
+              "categoryName": "物流规范"
+            }
+          ]
+        },
+        "commentStatus": "CLOSE_HIDE",
+        "identityResultDTO": {
+          "buCode": 1
+        },
+        "lastCategoryId": 1149,
+        "lastCategoryName": "物流规范",
+        "modifiedTime": "2026-04-09 10:10:28",
+        "picUrl": "",
+        "ruleId": 10000177,
+        "ruleOrder": 0,
+        "ruleTitle": "淘宝网发货管理规范",
+        "ruleType": "FROMAL_RULE"
+      },
+      {
+        "category": {
+          "categoryId": 1148,
+          "categoryName": "交易管理",
+          "childCategory": [
+            {
+              "categoryId": 1149,
+              "categoryName": "物流规范"
+            }
+          ]
+        },
+        "commentStatus": "CLOSE_HIDE",
+        "identityResultDTO": {
+          "buCode": 1
+        },
+        "lastCategoryId": 1149,
+        "lastCategoryName": "物流规范",
+        "modifiedTime": "2023-05-31 15:29:38",
+        "picUrl": "",
+        "ruleId": 20003084,
+        "ruleOrder": 0,
+        "ruleTitle": "淘宝网物流信息管理规范",
+        "ruleType": "FROMAL_RULE"
+      }
+    ],
+    "total": 2,
+    "usedTime": 0
+  },
+  "ret": [
+    "SUCCESS::success"
+  ],
+  "traceId": "example",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-10-20 13:53:20",
+              "picUrl": "",
+              "ruleId": 20006772,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台物流自动拦截服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-08-14 16:59:08",
+              "picUrl": "",
+              "ruleId": 20008291,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网安心兑换服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-08-14 16:54:45",
+              "picUrl": "",
+              "ruleId": 20008290,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网安心提货服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-08-11 09:49:19",
+              "picUrl": "",
+              "ruleId": 20008213,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台“顺丰包邮”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-07-28 22:00:00",
+              "picUrl": "",
+              "ruleId": 5507,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网七天无理由退货规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-07-21 12:41:23",
+              "picUrl": "",
+              "ruleId": 20008050,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝服饰品质联盟“不符包赔” 服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-04-15 16:00:00",
+              "picUrl": "",
+              "ruleId": 20007253,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网企业购“支持开票” 服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-03-13 16:51:55",
+              "picUrl": "",
+              "ruleId": 20007255,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“不适包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-03-12 00:00:00",
+              "picUrl": "",
+              "ruleId": 20006369,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“官方鉴别”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-01-22 11:45:54",
+              "picUrl": "",
+              "ruleId": 20006989,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网果径无忧服务规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 34,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "215043b117781180958925430e11ae",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2025-01-05 13:50:15",
+              "picUrl": "",
+              "ruleId": 20006892,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“加价选顺丰”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-10-24 16:35:41",
+              "picUrl": "",
+              "ruleId": 20003921,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“先鉴后发”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:40:14",
+              "picUrl": "",
+              "ruleId": 20000501,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“伤亡大病包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:39:01",
+              "picUrl": "",
+              "ruleId": 20001191,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“材质不符赔三”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:36:31",
+              "picUrl": "",
+              "ruleId": 20004501,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“产地直发”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:31:18",
+              "picUrl": "",
+              "ruleId": 20005008,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“试饮可退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:30:03",
+              "picUrl": "",
+              "ruleId": 20004663,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“不爱吃包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:29:46",
+              "picUrl": "",
+              "ruleId": 20004352,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“化冻包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:28:23",
+              "picUrl": "",
+              "ruleId": 20000500,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“坏单包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:27:18",
+              "picUrl": "",
+              "ruleId": 20000504,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“破损包退”服务规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 34,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147844417781184239188980e1247",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-27 16:25:11",
+              "picUrl": "",
+              "ruleId": 20003601,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“足斤足两”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 20004347,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“今日发”、“24小时发”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 20005591,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“15天包活”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 20002634,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“海外直邮”服务规范",
+              "ruleType": "FROMAL_RULE",
+              "summary": "淘宝网“海外直邮”服务规范"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 20003940,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“破损包赔”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 20004262,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“送货上门”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2024-09-12 10:00:05",
+              "picUrl": "",
+              "ruleId": 20006228,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“退货宝”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-12-25 17:39:26",
+              "picUrl": "",
+              "ruleId": 20000676,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“以旧换新”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-09-15 10:04:59",
+              "picUrl": "",
+              "ruleId": 20003932,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“安心质检”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-06-07 16:56:26",
+              "picUrl": "",
+              "ruleId": 20003068,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“上门安装”服务规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 34,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147844417781184403181924e1247",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-06-07 16:55:27",
+              "picUrl": "",
+              "ruleId": 20003067,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“送货入户并安装”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-05-24 12:01:48",
+              "picUrl": "",
+              "ruleId": 20003066,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“送装一体”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2023-03-20 19:06:20",
+              "picUrl": "",
+              "ruleId": 20002739,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“准时装”服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1150,
+                          "categoryName": "服务保障"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1150,
+              "lastCategoryName": "服务保障",
+              "modifiedTime": "2021-05-07 19:35:27",
+              "ruleId": 11003975,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网“视频教学”服务规范",
+              "ruleType": "EXPLAIN_RULE"
+          }
+      ],
+      "total": 34,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781185493982578e1052",
+  "v": "1.0"
+}
+
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1151,
+                          "categoryName": "评价规范"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1151,
+              "lastCategoryName": "评价规范",
+              "modifiedTime": "2026-01-23 14:00:00",
+              "picUrl": "",
+              "ruleId": 4149,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网商品评价、销量特殊计算逻辑说明",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1151,
+                          "categoryName": "评价规范"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1151,
+              "lastCategoryName": "评价规范",
+              "modifiedTime": "2024-12-16 13:50:34",
+              "picUrl": "",
+              "ruleId": 2352,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网评价规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 2,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781185681283819e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1152,
+                          "categoryName": "超时说明"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1152,
+              "lastCategoryName": "超时说明",
+              "modifiedTime": "2026-01-02 10:00:00",
+              "picUrl": "",
+              "ruleId": 1687,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网超时说明",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 1,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781185880935166e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 20501,
+                          "categoryName": "服务规范"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 20501,
+              "lastCategoryName": "服务规范",
+              "modifiedTime": "2026-03-09 13:48:06",
+              "picUrl": "",
+              "ruleId": 20009588,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网安装服务管理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 20501,
+                          "categoryName": "服务规范"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 20501,
+              "lastCategoryName": "服务规范",
+              "modifiedTime": "2025-09-01 20:00:00",
+              "picUrl": "",
+              "ruleId": 20004835,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网卖家售后服务规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1148,
+                  "categoryName": "交易管理",
+                  "childCategory": [
+                      {
+                          "categoryId": 20501,
+                          "categoryName": "服务规范"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 20501,
+              "lastCategoryName": "服务规范",
+              "modifiedTime": "2024-04-03 11:28:31",
+              "picUrl": "",
+              "ruleId": 20004836,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝网卖家客户服务规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 3,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781186181987157e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1154,
+                          "categoryName": "争议处理基本规则"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1154,
+              "lastCategoryName": "争议处理基本规则",
+              "modifiedTime": "2024-09-12 16:00:00",
+              "picUrl": "",
+              "ruleId": 99,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台争议处理规则",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 1,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781186451781369e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2026-01-06 10:28:17",
+              "picUrl": "",
+              "ruleId": 11004304,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台食品类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2025-12-31 15:30:14",
+              "picUrl": "",
+              "ruleId": 20009183,
+              "ruleOrder": 0,
+              "ruleTitle": " 淘宝平台餐饮美食卡券商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2025-10-17 13:59:55",
+              "picUrl": "",
+              "ruleId": 20008762,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台成人用品类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2025-10-09 11:13:13",
+              "picUrl": "",
+              "ruleId": 20008682,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台电动车类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2025-01-21 10:00:00",
+              "picUrl": "",
+              "ruleId": 20006997,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台二手奢侈品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2024-12-04 10:00:00",
+              "picUrl": "",
+              "ruleId": 20006702,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台汽车类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2024-09-26 10:00:00",
+              "picUrl": "",
+              "ruleId": 20006317,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台票务类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2024-09-19 00:00:00",
+              "picUrl": "",
+              "ruleId": 20006274,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台盲盒类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2022-08-29 15:45:35",
+              "picUrl": "",
+              "ruleId": 20001370,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台家装主材类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-12-31 22:28:03",
+              "picUrl": "",
+              "ruleId": 20000121,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台家具类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 25,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781186621832688e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-12-31 22:25:06",
+              "picUrl": "",
+              "ruleId": 20000120,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台珠宝饰品类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-11-22 11:01:31",
+              "picUrl": "",
+              "ruleId": 11004831,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台箱包类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-11-03 18:02:18",
+              "picUrl": "",
+              "ruleId": 11004830,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台手表类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-09-17 14:13:32",
+              "picUrl": "",
+              "ruleId": 11004590,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台宠物类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-09-17 14:05:35",
+              "picUrl": "",
+              "ruleId": 11004589,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台鲜花绿植类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-07-13 20:42:13",
+              "picUrl": "",
+              "ruleId": 11004255,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台服务类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-07-13 20:38:38",
+              "picUrl": "",
+              "ruleId": 11004254,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台大件类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-07-13 20:36:42",
+              "picUrl": "",
+              "ruleId": 11004253,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台二手数码类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-07-13 20:34:52",
+              "picUrl": "",
+              "ruleId": 11004252,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台虚拟类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-07-13 20:27:54",
+              "picUrl": "",
+              "ruleId": 11004249,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台定制类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 25,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781186790533890e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-04-01 17:39:30",
+              "picUrl": "",
+              "ruleId": 11003757,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台鞋类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-04-01 17:11:04",
+              "picUrl": "",
+              "ruleId": 11003755,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台手机类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-02-26 16:37:34",
+              "picUrl": "",
+              "ruleId": 11003626,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台大家电类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-02-26 16:31:58",
+              "picUrl": "",
+              "ruleId": 11003625,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台服饰类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1155,
+                          "categoryName": "特殊品类争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1155,
+              "lastCategoryName": "特殊品类争议处理",
+              "modifiedTime": "2021-02-22 14:30:57",
+              "picUrl": "",
+              "ruleId": 11003608,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台生鲜类商品争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 25,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781186988695310e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1156,
+                          "categoryName": "特殊交易争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1156,
+              "lastCategoryName": "特殊交易争议处理",
+              "modifiedTime": "2021-07-19 10:23:33",
+              "picUrl": "",
+              "ruleId": 11004251,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台官方物流境外交易争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1156,
+                          "categoryName": "特殊交易争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1156,
+              "lastCategoryName": "特殊交易争议处理",
+              "modifiedTime": "2021-07-13 20:30:42",
+              "picUrl": "",
+              "ruleId": 11004250,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台直邮海外交易争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1156,
+                          "categoryName": "特殊交易争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1156,
+              "lastCategoryName": "特殊交易争议处理",
+              "modifiedTime": "2021-07-13 20:25:21",
+              "picUrl": "",
+              "ruleId": 11004248,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台代购服务争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 1156,
+                          "categoryName": "特殊交易争议处理"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 1156,
+              "lastCategoryName": "特殊交易争议处理",
+              "modifiedTime": "2021-07-13 20:17:20",
+              "picUrl": "",
+              "ruleId": 11004247,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台当面交易争议处理规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 4,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781187203336836e1052",
+  "v": "1.0"
+}
+
+{
+  "api": "mtop.alibaba.rulechannel.newrule.rule.list",
+  "data": {
+      "empty": false,
+      "model": [
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 41009,
+                          "categoryName": "纠纷投申诉"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 41009,
+              "lastCategoryName": "纠纷投申诉",
+              "modifiedTime": "2025-03-05 10:00:00",
+              "picUrl": "",
+              "ruleId": 20007196,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台标错类事件处理标准",
+              "ruleType": "FROMAL_RULE"
+          },
+          {
+              "category": {
+                  "categoryId": 1153,
+                  "categoryName": "争议处理",
+                  "childCategory": [
+                      {
+                          "categoryId": 41009,
+                          "categoryName": "纠纷投申诉"
+                      }
+                  ]
+              },
+              "commentStatus": "CLOSE_HIDE",
+              "identityResultDTO": {
+                  "buCode": 1
+              },
+              "lastCategoryId": 41009,
+              "lastCategoryName": "纠纷投申诉",
+              "modifiedTime": "2024-08-19 10:32:22",
+              "picUrl": "",
+              "ruleId": 20005997,
+              "ruleOrder": 0,
+              "ruleTitle": "淘宝平台卖家交易纠纷申诉管理规范",
+              "ruleType": "FROMAL_RULE"
+          }
+      ],
+      "total": 2,
+      "usedTime": 0
+  },
+  "ret": [
+      "SUCCESS::success"
+  ],
+  "traceId": "2147848317781187393838103e1052",
+  "v": "1.0"
+}

@@ -1,0 +1,524 @@
+[
+  {
+    "_说明": "本文件由本脚本生成/合并，供 scripts/crawl_rule_documents.py 抓取详情正文。每条有效记录需含：enabled（默认 true）、doc_id、doc_name、category、url。本占位条 enabled 为 false，不参与抓取；重新执行导入时会自动保持在本文件最前。",
+    "enabled": false
+  },
+  {
+    "enabled": true,
+    "doc_id": "争议处理基本规则_淘宝平台争议处理规则_1154_99",
+    "doc_name": "淘宝平台争议处理规则",
+    "category": "争议处理/争议处理基本规则",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=99&cId=1154#/rule/detail?ruleId=99&cId=1154"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊交易争议处理_淘宝平台代购服务争议处理规范_1156_11004248",
+    "doc_name": "淘宝平台代购服务争议处理规范",
+    "category": "争议处理/特殊交易争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004248&cId=1156#/rule/detail?ruleId=11004248&cId=1156"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊交易争议处理_淘宝平台官方物流境外交易争议处理规范_1156_11004251",
+    "doc_name": "淘宝平台官方物流境外交易争议处理规范",
+    "category": "争议处理/特殊交易争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004251&cId=1156#/rule/detail?ruleId=11004251&cId=1156"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊交易争议处理_淘宝平台当面交易争议处理规范_1156_11004247",
+    "doc_name": "淘宝平台当面交易争议处理规范",
+    "category": "争议处理/特殊交易争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004247&cId=1156#/rule/detail?ruleId=11004247&cId=1156"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊交易争议处理_淘宝平台直邮海外交易争议处理规范_1156_11004250",
+    "doc_name": "淘宝平台直邮海外交易争议处理规范",
+    "category": "争议处理/特殊交易争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004250&cId=1156#/rule/detail?ruleId=11004250&cId=1156"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台二手奢侈品争议处理规范_1155_20006997",
+    "doc_name": "淘宝平台二手奢侈品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006997&cId=1155#/rule/detail?ruleId=20006997&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台二手数码类商品争议处理规范_1155_11004253",
+    "doc_name": "淘宝平台二手数码类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004253&cId=1155#/rule/detail?ruleId=11004253&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台大件类商品争议处理规范_1155_11004254",
+    "doc_name": "淘宝平台大件类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004254&cId=1155#/rule/detail?ruleId=11004254&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台大家电类商品争议处理规范_1155_11003626",
+    "doc_name": "淘宝平台大家电类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003626&cId=1155#/rule/detail?ruleId=11003626&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台定制类商品争议处理规范_1155_11004249",
+    "doc_name": "淘宝平台定制类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004249&cId=1155#/rule/detail?ruleId=11004249&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台宠物类商品争议处理规范_1155_11004590",
+    "doc_name": "淘宝平台宠物类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004590&cId=1155#/rule/detail?ruleId=11004590&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台家具类商品争议处理规范_1155_20000121",
+    "doc_name": "淘宝平台家具类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000121&cId=1155#/rule/detail?ruleId=20000121&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台家装主材类商品争议处理规范_1155_20001370",
+    "doc_name": "淘宝平台家装主材类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20001370&cId=1155#/rule/detail?ruleId=20001370&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台成人用品类商品争议处理规范_1155_20008762",
+    "doc_name": "淘宝平台成人用品类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008762&cId=1155#/rule/detail?ruleId=20008762&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台手机类商品争议处理规范_1155_11003755",
+    "doc_name": "淘宝平台手机类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003755&cId=1155#/rule/detail?ruleId=11003755&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台手表类商品争议处理规范_1155_11004830",
+    "doc_name": "淘宝平台手表类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004830&cId=1155#/rule/detail?ruleId=11004830&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台服务类商品争议处理规范_1155_11004255",
+    "doc_name": "淘宝平台服务类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004255&cId=1155#/rule/detail?ruleId=11004255&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台服饰类商品争议处理规范_1155_11003625",
+    "doc_name": "淘宝平台服饰类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003625&cId=1155#/rule/detail?ruleId=11003625&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台汽车类商品争议处理规范_1155_20006702",
+    "doc_name": "淘宝平台汽车类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006702&cId=1155#/rule/detail?ruleId=20006702&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台珠宝饰品类商品争议处理规范_1155_20000120",
+    "doc_name": "淘宝平台珠宝饰品类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000120&cId=1155#/rule/detail?ruleId=20000120&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台生鲜类商品争议处理规范_1155_11003608",
+    "doc_name": "淘宝平台生鲜类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003608&cId=1155#/rule/detail?ruleId=11003608&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台电动车类商品争议处理规范_1155_20008682",
+    "doc_name": "淘宝平台电动车类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008682&cId=1155#/rule/detail?ruleId=20008682&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台盲盒类商品争议处理规范_1155_20006274",
+    "doc_name": "淘宝平台盲盒类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006274&cId=1155#/rule/detail?ruleId=20006274&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台票务类商品争议处理规范_1155_20006317",
+    "doc_name": "淘宝平台票务类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006317&cId=1155#/rule/detail?ruleId=20006317&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台箱包类商品争议处理规范_1155_11004831",
+    "doc_name": "淘宝平台箱包类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004831&cId=1155#/rule/detail?ruleId=11004831&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台虚拟类商品争议处理规范_1155_11004252",
+    "doc_name": "淘宝平台虚拟类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004252&cId=1155#/rule/detail?ruleId=11004252&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台鞋类商品争议处理规范_1155_11003757",
+    "doc_name": "淘宝平台鞋类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003757&cId=1155#/rule/detail?ruleId=11003757&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台食品类商品争议处理规范_1155_11004304",
+    "doc_name": "淘宝平台食品类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004304&cId=1155#/rule/detail?ruleId=11004304&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台餐饮美食卡券商品争议处理规范_1155_20009183",
+    "doc_name": "淘宝平台餐饮美食卡券商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20009183&cId=1155#/rule/detail?ruleId=20009183&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "特殊品类争议处理_淘宝平台鲜花绿植类商品争议处理规范_1155_11004589",
+    "doc_name": "淘宝平台鲜花绿植类商品争议处理规范",
+    "category": "争议处理/特殊品类争议处理",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11004589&cId=1155#/rule/detail?ruleId=11004589&cId=1155"
+  },
+  {
+    "enabled": true,
+    "doc_id": "纠纷投申诉_淘宝平台卖家交易纠纷申诉管理规范_41009_20005997",
+    "doc_name": "淘宝平台卖家交易纠纷申诉管理规范",
+    "category": "争议处理/纠纷投申诉",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20005997&cId=41009#/rule/detail?ruleId=20005997&cId=41009"
+  },
+  {
+    "enabled": true,
+    "doc_id": "纠纷投申诉_淘宝平台标错类事件处理标准_41009_20007196",
+    "doc_name": "淘宝平台标错类事件处理标准",
+    "category": "争议处理/纠纷投申诉",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20007196&cId=41009#/rule/detail?ruleId=20007196&cId=41009"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝平台_顺丰包邮_服务规范_1150_20008213",
+    "doc_name": "淘宝平台“顺丰包邮”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008213&cId=1150#/rule/detail?ruleId=20008213&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝平台物流自动拦截服务规范_1150_20006772",
+    "doc_name": "淘宝平台物流自动拦截服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006772&cId=1150#/rule/detail?ruleId=20006772&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝服饰品质联盟_不符包赔_服务规范_1150_20008050",
+    "doc_name": "淘宝服饰品质联盟“不符包赔” 服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008050&cId=1150#/rule/detail?ruleId=20008050&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_15天包活_服务规范_1150_20005591",
+    "doc_name": "淘宝网“15天包活”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20005591&cId=1150#/rule/detail?ruleId=20005591&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_上门安装_服务规范_1150_20003068",
+    "doc_name": "淘宝网“上门安装”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003068&cId=1150#/rule/detail?ruleId=20003068&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_不爱吃包退_服务规范_1150_20004663",
+    "doc_name": "淘宝网“不爱吃包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004663&cId=1150#/rule/detail?ruleId=20004663&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_不适包退_服务规范_1150_20007255",
+    "doc_name": "淘宝网“不适包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20007255&cId=1150#/rule/detail?ruleId=20007255&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_产地直发_服务规范_1150_20004501",
+    "doc_name": "淘宝网“产地直发”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004501&cId=1150#/rule/detail?ruleId=20004501&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_今日发_24小时发_服务规范_1150_20004347",
+    "doc_name": "淘宝网“今日发”、“24小时发”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004347&cId=1150#/rule/detail?ruleId=20004347&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_以旧换新_服务规范_1150_20000676",
+    "doc_name": "淘宝网“以旧换新”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000676&cId=1150#/rule/detail?ruleId=20000676&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_伤亡大病包退_服务规范_1150_20000501",
+    "doc_name": "淘宝网“伤亡大病包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000501&cId=1150#/rule/detail?ruleId=20000501&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_先鉴后发_服务规范_1150_20003921",
+    "doc_name": "淘宝网“先鉴后发”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003921&cId=1150#/rule/detail?ruleId=20003921&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_准时装_服务规范_1150_20002739",
+    "doc_name": "淘宝网“准时装”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20002739&cId=1150#/rule/detail?ruleId=20002739&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_加价选顺丰_服务规范_1150_20006892",
+    "doc_name": "淘宝网“加价选顺丰”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006892&cId=1150#/rule/detail?ruleId=20006892&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_化冻包退_服务规范_1150_20004352",
+    "doc_name": "淘宝网“化冻包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004352&cId=1150#/rule/detail?ruleId=20004352&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_坏单包退_服务规范_1150_20000500",
+    "doc_name": "淘宝网“坏单包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000500&cId=1150#/rule/detail?ruleId=20000500&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_安心质检_服务规范_1150_20003932",
+    "doc_name": "淘宝网“安心质检”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003932&cId=1150#/rule/detail?ruleId=20003932&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_官方鉴别_服务规范_1150_20006369",
+    "doc_name": "淘宝网“官方鉴别”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006369&cId=1150#/rule/detail?ruleId=20006369&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_材质不符赔三_服务规范_1150_20001191",
+    "doc_name": "淘宝网“材质不符赔三”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20001191&cId=1150#/rule/detail?ruleId=20001191&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_海外直邮_服务规范_1150_20002634",
+    "doc_name": "淘宝网“海外直邮”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20002634&cId=1150#/rule/detail?ruleId=20002634&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_破损包赔_服务规范_1150_20003940",
+    "doc_name": "淘宝网“破损包赔”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003940&cId=1150#/rule/detail?ruleId=20003940&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_破损包退_服务规范_1150_20000504",
+    "doc_name": "淘宝网“破损包退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20000504&cId=1150#/rule/detail?ruleId=20000504&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_视频教学_服务规范_1150_11003975",
+    "doc_name": "淘宝网“视频教学”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=11003975&cId=1150#/rule/detail?ruleId=11003975&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_试饮可退_服务规范_1150_20005008",
+    "doc_name": "淘宝网“试饮可退”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20005008&cId=1150#/rule/detail?ruleId=20005008&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_足斤足两_服务规范_1150_20003601",
+    "doc_name": "淘宝网“足斤足两”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003601&cId=1150#/rule/detail?ruleId=20003601&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_退货宝_服务规范_1150_20006228",
+    "doc_name": "淘宝网“退货宝”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006228&cId=1150#/rule/detail?ruleId=20006228&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_送装一体_服务规范_1150_20003066",
+    "doc_name": "淘宝网“送装一体”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003066&cId=1150#/rule/detail?ruleId=20003066&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_送货上门_服务规范_1150_20004262",
+    "doc_name": "淘宝网“送货上门”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004262&cId=1150#/rule/detail?ruleId=20004262&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网_送货入户并安装_服务规范_1150_20003067",
+    "doc_name": "淘宝网“送货入户并安装”服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003067&cId=1150#/rule/detail?ruleId=20003067&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网七天无理由退货规范_1150_5507",
+    "doc_name": "淘宝网七天无理由退货规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=5507&cId=1150#/rule/detail?ruleId=5507&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网企业购_支持开票_服务规范_1150_20007253",
+    "doc_name": "淘宝网企业购“支持开票” 服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20007253&cId=1150#/rule/detail?ruleId=20007253&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网安心兑换服务规范_1150_20008291",
+    "doc_name": "淘宝网安心兑换服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008291&cId=1150#/rule/detail?ruleId=20008291&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网安心提货服务规范_1150_20008290",
+    "doc_name": "淘宝网安心提货服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20008290&cId=1150#/rule/detail?ruleId=20008290&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务保障_淘宝网果径无忧服务规范_1150_20006989",
+    "doc_name": "淘宝网果径无忧服务规范",
+    "category": "交易管理/服务保障",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20006989&cId=1150#/rule/detail?ruleId=20006989&cId=1150"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务规范_淘宝网卖家售后服务规范_20501_20004835",
+    "doc_name": "淘宝网卖家售后服务规范",
+    "category": "交易管理/服务规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004835&cId=20501#/rule/detail?ruleId=20004835&cId=20501"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务规范_淘宝网卖家客户服务规范_20501_20004836",
+    "doc_name": "淘宝网卖家客户服务规范",
+    "category": "交易管理/服务规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20004836&cId=20501#/rule/detail?ruleId=20004836&cId=20501"
+  },
+  {
+    "enabled": true,
+    "doc_id": "服务规范_淘宝网安装服务管理规范_20501_20009588",
+    "doc_name": "淘宝网安装服务管理规范",
+    "category": "交易管理/服务规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20009588&cId=20501#/rule/detail?ruleId=20009588&cId=20501"
+  },
+  {
+    "enabled": true,
+    "doc_id": "物流规范_淘宝网发货管理规范_1149_10000177",
+    "doc_name": "淘宝网发货管理规范",
+    "category": "交易管理/物流规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=10000177&cId=1149#/rule/detail?ruleId=10000177&cId=1149"
+  },
+  {
+    "enabled": true,
+    "doc_id": "物流规范_淘宝网物流信息管理规范_1149_20003084",
+    "doc_name": "淘宝网物流信息管理规范",
+    "category": "交易管理/物流规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=20003084&cId=1149#/rule/detail?ruleId=20003084&cId=1149"
+  },
+  {
+    "enabled": true,
+    "doc_id": "评价规范_淘宝网商品评价_销量特殊计算逻辑说明_1151_4149",
+    "doc_name": "淘宝网商品评价、销量特殊计算逻辑说明",
+    "category": "交易管理/评价规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=4149&cId=1151#/rule/detail?ruleId=4149&cId=1151"
+  },
+  {
+    "enabled": true,
+    "doc_id": "评价规范_淘宝网评价规范_1151_2352",
+    "doc_name": "淘宝网评价规范",
+    "category": "交易管理/评价规范",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=2352&cId=1151#/rule/detail?ruleId=2352&cId=1151"
+  },
+  {
+    "enabled": true,
+    "doc_id": "超时说明_淘宝网超时说明_1152_1687",
+    "doc_name": "淘宝网超时说明",
+    "category": "交易管理/超时说明",
+    "url": "https://rule.taobao.com/?type=detail&ruleId=1687&cId=1152#/rule/detail?ruleId=1687&cId=1152"
+  }
+]

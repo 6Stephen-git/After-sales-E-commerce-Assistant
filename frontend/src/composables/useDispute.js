@@ -19,6 +19,8 @@ export function use_dispute() {
   const report = ref(null)
   const loading = ref(false)
   const input_text = ref('')
+  // ---------- 发送身份：商家侧或用户扮演买家，决定 append_message 的 role ----------
+  const sender_role = ref('merchant')
   const error_message = ref('')
   const message_id_seed = ref(messages.value.length + 1)
 
@@ -40,13 +42,14 @@ export function use_dispute() {
     message_id_seed.value += 1
   }
 
-  // ---------- 消息发送：商家手动发送，保持发送权 ----------
+  // ---------- 消息发送：按当前 sender_role 写入 buyer 或 merchant ----------
   function send_message() {
-    const merchant_text = input_text.value.trim()
-    if (!merchant_text) {
+    const raw_text = input_text.value.trim()
+    if (!raw_text) {
       return
     }
-    append_message('merchant', merchant_text)
+    const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
+    append_message(role, raw_text)
     input_text.value = ''
   }
 
@@ -85,6 +88,7 @@ export function use_dispute() {
     report,
     loading,
     input_text,
+    sender_role,
     error_message,
     has_report,
     append_message,

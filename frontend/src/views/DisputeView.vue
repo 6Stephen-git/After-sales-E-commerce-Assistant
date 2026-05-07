@@ -4,8 +4,10 @@
       <ChatPanel
         :messages="messages"
         :input_text="input_text"
+        :sender_role="sender_role"
         :loading="loading"
         @update:input_text="update_input_text"
+        @update:sender_role="update_sender_role"
         @send_message="send_message"
         @request_ai_help="request_ai_help"
       />
@@ -31,12 +33,26 @@ import StrategyPanel from '../components/strategy/StrategyPanel.vue'
 import { use_dispute } from '../composables/useDispute'
 
 // ---------- 组合式状态：管理纠纷对话与分析请求 ----------
-const { messages, report, loading, input_text, error_message, send_message, apply_script, request_ai_help } =
-  use_dispute()
+const {
+  messages,
+  report,
+  loading,
+  input_text,
+  sender_role,
+  error_message,
+  send_message,
+  apply_script,
+  request_ai_help
+} = use_dispute()
 
 // ---------- 输入同步：承接 ChatPanel 的双向绑定事件 ----------
 function update_input_text(value) {
   input_text.value = value
+}
+
+// ---------- 发送身份同步：商家 / 买家切换由子组件回写 ----------
+function update_sender_role(value) {
+  sender_role.value = value
 }
 </script>
 
