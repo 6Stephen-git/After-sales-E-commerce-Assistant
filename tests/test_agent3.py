@@ -14,6 +14,7 @@ if ROOT_DIR not in sys.path:
 
 
 from backend.agents.agent3.script_generator import generate
+import backend.agents.agent3.script_generator as script_generator_module
 from backend.tools.agent3_tools import get_script_template
 from schemas import (
     SCRIPT_COMPENSATE,
@@ -79,16 +80,16 @@ class TestAgent3Generate:
 
         output = generate(input_data)
         assert output.recommended_version == SCRIPT_NEGOTIATE
-        assert "咱们可以先按88.50元协商处理" in output.negotiate_version
-        assert "您看这样安排是否可以" in output.negotiate_version
+        assert "ORDER-A3-002" in output.negotiate_version
+        assert output.negotiate_version.strip() != ""
         assert output.usage_tip and "协商版" in output.usage_tip
 
     def test_generate_should_recommend_compensate_version(self):
-        """认赔策略场景：推荐认赔版并包含事实描述。"""
+        """善后策略场景：推荐善后版并包含事实描述。"""
         input_data = ScriptInput(
             strategy_output=StrategyOutput(
                 strategy=STRATEGY_COMPENSATE,
-                reasoning="高质量瑕疵证据已形成闭环，认赔更稳妥",
+                reasoning="高质量瑕疵证据已形成闭环，主动善后更稳妥",
                 estimated_win_rate=0.8,
                 confidence=0.81,
             ),
@@ -106,7 +107,7 @@ class TestAgent3Generate:
         assert output.recommended_version == SCRIPT_COMPENSATE
         assert "破洞" in output.compensate_version
         assert "156.00元" in output.compensate_version
-        assert output.usage_tip and "认赔版" in output.usage_tip
+        assert output.usage_tip and "善后版" in output.usage_tip
 
     def test_generate_boundary_should_still_output_non_empty_scripts(self):
         """边界场景：字段缺失时依然生成可用三版话术。"""
@@ -129,6 +130,31 @@ class TestAgent3Generate:
         assert output.negotiate_version.strip() != ""
         assert output.compensate_version.strip() != ""
         assert output.usage_tip is not None
+
+    def test_generate_should_fallback_to_template_when_llm_unavailable(self, monkeypatch):
+        """LLM 不可用时继续走模板兜底。"""
+        monkeypatch.setattr(script_generator_module, "_llm_generate_scripts", lambda **kwargs: None)
+        input_data = ScriptInput(
+            strategy_output=StrategyOutput(strategy=STRATEGY_NEGOTIATE, reasoning="协商优先"),
+            facts=FactOutput(defect_type="色差", defect_location="衣领"),
+            order_id="ORDER-A3-010",
+            order_amount=66.0,
+        )
+        output = generate(input_data)
+        assert "ORDER-A3-010" in output.negotiate_version
+        assert output.negotiate_version.strip() != ""
+
+    def test_generate_should_compress_script_in_short_mode(self):
+        """情绪备注触发短句模式时，话术长度应受控。"""
+        input_data = ScriptInput(
+            strategy_output=StrategyOutput(strategy=STRATEGY_NEGOTIATE, reasoning="协商优先"),
+            facts=FactOutput(defect_type="色差", missing_evidence=["缺少近景图"]),
+            order_id="ORDER-A3-011",
+            order_amount=88.0,
+            emotion_note="买家一直催，要求马上处理",
+        )
+        output = generate(input_data)
+        assert len(output.negotiate_version) <= 40
 
 
 # ---------- 模板工具：三键模板均含占位符 ----------

@@ -28,16 +28,20 @@ export function use_dispute() {
   const has_report = computed(() => report.value !== null)
 
   // ---------- 消息追加：将一条对话记录追加到本地会话 ----------
-  function append_message(role, content) {
+  function append_message(role, content, image_url = '', image_name = '') {
     const normalized_content = String(content || '').trim()
-    if (!normalized_content) {
+    const normalized_image_url = String(image_url || '').trim()
+    const normalized_image_name = String(image_name || '').trim()
+    if (!normalized_content && !normalized_image_url) {
       return
     }
 
     messages.value.push({
       id: message_id_seed.value,
       role,
-      content: normalized_content
+      content: normalized_content,
+      image_url: normalized_image_url || undefined,
+      image_name: normalized_image_name || undefined
     })
     message_id_seed.value += 1
   }
@@ -51,6 +55,36 @@ export function use_dispute() {
     const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
     append_message(role, raw_text)
     input_text.value = ''
+  }
+
+  // ---------- 图片发送：读取本地图片为 data URL 并写入消息 ----------
+  async function send_image(file) {
+    if (!(file instanceof File)) {
+      return
+    }
+    if (!file.type?.startsWith('image/')) {
+      error_message.value = '仅支持发送图片文件'
+      return
+    }
+    try {
+      const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
+      const image_data_url = await read_file_as_data_url(file)
+      append_message(role, input_text.value.trim() || '[图片]', image_data_url, file.name)
+      input_text.value = ''
+      error_message.value = ''
+    } catch (error) {
+      error_message.value = error.message || '发送图片失败，请重试'
+    }
+  }
+
+  // ---------- 文件读取：将图片转换为可预览与可传输的 data URL ----------
+  function read_file_as_data_url(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result || ''))
+      reader.onerror = () => reject(new Error('读取图片失败，请重试'))
+      reader.readAsDataURL(file)
+    })
   }
 
   // ---------- 话术应用：把选中的 AI 话术填入输入框 ----------
@@ -73,7 +107,9 @@ export function use_dispute() {
         order_id: default_context.order_id,
         order_amount: default_context.order_amount,
         buyer_id: default_context.buyer_id,
-        image_urls: []
+        image_urls: messages.value
+          .map((item) => String(item.image_url || '').trim())
+          .filter((url) => Boolean(url))
       }
       report.value = await analyzeDispute(payload)
     } catch (error) {
@@ -93,6 +129,7 @@ export function use_dispute() {
     has_report,
     append_message,
     send_message,
+    send_image,
     apply_script,
     request_ai_help
   }

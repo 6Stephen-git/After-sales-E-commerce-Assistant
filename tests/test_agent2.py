@@ -14,6 +14,7 @@ if ROOT_DIR not in sys.path:
 
 
 from backend.agents.agent2.strategist import recommend
+import backend.agents.agent2.strategist as strategist_module
 from backend.tools.agent2_tools import match_rules, query_buyer_profile, search_similar_cases
 from schemas import (
     BuyerProfile,
@@ -29,7 +30,7 @@ from schemas import (
 # ---------- recommend：三典型策略 + 无规则无判例边界 ----------
 class TestAgent2Recommend:
     def test_recommend_compensate_when_high_quality_defect(self):
-        """高质量瑕疵证据，倾向认赔。"""
+        """高质量瑕疵证据，倾向体面善后策略。"""
         facts = FactOutput(
             goods_received=True,
             defect_type="破洞",
@@ -118,7 +119,9 @@ class TestAgent2Recommend:
 
         output = recommend(input_data)
         assert output.strategy == STRATEGY_NEGOTIATE, f"期望 negotiate，实际 {output.strategy}"
-        assert "综合判断" in output.reasoning or "规则与画像出现冲突" in output.reasoning
+        assert "客户意图：" in output.reasoning
+        assert "风险点：" in output.reasoning
+        assert "建议动作：" in output.reasoning
 
     def test_recommend_boundary_with_empty_rules_and_cases(self):
         """边界场景：无规则无判例时仍应输出合法策略。"""
@@ -135,6 +138,42 @@ class TestAgent2Recommend:
         output = recommend(input_data)
         assert output.strategy in {STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE}
         assert 0.0 <= output.confidence <= 1.0
+
+    def test_recommend_should_use_fallback_reasoning_when_llm_unavailable(self, monkeypatch):
+        """LLM不可用时，reasoning 仍应保持三段结构。"""
+        monkeypatch.setattr(strategist_module, "_llm_generate_reasoning", lambda **kwargs: None)
+        facts = FactOutput(evidence_quality="medium", missing_evidence=["缺少清晰图片"])
+        profile = BuyerProfile(buyer_id="buyer_fallback")
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=[],
+            similar_cases=[],
+            order_amount=120.0,
+        )
+        output = recommend(input_data)
+        assert "客户意图：" in output.reasoning
+        assert "风险点：" in output.reasoning
+        assert "建议动作：" in output.reasoning
+
+    def test_recommend_should_accept_llm_reasoning_when_format_valid(self, monkeypatch):
+        """LLM输出三段结构时应直接采用。"""
+        monkeypatch.setattr(
+            strategist_module,
+            "_llm_generate_reasoning",
+            lambda **kwargs: "客户意图：质量问题维权。\n风险点：证据链仍需补强。\n建议动作：先补证再提交平台申诉。",
+        )
+        facts = FactOutput(evidence_quality="high", defect_type="破洞")
+        profile = BuyerProfile(buyer_id="buyer_llm")
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=profile,
+            matched_rules=[],
+            similar_cases=[],
+            order_amount=220.0,
+        )
+        output = recommend(input_data)
+        assert output.reasoning.startswith("客户意图：")
 
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------

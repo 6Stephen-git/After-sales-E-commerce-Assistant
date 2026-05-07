@@ -6,11 +6,13 @@ Agent 1：事实还原员。
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput
 
 from backend.tools.agent1_tools import analyze_image
+from backend.tools.llm_client import chat_completion
 from backend.tools.platform_api import query_logistics
 
 LOG_PREFIX = "[Agent1]"
@@ -146,6 +148,105 @@ def _derive_confidence(evidence_quality: str, red_flag_count: int) -> float:
     return max(0.0, min(1.0, base - red_flag_count * 0.12))
 
 
+# ---------- LLM辅助：结构化解析与守门合并（模糊不判、缺证必问） ----------
+def _parse_json_text(raw_text: str) -> dict[str, Any] | None:
+    """
+    将 LLM 字符串结果解析为 JSON 对象。
+
+    参数:
+        raw_text: LLM 返回文本，可能含 markdown 代码块。
+
+    返回:
+        解析成功返回 dict，失败返回 None。
+    """
+    normalized = raw_text.strip()
+    if not normalized:
+        return None
+    if normalized.startswith("```"):
+        normalized = normalized.replace("```json", "").replace("```", "").strip()
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _parse_bool(value: Any) -> bool | None:
+    """
+    将 LLM 输出的布尔语义转为 bool。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "是"}:
+            return True
+        if lowered in {"false", "0", "no", "否"}:
+            return False
+    return None
+
+
+def _llm_extract_facts(text_context: str, image_result: dict[str, Any], logistics_normal: bool | None) -> dict[str, Any] | None:
+    """
+    调用 LLM 做二次事实审阅，重点识别“是否必须补证”。
+
+    参数:
+        text_context: 买家文本与聊天上下文。
+        image_result: 多模态图片分析原始结果。
+        logistics_normal: 物流是否正常。
+
+    返回:
+        约定字段字典，失败返回 None。
+    """
+    if not text_context and not image_result:
+        return None
+
+    system_prompt = (
+        "你是电商纠纷事实守门员。只做客观判断，不做责任归属。"
+        "若证据模糊、冲突或不足，必须要求补证，严禁臆断。"
+    )
+    user_prompt = (
+        "请根据买家文本、图片分析结果和物流状态输出JSON，不要输出其他文本。\n"
+        "字段要求：\n"
+        "- defect_type/defect_location/defect_edge/photo_background/wear_signs: 字符串，可缺省。\n"
+        "- has_tag_visible/goods_received: 布尔或null。\n"
+        "- need_clarify: 布尔，是否必须补证。\n"
+        "- confidence: 0到1浮点。\n"
+        "- missing_evidence/red_flags/clarify_requests/uncertainty_reasons: 字符串数组。\n"
+        "买家文本:\n"
+        f"{text_context or '（空）'}\n"
+        "图片分析结果:\n"
+        f"{json.dumps(image_result, ensure_ascii=False)}\n"
+        "物流是否正常:\n"
+        f"{logistics_normal}\n"
+    )
+    llm_text = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model_env_key="AGENT1_LLM_MODEL",
+        temperature=0.1,
+    )
+    if not llm_text:
+        return None
+    return _parse_json_text(llm_text)
+
+
+def _extend_unique(target_list: list[str], new_items: Any) -> None:
+    """
+    将字符串列表去重追加到目标列表。
+    """
+    if not isinstance(new_items, list):
+        return
+    for item in new_items:
+        text = str(item or "").strip()
+        if text and text not in target_list:
+            target_list.append(text)
+
+
 # ---------- 主入口：物流 + 多模态 + 规则化疑点，输出 FactOutput ----------
 def extract(materials: dict[str, Any]) -> FactOutput:
     """
@@ -204,6 +305,12 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     photo_background = image_result.get("background")
     wear_signs = image_result.get("wear_signs")
 
+    # 多模态返回“无法判断”时强制走不确定路径，避免错误事实带偏后续策略。
+    if isinstance(defect_type, str) and defect_type.strip() in {"无法判断", "不确定", "未知"}:
+        defect_type = None
+        missing_evidence.append("图片不清晰，请补拍瑕疵部位近景和全景各一张")
+        uncertainty_reasons.append("当前图片无法稳定识别瑕疵类型")
+
     if logistics_info and goods_received is False and logistics_info.is_signed:
         red_flags.append("买家称未收到货，但物流显示已签收")
 
@@ -212,6 +319,56 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     if has_tag_visible is False and isinstance(wear_signs, str) and wear_signs:
         red_flags.append("图片吊牌不可见，且存在使用痕迹描述")
+
+    # 通过 LLM 二次审阅事实，但只有“高置信且无需补证”时才允许覆盖字段。
+    llm_result = _llm_extract_facts(
+        text_context=text_context,
+        image_result=image_result,
+        logistics_normal=logistics_normal,
+    )
+    if isinstance(llm_result, dict):
+        llm_confidence_raw = llm_result.get("confidence")
+        try:
+            llm_confidence = float(llm_confidence_raw)
+        except (TypeError, ValueError):
+            llm_confidence = 0.0
+        parsed_need_clarify = _parse_bool(llm_result.get("need_clarify"))
+        need_clarify = parsed_need_clarify is True
+        can_override = llm_confidence >= 0.7 and not need_clarify
+
+        _extend_unique(missing_evidence, llm_result.get("missing_evidence"))
+        _extend_unique(red_flags, llm_result.get("red_flags"))
+        _extend_unique(uncertainty_reasons, llm_result.get("uncertainty_reasons"))
+        clarify_requests: list[str] = []
+        _extend_unique(clarify_requests, llm_result.get("clarify_requests"))
+        if clarify_requests:
+            _extend_unique(missing_evidence, clarify_requests)
+
+        if can_override:
+            llm_goods_received = _parse_bool(llm_result.get("goods_received"))
+            llm_has_tag_visible = _parse_bool(llm_result.get("has_tag_visible"))
+            llm_defect_type = str(llm_result.get("defect_type", "")).strip() or None
+            llm_defect_location = str(llm_result.get("defect_location", "")).strip() or None
+            llm_defect_edge = str(llm_result.get("defect_edge", "")).strip() or None
+            llm_photo_background = str(llm_result.get("photo_background", "")).strip() or None
+            llm_wear_signs = str(llm_result.get("wear_signs", "")).strip() or None
+
+            if goods_received is None and llm_goods_received is not None:
+                goods_received = llm_goods_received
+            if defect_type is None and llm_defect_type not in {None, "无法判断"}:
+                defect_type = llm_defect_type
+            if defect_location is None and llm_defect_location is not None:
+                defect_location = llm_defect_location
+            if defect_edge is None and llm_defect_edge not in {None, "无法判断"}:
+                defect_edge = llm_defect_edge
+            if has_tag_visible is None and llm_has_tag_visible is not None:
+                has_tag_visible = llm_has_tag_visible
+            if photo_background is None and llm_photo_background is not None:
+                photo_background = llm_photo_background
+            if wear_signs is None and llm_wear_signs is not None:
+                wear_signs = llm_wear_signs
+        else:
+            uncertainty_reasons.append("证据存在不确定性，已进入补证优先流程")
 
     evidence_quality = _derive_evidence_quality(
         has_text=bool(text_context),

@@ -7,6 +7,7 @@ Agent 3：话术生成员。
 from __future__ import annotations
 
 from typing import Dict, Optional
+import json
 
 from schemas import (
     SCRIPT_COMPENSATE,
@@ -20,6 +21,7 @@ from schemas import (
 )
 
 from backend.tools.agent3_tools import get_script_template
+from backend.tools.llm_client import chat_completion
 
 
 AGENT3_LOG_PREFIX = "[Agent3]"
@@ -150,14 +152,128 @@ def _build_usage_tip(input_data: ScriptInput, recommended_version: str) -> str:
     if recommended_version == SCRIPT_DEFENSE:
         return f"建议先用抗辩版，重点是补齐证据链后再提交平台；理由：{short_reason}"
     if recommended_version == SCRIPT_COMPENSATE:
-        return f"建议先用认赔版，优先止损并稳定买家情绪；理由：{short_reason}"
+        return f"建议优先用善后版：主动把问题收尾得漂亮，稳住体验与口碑；理由：{short_reason}"
     return f"建议先用协商版，先把分歧控制在可谈区间；理由：{short_reason}"
+
+
+# ---------- 风格感知：根据情绪备注与事实完整度决定长度与语气 ----------
+def _derive_tone_profile(input_data: ScriptInput) -> Dict[str, str]:
+    """
+    生成话术风格画像，指导 LLM 长短与语气。
+    """
+    emotion_note = _normalize_text(input_data.emotion_note, fallback="").lower()
+    short_keywords = ["急", "尽快", "马上", "催", "快点", "快处理"]
+    angry_keywords = ["生气", "投诉", "不满", "气愤", "差评"]
+    missing_evidence = bool(input_data.facts.missing_evidence)
+
+    length_style = "normal"
+    if any(word in emotion_note for word in short_keywords):
+        length_style = "short"
+    elif missing_evidence:
+        length_style = "medium"
+
+    tone_style = "professional"
+    if any(word in emotion_note for word in angry_keywords):
+        tone_style = "calm"
+    elif input_data.strategy_output.strategy == STRATEGY_COMPENSATE:
+        tone_style = "empathetic"
+
+    return {
+        "length_style": length_style,
+        "tone_style": tone_style,
+        "must_request_evidence": "yes" if missing_evidence else "no",
+    }
+
+
+def _compress_short_sentence(text: str, limit: int = 40) -> str:
+    """
+    在短句模式下裁剪话术长度，避免大段文本。
+    """
+    normalized = _normalize_text(text, fallback="")
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1] + "…"
+
+
+def _sanitize_script_text(text: str) -> str:
+    """
+    去除典型 AI 腔连接词，保持口语客服风格。
+    """
+    cleaned = _normalize_text(text, fallback="")
+    replacements = {
+        "尊敬的": "",
+        "为了更好地为您服务": "",
+        "首先": "先",
+        "其次": "然后",
+        "最后": "后续",
+    }
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    return cleaned.strip()
+
+
+def _parse_llm_script_json(raw_text: str) -> Dict[str, str] | None:
+    """
+    解析 LLM 输出的 JSON 三版话术。
+    """
+    normalized = raw_text.strip()
+    if normalized.startswith("```"):
+        normalized = normalized.replace("```json", "").replace("```", "").strip()
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    required_keys = {"defense_version", "negotiate_version", "compensate_version"}
+    if not required_keys.issubset(payload.keys()):
+        return None
+    result: Dict[str, str] = {}
+    for key in required_keys:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        result[key] = value.strip()
+    return result
+
+
+def _llm_generate_scripts(input_data: ScriptInput, variables: Dict[str, str], tone_profile: Dict[str, str]) -> Dict[str, str] | None:
+    """
+    通过 LLM 生成三版真人客服话术。
+    """
+    payload = {
+        "strategy": input_data.strategy_output.strategy,
+        "reasoning": input_data.strategy_output.reasoning,
+        "fact_summary": variables["fact_summary"],
+        "order_id": variables["order_id"],
+        "order_amount": variables["order_amount"],
+        "tone_profile": tone_profile,
+    }
+    llm_text = chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是资深电商客服。请输出JSON，包含 defense_version/negotiate_version/compensate_version 三个字段。"
+                    "要求自然口语、像真人客服，避免模板腔和AI味。"
+                    "若 tone_profile.length_style=short，每条尽量控制在40字内。"
+                    "若 must_request_evidence=yes，话术要先提出补证请求。"
+                ),
+            },
+            {"role": "user", "content": f"请生成三版话术：\n{json.dumps(payload, ensure_ascii=False)}"},
+        ],
+        model_env_key="AGENT3_LLM_MODEL",
+        temperature=0.5,
+    )
+    if not llm_text:
+        return None
+    return _parse_llm_script_json(llm_text)
 
 
 # ---------- 主入口：拉三策略模板并组装 ScriptOutput ----------
 def generate(input_data: ScriptInput) -> ScriptOutput:
     """
-    拉取三策略模板、填入变量，生成抗辩/协商/认赔三版话术及推荐标识。
+    拉取三策略模板、填入变量，生成抗辩/协商/善后三版话术及推荐标识。
 
     纯函数：内部通过 get_script_template 读文件，不在本函数内直接 open 网络；
     模板读取副作用封装在工具层。
@@ -179,6 +295,7 @@ def generate(input_data: ScriptInput) -> ScriptOutput:
         "fact_summary": fact_summary,
         "emotion_note": _normalize_text(input_data.emotion_note, fallback=""),
     }
+    tone_profile = _derive_tone_profile(input_data=input_data)
 
     defense_template = get_script_template(STRATEGY_DEFEND)
     negotiate_template = get_script_template(STRATEGY_NEGOTIATE)
@@ -187,6 +304,20 @@ def generate(input_data: ScriptInput) -> ScriptOutput:
     defense_version = _fill_template(defense_template, variables)
     negotiate_version = _fill_template(negotiate_template, variables)
     compensate_version = _fill_template(compensate_template, variables)
+
+    llm_scripts = _llm_generate_scripts(input_data=input_data, variables=variables, tone_profile=tone_profile)
+    if llm_scripts:
+        defense_version = llm_scripts["defense_version"]
+        negotiate_version = llm_scripts["negotiate_version"]
+        compensate_version = llm_scripts["compensate_version"]
+
+    defense_version = _sanitize_script_text(defense_version)
+    negotiate_version = _sanitize_script_text(negotiate_version)
+    compensate_version = _sanitize_script_text(compensate_version)
+    if tone_profile["length_style"] == "short":
+        defense_version = _compress_short_sentence(defense_version)
+        negotiate_version = _compress_short_sentence(negotiate_version)
+        compensate_version = _compress_short_sentence(compensate_version)
 
     recommended_version = _strategy_to_recommended_version(input_data.strategy_output.strategy)
     usage_tip = _build_usage_tip(input_data=input_data, recommended_version=recommended_version)

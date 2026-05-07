@@ -2,7 +2,7 @@
 const STRATEGY_LABEL_MAP = {
   defend: '抗辩',
   negotiate: '协商',
-  compensate: '认赔'
+  compensate: '体面善后'
 }
 
 const EVIDENCE_QUALITY_LABEL_MAP = {
@@ -20,7 +20,7 @@ const SENTIMENT_LABEL_MAP = {
 const SCRIPT_VERSION_LABEL_MAP = {
   defense_version: '抗辩版',
   negotiate_version: '协商版',
-  compensate_version: '认赔版'
+  compensate_version: '善后版'
 }
 
 // ---------- 映射函数：策略方向 ----------

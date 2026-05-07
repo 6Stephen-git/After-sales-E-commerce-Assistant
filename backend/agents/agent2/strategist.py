@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Dict, List, Tuple
+import json
 
 from schemas import (
     STRATEGY_COMPENSATE,
@@ -16,6 +17,7 @@ from schemas import (
     StrategyInput,
     StrategyOutput,
 )
+from backend.tools.llm_client import chat_completion
 
 
 AGENT2_LOG_PREFIX = "[Agent2]"
@@ -204,6 +206,95 @@ def _estimate_confidence(strategy_scores: Dict[str, float]) -> float:
     return max(0.1, min(0.95, round(confidence, 3)))
 
 
+# ---------- LLM推理：基于既定主策略生成可执行 reasoning（不改策略结果） ----------
+def _infer_customer_intent(input_data: StrategyInput) -> str:
+    """
+    基于事实与画像推断买家主诉意图标签。
+    """
+    facts = input_data.facts
+    if facts.goods_received is False:
+        return "物流履约争议"
+    if facts.defect_type and facts.defect_type != "无瑕疵":
+        return "质量问题维权"
+    if facts.missing_evidence:
+        return "证据不足但诉求明确"
+    return "常规售后沟通"
+
+
+def _build_fallback_reasoning(
+    *,
+    strategy: str,
+    input_data: StrategyInput,
+    strategy_scores: Dict[str, float],
+    risk_factors: List[str],
+) -> str:
+    """
+    当 LLM 不可用时，输出结构化三段 reasoning。
+    """
+    intent = _infer_customer_intent(input_data)
+    risk_text = "；".join(risk_factors[:3]) if risk_factors else "当前未识别到高风险项"
+    if strategy == STRATEGY_DEFEND:
+        action = "先固定证据链并要求买家补证，再按规则提交抗辩材料"
+    elif strategy == STRATEGY_COMPENSATE:
+        action = "主动体面善后：及时补救并同步方案，把体验与口碑损失压到最低"
+    else:
+        action = "先给可接受协商方案，保留后续平台申诉与补证空间"
+
+    return (
+        f"客户意图：{intent}。\n"
+        f"风险点：{risk_text}。\n"
+        f"建议动作：{action}；当前得分 defend={strategy_scores[STRATEGY_DEFEND]:.2f}、"
+        f"negotiate={strategy_scores[STRATEGY_NEGOTIATE]:.2f}、compensate={strategy_scores[STRATEGY_COMPENSATE]:.2f}。"
+    )
+
+
+def _llm_generate_reasoning(
+    *,
+    strategy: str,
+    input_data: StrategyInput,
+    strategy_scores: Dict[str, float],
+    risk_factors: List[str],
+) -> str | None:
+    """
+    用 LLM 生成更自然的策略说明，强调合规前提下商户利益最大化。
+    """
+    prompt_payload = {
+        "strategy": strategy,
+        "scores": {
+            "defend": round(strategy_scores[STRATEGY_DEFEND], 3),
+            "negotiate": round(strategy_scores[STRATEGY_NEGOTIATE], 3),
+            "compensate": round(strategy_scores[STRATEGY_COMPENSATE], 3),
+        },
+        "facts": input_data.facts.model_dump(),
+        "buyer_profile": input_data.buyer_profile.model_dump(),
+        "matched_rules": [item.model_dump() for item in input_data.matched_rules],
+        "similar_cases": [item.model_dump() for item in input_data.similar_cases],
+        "risk_factors": risk_factors,
+        "order_amount": input_data.order_amount,
+    }
+    llm_text = chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是资深电商客服策略参谋。必须在规则和道德边界内，优先保护商户长期利益。"
+                    "输出三段中文，每段分别以“客户意图：”“风险点：”“建议动作：”开头，"
+                    "避免空话，不要使用AI口吻。"
+                ),
+            },
+            {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
+        ],
+        model_env_key="AGENT2_LLM_MODEL",
+        temperature=0.3,
+    )
+    if not llm_text:
+        return None
+    normalized = llm_text.strip()
+    if "客户意图：" not in normalized or "风险点：" not in normalized or "建议动作：" not in normalized:
+        return None
+    return normalized
+
+
 # ---------- 主入口：汇总得分并生成 StrategyOutput ----------
 def recommend(input_data: StrategyInput) -> StrategyOutput:
     """
@@ -241,18 +332,19 @@ def recommend(input_data: StrategyInput) -> StrategyOutput:
     estimated_win_rate = _estimate_win_rate(strategy, strategy_scores, risk_factors)
     confidence = _estimate_confidence(strategy_scores)
 
-    if len(rule_votes) > 1:
-        reasoning_prefix = "规则与画像出现冲突时，已优先按平台规则票权决定主策略。"
-    else:
-        reasoning_prefix = "已按平台规则、事实证据、买家画像和历史判例综合判断。"
-
-    reasoning = (
-        f"{reasoning_prefix}"
-        f"当前策略得分：defend={strategy_scores[STRATEGY_DEFEND]:.2f}、"
-        f"negotiate={strategy_scores[STRATEGY_NEGOTIATE]:.2f}、"
-        f"compensate={strategy_scores[STRATEGY_COMPENSATE]:.2f}。"
-        f"胜率估计综合了主策略优势与风险项数量。"
+    reasoning = _llm_generate_reasoning(
+        strategy=strategy,
+        input_data=input_data,
+        strategy_scores=strategy_scores,
+        risk_factors=risk_factors,
     )
+    if not reasoning:
+        reasoning = _build_fallback_reasoning(
+            strategy=strategy,
+            input_data=input_data,
+            strategy_scores=strategy_scores,
+            risk_factors=risk_factors,
+        )
 
     policy_ref = ",".join(policy_refs[:3]) if policy_refs else None
     dedup_risks = list(dict.fromkeys(risk_factors))

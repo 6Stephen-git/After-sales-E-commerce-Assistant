@@ -130,7 +130,7 @@ class ScriptOutput(BaseModel):
     """Agent 3 输出：多版本话术"""
     defense_version: str = Field(default="", description="抗辩版话术")
     negotiate_version: str = Field(default="", description="协商版话术")
-    compensate_version: str = Field(default="", description="认赔版话术")
+    compensate_version: str = Field(default="", description="善后版话术（主动体面收尾）")
     recommended_version: str = Field(default="", description="推荐版本标识")
     usage_tip: Optional[str] = Field(default=None, description="话术使用提示")
 

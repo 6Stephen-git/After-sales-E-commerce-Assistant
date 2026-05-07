@@ -9,6 +9,7 @@
         @update:input_text="update_input_text"
         @update:sender_role="update_sender_role"
         @send_message="send_message"
+        @send_image="send_image"
         @request_ai_help="request_ai_help"
       />
     </section>
@@ -41,6 +42,7 @@ const {
   sender_role,
   error_message,
   send_message,
+  send_image,
   apply_script,
   request_ai_help
 } = use_dispute()

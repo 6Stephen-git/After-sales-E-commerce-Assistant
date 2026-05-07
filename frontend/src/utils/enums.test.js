@@ -11,7 +11,7 @@ describe('getStrategyLabel', () => {
   it('将内部策略值映射为中文展示', () => {
     expect(getStrategyLabel('defend')).toBe('抗辩')
     expect(getStrategyLabel('negotiate')).toBe('协商')
-    expect(getStrategyLabel('compensate')).toBe('认赔')
+    expect(getStrategyLabel('compensate')).toBe('体面善后')
   })
 
   it('未知值回退为占位文案', () => {
@@ -42,6 +42,6 @@ describe('getScriptVersionLabel', () => {
   it('将话术版本键映射为中文名称', () => {
     expect(getScriptVersionLabel('defense_version')).toBe('抗辩版')
     expect(getScriptVersionLabel('negotiate_version')).toBe('协商版')
-    expect(getScriptVersionLabel('compensate_version')).toBe('认赔版')
+    expect(getScriptVersionLabel('compensate_version')).toBe('善后版')
   })
 })

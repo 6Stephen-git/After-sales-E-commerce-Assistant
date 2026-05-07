@@ -2,7 +2,15 @@
   <div class="message-row" :class="row_class">
     <div class="message-bubble">
       <span class="role-label">{{ role_label }}</span>
-      <p class="message-text">{{ message.content }}</p>
+      <p v-if="message.content" class="message-text">{{ message.content }}</p>
+      <el-image
+        v-if="message.image_url"
+        class="message-image"
+        :src="message.image_url"
+        :preview-src-list="[message.image_url]"
+        fit="cover"
+        preview-teleported
+      />
     </div>
   </div>
 </template>
@@ -66,5 +74,12 @@ const role_label = computed(() => {
   color: #303133;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.message-image {
+  margin-top: 8px;
+  width: 180px;
+  max-width: 100%;
+  border-radius: 6px;
 }
 </style>

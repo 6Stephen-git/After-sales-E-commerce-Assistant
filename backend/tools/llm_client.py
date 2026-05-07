@@ -2,11 +2,12 @@
 LLM 共用客户端工具。
 
 职责：封装 OpenAI 兼容 chat/completions 调用，统一错误处理与降级策略。
-约定：未配置端点或调用失败时返回 None，由上层 Agent 走规则/模板兜底。
+约定：未配置关键环境变量或调用失败时返回 None，由上层 Agent 走规则/模板兜底。
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any
@@ -17,6 +18,7 @@ LOG_PREFIX = "[LLM]"
 DEFAULT_MODEL = "mimo-v2.5"
 REQUEST_TIMEOUT_SECONDS = 12.0
 RETRY_BACKOFF_SECONDS = [0.2, 0.4, 0.8]
+logger = logging.getLogger(__name__)
 
 
 # ---------- 基础校验：消息列表结构 ----------
@@ -39,6 +41,19 @@ def _is_valid_messages(messages: list[dict[str, Any]]) -> bool:
         if not isinstance(content, str) or not content.strip():
             return False
     return True
+
+
+# ---------- 端点标准化：统一补全 chat/completions 路径 ----------
+def _resolve_endpoint(raw_endpoint: str) -> str:
+    """
+    将端点规范化到 OpenAI 兼容 chat/completions 地址。
+    """
+    endpoint = raw_endpoint.strip().rstrip("/")
+    if endpoint.endswith("/chat/completions"):
+        return endpoint
+    if endpoint.endswith("/v1"):
+        return f"{endpoint}/chat/completions"
+    return endpoint
 
 
 # ---------- 响应解析：提取首个 choices 文本 ----------
@@ -67,7 +82,7 @@ def _extract_content(response_data: dict[str, Any]) -> str | None:
     return None
 
 
-# ---------- 主调用入口：统一重试与降级 ----------
+# ---------- 主调用入口：统一重试、日志与降级 ----------
 def chat_completion(
     messages: list[dict[str, Any]],
     model_env_key: str,
@@ -85,51 +100,60 @@ def chat_completion(
         成功返回文本；未配置或调用失败返回 None。
     """
     if not _is_valid_messages(messages=messages):
-        print(f"{LOG_PREFIX} 调用跳过：messages 结构非法或为空")
+        logger.warning("%s 调用跳过：messages 结构非法或为空", LOG_PREFIX)
         return None
 
-    endpoint = os.getenv("LLM_API_ENDPOINT", "").strip()
+    if not isinstance(model_env_key, str) or not model_env_key.strip():
+        logger.warning("%s 调用跳过：model_env_key 为空", LOG_PREFIX)
+        return None
+
+    raw_endpoint = os.getenv("LLM_API_ENDPOINT", "").strip()
     api_key = os.getenv("LLM_API_KEY", "").strip()
-    if not endpoint:
-        print(f"{LOG_PREFIX} 调用跳过：未配置 LLM_API_ENDPOINT")
+    if not raw_endpoint:
+        logger.info("%s 调用跳过：未配置 LLM_API_ENDPOINT", LOG_PREFIX)
+        return None
+    if not api_key:
+        logger.info("%s 调用跳过：未配置 LLM_API_KEY", LOG_PREFIX)
         return None
 
+    endpoint = _resolve_endpoint(raw_endpoint=raw_endpoint)
     model = os.getenv(model_env_key, "").strip() or DEFAULT_MODEL
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    print(f"{LOG_PREFIX} 开始请求：model={model} env_key={model_env_key}")
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    logger.info("%s 开始请求：endpoint=%s model=%s env_key=%s", LOG_PREFIX, endpoint, model, model_env_key)
 
     for attempt in range(3):
+        attempt_index = attempt + 1
         try:
             with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS) as client:
                 response = client.post(endpoint, headers=headers, json=payload)
                 response.raise_for_status()
                 response_data = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "%s 第%d次调用失败：HTTP状态异常，status=%s，原因=%s",
+                LOG_PREFIX,
+                attempt_index,
+                exc.response.status_code,
+                exc,
+            )
+        except httpx.RequestError as exc:
+            logger.error("%s 第%d次调用失败：网络请求异常，原因=%s", LOG_PREFIX, attempt_index, exc)
+        except ValueError as exc:
+            logger.error("%s 第%d次调用失败：响应JSON解析失败，原因=%s", LOG_PREFIX, attempt_index, exc)
         except Exception as exc:  # noqa: BLE001
-            print(f"{LOG_PREFIX} 第{attempt + 1}次调用失败：{exc}")
-            if attempt == 2:
-                print(f"{LOG_PREFIX} 调用终止：达到最大重试次数")
-                return None
-            time.sleep(RETRY_BACKOFF_SECONDS[attempt])
-            continue
+            logger.error("%s 第%d次调用失败：未知异常，原因=%s", LOG_PREFIX, attempt_index, exc)
+        else:
+            content = _extract_content(response_data=response_data)
+            if content is not None:
+                logger.info("%s 请求成功：已获得响应文本", LOG_PREFIX)
+                return content
+            logger.error("%s 第%d次调用失败：响应结构不符合约定", LOG_PREFIX, attempt_index)
 
-        content = _extract_content(response_data=response_data)
-        if content is not None:
-            print(f"{LOG_PREFIX} 请求成功：已获得响应文本")
-            return content
-
-        print(f"{LOG_PREFIX} 第{attempt + 1}次调用失败：响应结构不符合约定")
         if attempt == 2:
-            print(f"{LOG_PREFIX} 调用终止：响应结构持续异常")
+            logger.error("%s 调用终止：达到最大重试次数", LOG_PREFIX)
             return None
         time.sleep(RETRY_BACKOFF_SECONDS[attempt])
 
-    print(f"{LOG_PREFIX} 调用终止：未知错误")
+    logger.error("%s 调用终止：未知错误", LOG_PREFIX)
     return None
