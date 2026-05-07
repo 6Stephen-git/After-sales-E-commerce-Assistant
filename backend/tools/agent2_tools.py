@@ -13,11 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from backend.db.connection import get_engine  # noqa: E402
+from backend.db.models import BuyerProfileRecord  # noqa: E402
 from schemas import BuyerProfile, FactOutput, MatchedRule, SimilarCase  # noqa: E402
 
 
@@ -125,28 +129,65 @@ def match_rules(facts: FactOutput) -> List[MatchedRule]:
     return matched
 
 
-# ---------- 对外工具：买家画像（当前内存 Mock，可替换为 MySQL） ----------
-def query_buyer_profile(buyer_id: str) -> BuyerProfile:
+# ---------- 买家画像：默认值与数据库记录解析 ----------
+def _build_default_buyer_profile(buyer_id: str) -> BuyerProfile:
     """
-    按买家脱敏 ID 查询画像（当前为内存 Mock，后续可换 MySQL）。
+    构建默认买家画像（未命中库记录时回退）。
+    """
+    return BuyerProfile(
+        buyer_id=buyer_id,
+        purchase_count=5,
+        dispute_count=1,
+        dispute_rate=0.2,
+        avg_order_value=99.0,
+        return_rate=0.15,
+        malicious_flags=0,
+        credit_level="medium",
+    )
 
-    成功返回 BuyerProfile；内部异常包装为 RuntimeError，供 Controller 捕获。
+
+def _profile_from_db_json(buyer_id: str, profile_json: str) -> BuyerProfile:
+    """
+    将 buyer_profiles.profile_json 解析为 BuyerProfile。
+    """
+    try:
+        payload = json.loads(profile_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"profile_json 不是合法 JSON：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("profile_json 根节点必须是对象")
+    payload["buyer_id"] = buyer_id
+    return BuyerProfile(**payload)
+
+
+# ---------- 对外工具：买家画像（优先 MySQL，失败回退默认） ----------
+def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
+    """
+    按买家脱敏 ID 查询画像，优先查 MySQL，未命中回退默认画像。
 
     参数:
-        buyer_id: 买家标识，如测试用 buyer_high_risk、buyer_loyal。
+        buyer_id: 买家标识（手机号 SHA256 哈希）。
+        merchant_id: 商家标识，用于租户隔离查询；为空时直接走默认画像。
 
     返回:
         BuyerProfile 实例。
 
     异常:
-        RuntimeError: 查询逻辑异常时抛出，错误信息为中文。
+        RuntimeError: 数据库读取发生致命异常时抛出，错误信息为中文。
     """
-    logger.info("%s 开始查询买家画像，buyer_id=%s", AGENT2_LOG_PREFIX, buyer_id)
+    normalized_buyer_id = buyer_id.strip()
+    normalized_merchant_id = merchant_id.strip()
+    logger.info(
+        "%s 开始查询买家画像，merchant_id=%s buyer_id=%s",
+        AGENT2_LOG_PREFIX,
+        normalized_merchant_id,
+        normalized_buyer_id,
+    )
 
     try:
         mock_profiles = {
             "buyer_high_risk": BuyerProfile(
-                buyer_id=buyer_id,
+                buyer_id=normalized_buyer_id,
                 purchase_count=2,
                 dispute_count=3,
                 dispute_rate=0.6,
@@ -156,7 +197,7 @@ def query_buyer_profile(buyer_id: str) -> BuyerProfile:
                 credit_level="low",
             ),
             "buyer_loyal": BuyerProfile(
-                buyer_id=buyer_id,
+                buyer_id=normalized_buyer_id,
                 purchase_count=18,
                 dispute_count=1,
                 dispute_rate=0.06,
@@ -166,18 +207,32 @@ def query_buyer_profile(buyer_id: str) -> BuyerProfile:
                 credit_level="high",
             ),
         }
+        if normalized_buyer_id in mock_profiles:
+            profile = mock_profiles[normalized_buyer_id]
+            logger.info(
+                "%s 命中内置画像，credit_level=%s",
+                AGENT2_LOG_PREFIX,
+                profile.credit_level,
+            )
+            return profile
 
-        default_profile = BuyerProfile(
-            buyer_id=buyer_id,
-            purchase_count=5,
-            dispute_count=1,
-            dispute_rate=0.2,
-            avg_order_value=99.0,
-            return_rate=0.15,
-            malicious_flags=0,
-            credit_level="medium",
-        )
-        profile = mock_profiles.get(buyer_id, default_profile)
+        default_profile = _build_default_buyer_profile(normalized_buyer_id)
+        if not normalized_merchant_id or not normalized_buyer_id:
+            logger.info("%s merchant_id/buyer_id 为空，返回默认画像", AGENT2_LOG_PREFIX)
+            return default_profile
+
+        engine = get_engine()
+        with Session(bind=engine) as session:
+            record = session.execute(
+                select(BuyerProfileRecord).where(
+                    BuyerProfileRecord.merchant_id == normalized_merchant_id,
+                    BuyerProfileRecord.buyer_hash == normalized_buyer_id,
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                logger.info("%s 未命中数据库画像，返回默认画像", AGENT2_LOG_PREFIX)
+                return default_profile
+            profile = _profile_from_db_json(normalized_buyer_id, record.profile_json)
         logger.info("%s 买家画像查询完成，credit_level=%s", AGENT2_LOG_PREFIX, profile.credit_level)
         return profile
     except Exception as exc:  # noqa: BLE001

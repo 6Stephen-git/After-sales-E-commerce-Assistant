@@ -143,9 +143,10 @@ def run(dispute_id: str, new_materials: dict[str, Any]) -> AnalysisReport:
     # 3) 策略参谋：工具层拉规则/画像/判例，再调用无状态 recommend
     try:
         buyer_id = str(merged_materials.get("buyer_id", "") or "")
+        merchant_id = str(merged_materials.get("merchant_id", "") or "")
         dispute_desc = _build_dispute_desc(merged_materials)
         matched_rules = match_rules(facts=facts)
-        buyer_profile = query_buyer_profile(buyer_id=buyer_id)
+        buyer_profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id)
         similar_cases = search_similar_cases(dispute_desc=dispute_desc, top_k=3)
         strategy_input = StrategyInput(
             facts=facts,

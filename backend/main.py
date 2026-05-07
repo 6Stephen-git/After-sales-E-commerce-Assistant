@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 from backend.db import init_db
-from backend.routers import analyze_router, merchants_router
+from backend.routers import analyze_router, buyers_router, merchants_router
 
 # 加载环境变量
 load_dotenv()
@@ -64,6 +64,7 @@ async def exception_middleware(request: Request, call_next):
 # ---------- 路由注册：阶段四 API 端点 ----------
 app.include_router(analyze_router)
 app.include_router(merchants_router)
+app.include_router(buyers_router)
 
 
 @app.get("/health")

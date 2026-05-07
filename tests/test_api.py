@@ -102,3 +102,39 @@ def test_merchant_config_should_validate_mode(api_client):
         json={"mode": "auto", "auto_threshold": 0.5},
     )
     assert response.status_code == 400
+
+
+# ---------- /merchants/{id}/buyers/{hash}：画像 upsert/get/delete ----------
+def test_buyer_profile_should_support_upsert_get_delete(api_client):
+    """买家画像接口应支持新增更新、查询和删除。"""
+    merchant_id = "M-API-BUYER-001"
+    buyer_hash = "buyer_hash_001"
+    request_body = {
+        "purchase_count": 12,
+        "dispute_count": 1,
+        "dispute_rate": 0.08,
+        "avg_order_value": 156.5,
+        "return_rate": 0.1,
+        "malicious_flags": 0,
+        "credit_level": "high",
+    }
+
+    put_response = api_client.put(f"/merchants/{merchant_id}/buyers/{buyer_hash}", json=request_body)
+    assert put_response.status_code == 200
+    put_payload = put_response.json()
+    assert put_payload["buyer_id"] == buyer_hash
+    assert put_payload["purchase_count"] == 12
+    assert put_payload["credit_level"] == "high"
+
+    get_response = api_client.get(f"/merchants/{merchant_id}/buyers/{buyer_hash}")
+    assert get_response.status_code == 200
+    get_payload = get_response.json()
+    assert get_payload["buyer_id"] == buyer_hash
+    assert get_payload["dispute_rate"] == 0.08
+
+    delete_response = api_client.delete(f"/merchants/{merchant_id}/buyers/{buyer_hash}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["message"] == "买家画像删除成功"
+
+    verify_response = api_client.get(f"/merchants/{merchant_id}/buyers/{buyer_hash}")
+    assert verify_response.status_code == 404
