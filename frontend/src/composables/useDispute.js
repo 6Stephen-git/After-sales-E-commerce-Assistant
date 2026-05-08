@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { analyzeDispute } from '../api'
+import { analyzeDispute, analyzeDisputeStream } from '../api'
 
 // ---------- 默认商家与纠纷上下文：用于辅助模式页面演示 ----------
 const default_context = {
@@ -9,6 +9,7 @@ const default_context = {
   order_amount: 199.0,
   buyer_id: 'BUYER_HASH_DEMO_001'
 }
+const ENABLE_ANALYZE_STREAM = String(import.meta.env.VITE_ENABLE_ANALYZE_STREAM || '0') === '1'
 
 // ---------- 状态管理：纠纷消息、分析报告与交互状态 ----------
 export function use_dispute() {
@@ -22,6 +23,7 @@ export function use_dispute() {
   // ---------- 发送身份：商家侧或用户扮演买家，决定 append_message 的 role ----------
   const sender_role = ref('merchant')
   const error_message = ref('')
+  const progress_message = ref('')
   const message_id_seed = ref(messages.value.length + 1)
 
   // ---------- 派生状态：当前是否已有分析报告 ----------
@@ -96,6 +98,7 @@ export function use_dispute() {
   async function request_ai_help() {
     loading.value = true
     error_message.value = ''
+    progress_message.value = '正在提交分析请求...'
     try {
       const payload = {
         dispute_id: default_context.dispute_id,
@@ -111,9 +114,96 @@ export function use_dispute() {
           .map((item) => String(item.image_url || '').trim())
           .filter((url) => Boolean(url))
       }
-      report.value = await analyzeDispute(payload)
+      const stage_messages = {
+        merge: '正在合并上下文...',
+        agent1: '正在提取事实...',
+        agent2_tools: '正在检索规则、画像与判例...',
+        agent2: '正在生成策略建议...',
+        agent3: '正在生成话术版本...'
+      }
+      const merge_partial_report = (partial) => {
+        report.value = {
+          ...(report.value || {}),
+          ...(partial || {})
+        }
+      }
+      const append_reasoning_delta = (delta_text) => {
+        const normalized = String(delta_text || '')
+        if (!normalized) {
+          return
+        }
+        const current_report = report.value || {}
+        const current_strategy = current_report.strategy || {}
+        const current_reasoning = String(current_strategy.reasoning || '')
+        report.value = {
+          ...current_report,
+          strategy: {
+            ...current_strategy,
+            reasoning: current_reasoning + normalized
+          }
+        }
+      }
+
+      if (ENABLE_ANALYZE_STREAM) {
+        let stream_error = null
+        await analyzeDisputeStream(payload, {
+          on_event: (event_type, event_data) => {
+            if (event_type === 'stage_start') {
+              const stage_key = String(event_data?.stage || '')
+              progress_message.value = stage_messages[stage_key] || '分析进行中...'
+              return
+            }
+            if (event_type === 'execution_profile') {
+              if (event_data?.fast_path === true) {
+                progress_message.value = '已识别为简单任务，启用快速路径...'
+              }
+              return
+            }
+            if (event_type === 'stage_done' && event_data?.partial_report) {
+              merge_partial_report(event_data.partial_report)
+              return
+            }
+            if (event_type === 'stage_delta' && event_data?.stage === 'agent2' && event_data?.field === 'reasoning') {
+              append_reasoning_delta(event_data.delta)
+              return
+            }
+            if (event_type === 'final_report' && event_data?.report) {
+              report.value = event_data.report
+              progress_message.value = '分析完成'
+              return
+            }
+            if (event_type === 'pipeline_error') {
+              stream_error = new Error(event_data?.message || '流式分析失败')
+            }
+          },
+          on_done: () => {
+            if (!stream_error && report.value) {
+              progress_message.value = '分析完成'
+            }
+          },
+          on_error: (error) => {
+            stream_error = error
+          }
+        })
+
+        if (stream_error) {
+          const message = String(stream_error.message || '')
+          const can_fallback = message.includes('流式分析未启用') || message.includes('404')
+          if (can_fallback) {
+            progress_message.value = '流式不可用，已回退普通分析...'
+            report.value = await analyzeDispute(payload)
+            progress_message.value = '分析完成'
+          } else {
+            throw stream_error
+          }
+        }
+      } else {
+        report.value = await analyzeDispute(payload)
+        progress_message.value = '分析完成'
+      }
     } catch (error) {
       error_message.value = error.message || '请求 AI 分析失败'
+      progress_message.value = ''
     } finally {
       loading.value = false
     }
@@ -126,6 +216,7 @@ export function use_dispute() {
     input_text,
     sender_role,
     error_message,
+    progress_message,
     has_report,
     append_message,
     send_message,

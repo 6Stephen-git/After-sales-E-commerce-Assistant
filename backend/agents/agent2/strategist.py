@@ -7,8 +7,9 @@ Agent 2：策略参谋员。
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 import json
+import os
 
 from schemas import (
     STRATEGY_COMPENSATE,
@@ -254,9 +255,13 @@ def _llm_generate_reasoning(
     input_data: StrategyInput,
     strategy_scores: Dict[str, float],
     risk_factors: List[str],
+    fast_path: bool = False,
+    reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> str | None:
     """
     用 LLM 生成更自然的策略说明，强调合规前提下商户利益最大化。
+
+    fast_path=True 时优先小模型，若格式不符合约定则自动回退主模型补调一次。
     """
     prompt_payload = {
         "strategy": strategy,
@@ -272,6 +277,8 @@ def _llm_generate_reasoning(
         "risk_factors": risk_factors,
         "order_amount": input_data.order_amount,
     }
+    model_env_key = "AGENT2_LLM_MODEL_FAST" if fast_path else "AGENT2_LLM_MODEL"
+    fallback_key = "AGENT2_LLM_MODEL" if fast_path else None
     llm_text = chat_completion(
         messages=[
             {
@@ -284,19 +291,49 @@ def _llm_generate_reasoning(
             },
             {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
         ],
-        model_env_key="AGENT2_LLM_MODEL",
+        model_env_key=model_env_key,
+        fallback_model_env_key=fallback_key,
         temperature=0.3,
+        stream_delta_callback=reasoning_delta_callback,
     )
     if not llm_text:
         return None
     normalized = llm_text.strip()
-    if "客户意图：" not in normalized or "风险点：" not in normalized or "建议动作：" not in normalized:
-        return None
-    return normalized
+    if "客户意图：" in normalized and "风险点：" in normalized and "建议动作：" in normalized:
+        return normalized
+
+    # 小模型路径不满足格式时，回退主模型补调一次，优先保证结果质量与可读性。
+    if fast_path and os.getenv("AGENT2_LLM_MODEL", "").strip():
+        retry_text = chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是资深电商客服策略参谋。必须在规则和道德边界内，优先保护商户长期利益。"
+                        "输出三段中文，每段分别以“客户意图：”“风险点：”“建议动作：”开头，"
+                        "避免空话，不要使用AI口吻。"
+                    ),
+                },
+                {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
+            ],
+            model_env_key="AGENT2_LLM_MODEL",
+            temperature=0.3,
+            stream_delta_callback=reasoning_delta_callback,
+        )
+        if not retry_text:
+            return None
+        retry_normalized = retry_text.strip()
+        if "客户意图：" in retry_normalized and "风险点：" in retry_normalized and "建议动作：" in retry_normalized:
+            return retry_normalized
+    return None
 
 
 # ---------- 主入口：汇总得分并生成 StrategyOutput ----------
-def recommend(input_data: StrategyInput) -> StrategyOutput:
+def recommend(
+    input_data: StrategyInput,
+    fast_path: bool = False,
+    reasoning_delta_callback: Callable[[str], None] | None = None,
+) -> StrategyOutput:
     """
     综合规则票权、事实、画像、判例与订单金额，输出主策略与说明。
 
@@ -305,6 +342,8 @@ def recommend(input_data: StrategyInput) -> StrategyOutput:
 
     参数:
         input_data: 含 facts、buyer_profile、matched_rules、similar_cases、order_amount。
+        fast_path: 是否启用轻量模型优先路径（失败会自动回退主模型）。
+        reasoning_delta_callback: 推理文本流式回调（用于前端增量展示）。
 
     返回:
         StrategyOutput，含 strategy、estimated_win_rate、reasoning、risk_factors 等。
@@ -337,6 +376,8 @@ def recommend(input_data: StrategyInput) -> StrategyOutput:
         input_data=input_data,
         strategy_scores=strategy_scores,
         risk_factors=risk_factors,
+        fast_path=fast_path,
+        reasoning_delta_callback=reasoning_delta_callback,
     )
     if not reasoning:
         reasoning = _build_fallback_reasoning(

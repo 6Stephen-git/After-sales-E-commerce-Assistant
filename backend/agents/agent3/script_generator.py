@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 import json
+import os
 
 from schemas import (
     SCRIPT_COMPENSATE,
@@ -237,9 +238,16 @@ def _parse_llm_script_json(raw_text: str) -> Dict[str, str] | None:
     return result
 
 
-def _llm_generate_scripts(input_data: ScriptInput, variables: Dict[str, str], tone_profile: Dict[str, str]) -> Dict[str, str] | None:
+def _llm_generate_scripts(
+    input_data: ScriptInput,
+    variables: Dict[str, str],
+    tone_profile: Dict[str, str],
+    fast_path: bool = False,
+) -> Dict[str, str] | None:
     """
     通过 LLM 生成三版真人客服话术。
+
+    fast_path=True 时优先小模型，若输出结构不合规则自动回退主模型补调一次。
     """
     payload = {
         "strategy": input_data.strategy_output.strategy,
@@ -249,6 +257,8 @@ def _llm_generate_scripts(input_data: ScriptInput, variables: Dict[str, str], to
         "order_amount": variables["order_amount"],
         "tone_profile": tone_profile,
     }
+    model_env_key = "AGENT3_LLM_MODEL_FAST" if fast_path else "AGENT3_LLM_MODEL"
+    fallback_key = "AGENT3_LLM_MODEL" if fast_path else None
     llm_text = chat_completion(
         messages=[
             {
@@ -262,16 +272,38 @@ def _llm_generate_scripts(input_data: ScriptInput, variables: Dict[str, str], to
             },
             {"role": "user", "content": f"请生成三版话术：\n{json.dumps(payload, ensure_ascii=False)}"},
         ],
-        model_env_key="AGENT3_LLM_MODEL",
+        model_env_key=model_env_key,
+        fallback_model_env_key=fallback_key,
         temperature=0.5,
     )
-    if not llm_text:
-        return None
-    return _parse_llm_script_json(llm_text)
+    parsed = _parse_llm_script_json(llm_text) if llm_text else None
+    if parsed:
+        return parsed
+
+    # 小模型路径未产出合规 JSON 时，回退主模型补调一次，保证三版话术可用性。
+    if fast_path and os.getenv("AGENT3_LLM_MODEL", "").strip():
+        retry_text = chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是资深电商客服。请输出JSON，包含 defense_version/negotiate_version/compensate_version 三个字段。"
+                        "要求自然口语、像真人客服，避免模板腔和AI味。"
+                        "若 tone_profile.length_style=short，每条尽量控制在40字内。"
+                        "若 must_request_evidence=yes，话术要先提出补证请求。"
+                    ),
+                },
+                {"role": "user", "content": f"请生成三版话术：\n{json.dumps(payload, ensure_ascii=False)}"},
+            ],
+            model_env_key="AGENT3_LLM_MODEL",
+            temperature=0.5,
+        )
+        return _parse_llm_script_json(retry_text) if retry_text else None
+    return None
 
 
 # ---------- 主入口：拉三策略模板并组装 ScriptOutput ----------
-def generate(input_data: ScriptInput) -> ScriptOutput:
+def generate(input_data: ScriptInput, fast_path: bool = False) -> ScriptOutput:
     """
     拉取三策略模板、填入变量，生成抗辩/协商/善后三版话术及推荐标识。
 
@@ -280,6 +312,7 @@ def generate(input_data: ScriptInput) -> ScriptOutput:
 
     参数:
         input_data: 含 strategy_output、facts、order_id、order_amount、可选 emotion_note。
+        fast_path: 是否启用轻量模型优先路径（失败会自动回退主模型）。
 
     返回:
         ScriptOutput，三版话术字段均非空字符串。
@@ -305,7 +338,12 @@ def generate(input_data: ScriptInput) -> ScriptOutput:
     negotiate_version = _fill_template(negotiate_template, variables)
     compensate_version = _fill_template(compensate_template, variables)
 
-    llm_scripts = _llm_generate_scripts(input_data=input_data, variables=variables, tone_profile=tone_profile)
+    llm_scripts = _llm_generate_scripts(
+        input_data=input_data,
+        variables=variables,
+        tone_profile=tone_profile,
+        fast_path=fast_path,
+    )
     if llm_scripts:
         defense_version = llm_scripts["defense_version"]
         negotiate_version = llm_scripts["negotiate_version"]

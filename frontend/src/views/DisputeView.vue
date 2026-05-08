@@ -23,6 +23,14 @@
         show-icon
         class="error-alert"
       />
+      <el-alert
+        v-else-if="loading && progress_message"
+        type="info"
+        :title="progress_message"
+        :closable="false"
+        show-icon
+        class="progress-alert"
+      />
       <StrategyPanel :report="report" :loading="loading" @use_script="apply_script" />
     </section>
   </div>
@@ -41,6 +49,7 @@ const {
   input_text,
   sender_role,
   error_message,
+  progress_message,
   send_message,
   send_image,
   apply_script,
@@ -77,6 +86,10 @@ function update_sender_role(value) {
 }
 
 .error-alert {
+  margin-bottom: 10px;
+}
+
+.progress-alert {
   margin-bottom: 10px;
 }
 </style>

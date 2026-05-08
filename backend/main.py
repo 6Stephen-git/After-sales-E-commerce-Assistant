@@ -11,11 +11,31 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
+# 加载环境变量（须早于依赖 os.environ 的 backend 子模块 import）
+load_dotenv()
+
+# ---------- 应用日志：Uvicorn 只为自身 logger 配 Handler，root 常无 Handler；backend.* 的 INFO 会沿链找不到处理器而被丢弃 ----------
+def _configure_backend_logging() -> None:
+    """
+    为 backend 包配置 stderr 输出。
+
+    说明：仅 setLevel 不够；若无 Handler，logging 的 lastResort 级别为 WARNING，logger.info 仍不会出现在终端。
+    """
+    pkg = logging.getLogger("backend")
+    if pkg.handlers:
+        return
+    pkg.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", "%H:%M:%S"))
+    pkg.addHandler(handler)
+    pkg.propagate = False
+
+
+_configure_backend_logging()
+
 from backend.db import init_db
 from backend.routers import analyze_router, buyers_router, merchants_router
-
-# 加载环境变量
-load_dotenv()
 
 # 将项目根目录加入模块搜索路径，保证 schemas.py 可直接导入
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

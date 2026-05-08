@@ -1,5 +1,9 @@
 import axios from 'axios'
 
+// ---------- 分析链路耗时常超过普通接口：后端多 Agent + 外部 LLM，需单独拉长等待时间 ----------
+const ANALYZE_HTTP_TIMEOUT_MS = 180000
+const ANALYZE_STREAM_TIMEOUT_MS = 180000
+
 // ---------- Axios 实例：统一管理前端到后端的 HTTP 请求 ----------
 const httpClient = axios.create({
   baseURL: '/api',
@@ -19,10 +23,89 @@ httpClient.interceptors.response.use(
 // ---------- 分析请求：调用辅助模式分析接口 ----------
 export async function analyzeDispute(payload) {
   try {
-    const response = await httpClient.post('/analyze', payload)
+    const response = await httpClient.post('/analyze', payload, {
+      timeout: ANALYZE_HTTP_TIMEOUT_MS
+    })
     return response.data
   } catch (error) {
     throw new Error(`请求分析失败：${error.message}`)
+  }
+}
+
+// ---------- 流式分析请求：按阶段消费 SSE 事件，支持先展示部分结果 ----------
+export async function analyzeDisputeStream(payload, handlers = {}) {
+  const { on_event, on_done, on_error } = handlers
+  const controller = new AbortController()
+  const timeout_id = setTimeout(() => controller.abort(), ANALYZE_STREAM_TIMEOUT_MS)
+  try {
+    const response = await fetch('/api/analyze/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`
+      try {
+        const body = await response.json()
+        detail = body?.detail || detail
+      } catch {
+        // 忽略非 JSON 错误体
+      }
+      throw new Error(detail)
+    }
+
+    if (!response.body) {
+      throw new Error('流式响应不可用')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) {
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+
+      while (buffer.includes('\n\n')) {
+        const frame_end = buffer.indexOf('\n\n')
+        const frame = buffer.slice(0, frame_end)
+        buffer = buffer.slice(frame_end + 2)
+
+        let event_type = 'message'
+        let event_data = {}
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) {
+            event_type = line.slice(6).trim()
+          } else if (line.startsWith('data:')) {
+            const raw = line.slice(5).trim()
+            try {
+              event_data = JSON.parse(raw)
+            } catch {
+              event_data = { raw }
+            }
+          }
+        }
+
+        if (typeof on_event === 'function') {
+          on_event(event_type, event_data)
+        }
+      }
+    }
+    if (typeof on_done === 'function') {
+      on_done()
+    }
+  } catch (error) {
+    if (typeof on_error === 'function') {
+      on_error(error)
+    } else {
+      throw new Error(`请求分析失败：${error.message || '未知错误'}`)
+    }
+  } finally {
+    clearTimeout(timeout_id)
   }
 }
 

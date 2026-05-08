@@ -1,13 +1,13 @@
 <template>
   <div class="strategy-panel">
-    <el-skeleton v-if="loading" animated :rows="8" />
-
-    <template v-else-if="report">
+    <template v-if="report">
       <EmotionAlert :emotion_alert="report.emotion_alert" class="panel-block" />
       <FactCard :facts="report.facts" class="panel-block" />
       <StrategyCard :strategy="report.strategy" class="panel-block" />
       <ScriptCard :scripts="report.scripts" class="panel-block" @use_script="emit_use_script" />
     </template>
+
+    <el-skeleton v-else-if="loading" animated :rows="8" />
 
     <el-empty v-else description="点击左侧“请求 AI 帮助”后查看分析结果" />
   </div>

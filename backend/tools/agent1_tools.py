@@ -404,7 +404,8 @@ def analyze_image(image_url: str) -> dict[str, Any]:
         return {"error": "图片分析失败：未配置环境变量 VISION_API_KEY"}
 
     if _is_dashscope_multimodal_endpoint(endpoint=endpoint):
-        model = os.getenv("VISION_API_MODEL", "").strip() or "qwen-vl-plus"
+        # 默认视觉模型与 .env.example 一致；覆盖时请设环境变量 VISION_API_MODEL
+        model = os.getenv("VISION_API_MODEL", "").strip() or "qwen3-vl-flash"
         return _analyze_image_dashscope(
             endpoint=endpoint,
             api_key=api_key,
