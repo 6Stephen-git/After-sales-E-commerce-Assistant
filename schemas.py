@@ -6,7 +6,7 @@
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Any, Optional, List
 
 
 # ============================================================
@@ -61,13 +61,18 @@ class LogisticsInfo(BaseModel):
 
 class FactOutput(BaseModel):
     """Agent 1 输出：结构化事实"""
+    issue_summary: Optional[str] = Field(default=None, description="买家核心诉求摘要（面向多模态分析的锚点）")
+    intent_tags: List[str] = Field(default_factory=list, description="诉求标签（如：质量问题/物流异常/补偿诉求）")
+    visual_observations: List[str] = Field(default_factory=list, description="视觉观察结论列表（自然语言短句）")
+    attributes: dict[str, Any] = Field(default_factory=dict, description="可扩展属性容器，存放品类相关细节")
+    evidence_items: List[dict[str, Any]] = Field(default_factory=list, description="证据项列表（文本/图片/视频等）")
     goods_received: Optional[bool] = Field(default=None, description="买家是否收到货")
     defect_type: Optional[str] = Field(default=None, description="瑕疵类型：破洞/污渍/色差/线头/功能故障/无瑕疵")
     defect_location: Optional[str] = Field(default=None, description="瑕疵位置描述")
-    defect_edge: Optional[str] = Field(default=None, description="破损边缘形态：整齐/毛糙/无法判断")
-    has_tag_visible: Optional[bool] = Field(default=None, description="吊牌是否可见")
-    photo_background: Optional[str] = Field(default=None, description="拍摄背景环境")
-    wear_signs: Optional[str] = Field(default=None, description="穿着/使用痕迹描述")
+    defect_edge: Optional[str] = Field(default=None, description="兼容字段：破损边缘形态")
+    has_tag_visible: Optional[bool] = Field(default=None, description="兼容字段：吊牌是否可见")
+    photo_background: Optional[str] = Field(default=None, description="兼容字段：拍摄背景环境")
+    wear_signs: Optional[str] = Field(default=None, description="兼容字段：穿着/使用痕迹描述")
     logistics_normal: Optional[bool] = Field(default=None, description="物流是否正常")
     missing_evidence: List[str] = Field(default_factory=list, description="缺失的证据项")
     red_flags: List[str] = Field(default_factory=list, description="发现的疑点")

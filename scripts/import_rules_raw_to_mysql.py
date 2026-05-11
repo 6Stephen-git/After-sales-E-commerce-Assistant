@@ -96,13 +96,13 @@ def collect_rule_json_paths(input_dir: Path, report_path: Path) -> list[Path]:
     """
     收集待入库的规则 JSON 文件路径。
 
-    优先使用抓取报告中的 output_json（更精确），失败时回退为目录递归扫描。
+    合并抓取报告与目录扫描结果，确保历史遗漏文件也能被补写入库。
     """
+    report_paths: list[Path] = []
     if report_path.exists():
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
             results = report.get("results", []) if isinstance(report, dict) else []
-            out_paths: list[Path] = []
             for row in results:
                 if not isinstance(row, dict):
                     continue
@@ -113,18 +113,22 @@ def collect_rule_json_paths(input_dir: Path, report_path: Path) -> list[Path]:
                     continue
                 path = Path(output_json)
                 if path.exists():
-                    out_paths.append(path)
-            if out_paths:
-                logger.info("%s 从抓取报告收集到 %s 个规则文件", LOG_PREFIX, len(out_paths))
-                return out_paths
+                    report_paths.append(path)
+            logger.info("%s 从抓取报告收集到 %s 个规则文件", LOG_PREFIX, len(report_paths))
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s 解析抓取报告失败，改用目录扫描：%s", LOG_PREFIX, exc)
 
     if not input_dir.exists():
         raise FileNotFoundError(f"规则目录不存在：{input_dir}")
-    paths = [p for p in input_dir.rglob("*.json") if p.name != "_crawl_report.json"]
-    logger.info("%s 目录扫描收集到 %s 个规则文件", LOG_PREFIX, len(paths))
-    return sorted(paths)
+    scanned_paths = [p for p in input_dir.rglob("*.json") if p.name != "_crawl_report.json"]
+    logger.info("%s 目录扫描收集到 %s 个规则文件", LOG_PREFIX, len(scanned_paths))
+
+    deduped: dict[str, Path] = {}
+    for path in report_paths + scanned_paths:
+        deduped[str(path.resolve())] = path
+    merged = sorted(deduped.values(), key=lambda p: str(p))
+    logger.info("%s 合并后待入库规则文件数：%s", LOG_PREFIX, len(merged))
+    return merged
 
 
 def load_rule_document(path: Path) -> dict[str, Any]:

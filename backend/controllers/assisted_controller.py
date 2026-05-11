@@ -52,6 +52,12 @@ def _merge_materials(dispute_id: str, new_materials: dict[str, Any]) -> dict[str
     """
     合并纠纷材料：首次全量写入，后续对 chat_history/image_urls 增量去重追加，其他字段覆盖。
     """
+    # ---------- 显式重置：当前端声明 reset_context 时，直接覆写历史缓存 ----------
+    if bool(new_materials.get("reset_context")):
+        merged_materials = deepcopy(new_materials)
+        _CACHE[dispute_id] = merged_materials
+        return deepcopy(merged_materials)
+
     cached_materials = _CACHE.get(dispute_id)
     if cached_materials is None:
         merged_materials = deepcopy(new_materials)

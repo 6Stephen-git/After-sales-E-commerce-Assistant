@@ -64,100 +64,20 @@ def _collect_text(materials: dict[str, Any]) -> str:
         if isinstance(msg, dict):
             text = msg.get("content")
             if isinstance(text, str) and text.strip():
-                parts.append(text.strip())
+                role = str(msg.get("role", "") or "").strip()
+                if role:
+                    parts.append(f"{role}: {text.strip()}")
+                else:
+                    parts.append(text.strip())
         elif isinstance(msg, str) and msg.strip():
             parts.append(msg.strip())
     return " ".join(parts)
 
 
-# ---------- 事实推断辅助：收货判断、证据档位、置信度 ----------
-def _infer_goods_received(text_context: str, logistics_signed: bool | None) -> bool | None:
-    """
-    推断买家是否已收到货（三态：是 / 否 / 未知）。
-
-    优先级：文本中出现明确「未收到」类表述 → False；「已收到」类 → True；
-    若文本无明确结论且提供了物流签收标志，则用 logistics_signed 兜底；
-    两者皆无时返回 None。
-
-    参数:
-        text_context: 由 _collect_text 得到的合并文本。
-        logistics_signed: 物流是否已签收；无物流数据时为 None。
-
-    返回:
-        True / False / None（无法从现有材料判断）。
-    """
-    if not text_context and logistics_signed is None:
-        return None
-
-    if any(k in text_context for k in ["没收到", "未收到", "没有收到", "未签收"]):
-        return False
-    if any(k in text_context for k in ["收到了", "已收到", "签收了", "拿到了"]):
-        return True
-    if logistics_signed is not None:
-        return logistics_signed
-    return None
-
-
-def _derive_evidence_quality(
-    has_text: bool,
-    has_images: bool,
-    has_logistics: bool,
-    red_flag_count: int,
-) -> str:
-    """
-    根据材料完整度与疑点数量给出证据质量枚举（high / medium / low）。
-
-    规则简述：文本、图片、物流三项计分；材料过少则低；有两项为中等；
-    若已出现疑点（red_flags）则证据质量不高于 medium。
-
-    参数:
-        has_text: 是否存在可用文本。
-        has_images: 是否存在至少一张图片 URL。
-        has_logistics: 是否成功具备物流查询结果（有订单号且查到对象即 True）。
-        red_flag_count: 当前已收集的疑点条数。
-
-    返回:
-        EVIDENCE_HIGH、EVIDENCE_MEDIUM 或 EVIDENCE_LOW 之一。
-    """
-    score = int(has_text) + int(has_images) + int(has_logistics)
-    if score <= 1:
-        return EVIDENCE_LOW
-    if score == 2:
-        return EVIDENCE_MEDIUM
-    if red_flag_count >= 1:
-        return EVIDENCE_MEDIUM
-    return EVIDENCE_HIGH
-
-
-def _derive_confidence(evidence_quality: str, red_flag_count: int) -> float:
-    """
-    在证据质量基础上按疑点数量下调置信度，并裁剪到 [0, 1]。
-
-    参数:
-        evidence_quality: high / medium / low。
-        red_flag_count: 疑点条数，每条扣固定步长。
-
-    返回:
-        0～1 之间的浮点数。
-    """
-    base = {
-        EVIDENCE_LOW: 0.38,
-        EVIDENCE_MEDIUM: 0.66,
-        EVIDENCE_HIGH: 0.86,
-    }[evidence_quality]
-    return max(0.0, min(1.0, base - red_flag_count * 0.12))
-
-
-# ---------- LLM辅助：结构化解析与守门合并（模糊不判、缺证必问） ----------
+# ---------- 通用解析：模型 JSON、布尔、列表与浮点 ----------
 def _parse_json_text(raw_text: str) -> dict[str, Any] | None:
     """
     将 LLM 字符串结果解析为 JSON 对象。
-
-    参数:
-        raw_text: LLM 返回文本，可能含 markdown 代码块。
-
-    返回:
-        解析成功返回 dict，失败返回 None。
     """
     normalized = raw_text.strip()
     if not normalized:
@@ -188,51 +108,15 @@ def _parse_bool(value: Any) -> bool | None:
     return None
 
 
-def _llm_extract_facts(text_context: str, image_result: dict[str, Any], logistics_normal: bool | None) -> dict[str, Any] | None:
+def _safe_float(value: Any, default: float) -> float:
     """
-    调用 LLM 做二次事实审阅，重点识别“是否必须补证”。
-
-    参数:
-        text_context: 买家文本与聊天上下文。
-        image_result: 多模态图片分析原始结果。
-        logistics_normal: 物流是否正常。
-
-    返回:
-        约定字段字典，失败返回 None。
+    将任意值转换为 [0,1] 浮点，失败时回退默认值。
     """
-    if not text_context and not image_result:
-        return None
-
-    system_prompt = (
-        "你是电商纠纷事实守门员。只做客观判断，不做责任归属。"
-        "若证据模糊、冲突或不足，必须要求补证，严禁臆断。"
-    )
-    user_prompt = (
-        "请根据买家文本、图片分析结果和物流状态输出JSON，不要输出其他文本。\n"
-        "字段要求：\n"
-        "- defect_type/defect_location/defect_edge/photo_background/wear_signs: 字符串，可缺省。\n"
-        "- has_tag_visible/goods_received: 布尔或null。\n"
-        "- need_clarify: 布尔，是否必须补证。\n"
-        "- confidence: 0到1浮点。\n"
-        "- missing_evidence/red_flags/clarify_requests/uncertainty_reasons: 字符串数组。\n"
-        "买家文本:\n"
-        f"{text_context or '（空）'}\n"
-        "图片分析结果:\n"
-        f"{json.dumps(image_result, ensure_ascii=False)}\n"
-        "物流是否正常:\n"
-        f"{logistics_normal}\n"
-    )
-    llm_text = chat_completion(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        model_env_key="AGENT1_LLM_MODEL",
-        temperature=0.1,
-    )
-    if not llm_text:
-        return None
-    return _parse_json_text(llm_text)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(1.0, parsed))
 
 
 def _extend_unique(target_list: list[str], new_items: Any) -> None:
@@ -247,13 +131,91 @@ def _extend_unique(target_list: list[str], new_items: Any) -> None:
             target_list.append(text)
 
 
+# ---------- 证据评估：按材料覆盖度给档位与置信度 ----------
+def _derive_evidence_quality(has_text: bool, has_images: bool, has_logistics: bool, red_flag_count: int) -> str:
+    """
+    根据文本/图片/物流覆盖度给证据档位，并对疑点做降档处理。
+    """
+    score = int(has_text) + int(has_images) + int(has_logistics)
+    if score <= 1:
+        return EVIDENCE_LOW
+    if score == 2 or red_flag_count >= 1:
+        return EVIDENCE_MEDIUM
+    return EVIDENCE_HIGH
+
+
+def _derive_confidence(evidence_quality: str, llm_confidence: float, red_flag_count: int) -> float:
+    """
+    融合档位与 LLM 置信度得到最终置信度。
+    """
+    quality_base = {
+        EVIDENCE_LOW: 0.35,
+        EVIDENCE_MEDIUM: 0.62,
+        EVIDENCE_HIGH: 0.82,
+    }[evidence_quality]
+    fused = quality_base * 0.55 + llm_confidence * 0.45
+    return max(0.0, min(1.0, fused - red_flag_count * 0.08))
+
+
+# ---------- 诉求提取：先从聊天记录抽核心诉求，再指导视觉分析 ----------
+def _llm_extract_issue(text_context: str, logistics_signed: bool | None) -> dict[str, Any] | None:
+    """
+    调用 LLM 提取核心诉求、标签、收货判断与补证建议。
+    """
+    if not text_context:
+        return None
+    system_prompt = (
+        "你是售后事实提取助手。只抽取客观事实，不做责任归因。"
+        "请输出 JSON。"
+    )
+    user_prompt = (
+        "根据聊天记录提取核心诉求并返回 JSON，不要输出其他内容。\n"
+        "注意：用户诉求不等于退款/退货。只要用户反馈问题（如“香蕉发霉了”“屏幕花屏了”）就属于有效诉求。\n"
+        "如果聊天里有多个诉求，应该挂所有未解决的诉求。\n"
+        "字段要求：\n"
+        "- issue_summary: 字符串，一句话总结买家核心诉求\n"
+        "- intent_tags: 字符串数组，如 质量问题/物流异常/退款诉求\n"
+        "- goods_received: 布尔或null\n"
+        "- confidence: 0~1 浮点\n"
+        "- missing_evidence: 字符串数组\n"
+        "- red_flags: 字符串数组\n"
+        "聊天记录：\n"
+        f"{text_context}\n"
+        f"物流签收状态：{logistics_signed}\n"
+    )
+    llm_text = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model_env_key="AGENT1_LLM_MODEL",
+        temperature=0.1,
+    )
+    if not llm_text:
+        return None
+    return _parse_json_text(llm_text)
+
+
+# ---------- 语义兜底：模型不可用时用最小关键词保证收货判断可用 ----------
+def _fallback_infer_goods_received(text_context: str) -> bool | None:
+    """
+    在 LLM 不可用时，从文本中做最小化收货判断。
+    """
+    if not text_context:
+        return None
+    if any(keyword in text_context for keyword in ["没收到", "未收到", "没有收到", "未签收"]):
+        return False
+    if any(keyword in text_context for keyword in ["收到了", "已收到", "签收了", "拿到了"]):
+        return True
+    return None
+
+
 # ---------- 主入口：物流 + 多模态 + 规则化疑点，输出 FactOutput ----------
 def extract(materials: dict[str, Any]) -> FactOutput:
     """
     从纠纷材料中提取结构化事实，输出严格符合 schemas.FactOutput。
 
-    流程概要：校验输入 → 汇总缺失证据 → 查物流 → 分析首张举证图（若存在）
-    → 根据文本与物流打红点 → 计算证据质量与置信度 → 对仍为 None 的字段写 uncertainty_note。
+    流程概要：校验输入 → 诉求提取 → 按诉求引导多模态分析 → 汇总事实与证据结构。
 
     参数:
         materials: 须为 dict；建议包含 order_id、image_urls/evidence_images、
@@ -269,6 +231,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         raise ValueError(f"{LOG_PREFIX} 输入 materials 必须是 dict")
 
     order_id = str(materials.get("order_id", "") or "").strip()
+    buyer_text = str(materials.get("buyer_text", "") or "").strip()
     image_urls = _collect_image_urls(materials=materials)
     text_context = _collect_text(materials=materials)
 
@@ -285,90 +248,98 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     logistics_info = query_logistics(order_id=order_id) if order_id else None
     logistics_normal = None if logistics_info is None else (not logistics_info.is_abnormal)
-    goods_received = _infer_goods_received(
+    issue_result = _llm_extract_issue(
         text_context=text_context,
         logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
     )
+    issue_summary = None
+    intent_tags: list[str] = []
+    goods_received = None
+    llm_confidence = 0.45
+    if isinstance(issue_result, dict):
+        issue_summary = str(issue_result.get("issue_summary", "")).strip() or None
+        _extend_unique(intent_tags, issue_result.get("intent_tags"))
+        llm_goods_received = _parse_bool(issue_result.get("goods_received"))
+        if llm_goods_received is not None:
+            goods_received = llm_goods_received
+        llm_confidence = _safe_float(issue_result.get("confidence"), default=0.45)
+        _extend_unique(missing_evidence, issue_result.get("missing_evidence"))
+        _extend_unique(red_flags, issue_result.get("red_flags"))
+    else:
+        uncertainty_reasons.append("核心诉求提取失败，已回退基础摘要")
 
-    # 当前实现仅取首张图调用多模态；多图合并策略可由 Controller 传入预处理结果后再扩展。
-    image_result: dict[str, Any] = {}
-    if image_urls:
-        image_result = analyze_image(image_url=image_urls[0])
+    if not issue_summary:
+        # ---------- 诉求兜底：优先使用最近买家消息，避免混入过往历史语义 ----------
+        issue_summary = buyer_text or (text_context[:80] if text_context else "买家诉求待补充")
+
+    if goods_received is None:
+        goods_received = _fallback_infer_goods_received(text_context=text_context)
+    if goods_received is None and logistics_info is not None:
+        goods_received = logistics_info.is_signed
+
+    visual_observations: list[str] = []
+    attributes: dict[str, Any] = {}
+    defect_type = None
+    defect_location = None
+    defect_edge = None
+    has_tag_visible = None
+    photo_background = None
+    wear_signs = None
+    evidence_items: list[dict[str, Any]] = []
+
+    if text_context:
+        evidence_items.append({"type": "text", "content": text_context})
+    if logistics_info is not None:
+        evidence_items.append(
+            {
+                "type": "logistics",
+                "order_id": order_id,
+                "is_signed": logistics_info.is_signed,
+                "is_abnormal": logistics_info.is_abnormal,
+                "stagnant_days": logistics_info.stagnant_days,
+            }
+        )
+
+    for image_url in image_urls[:3]:
+        image_result = analyze_image(image_url=image_url, guidance=issue_summary)
+        evidence_items.append({"type": "image", "url": image_url})
         if image_result.get("error"):
-            uncertainty_reasons.append(str(image_result["error"]))
+            error_text = str(image_result["error"])
+            uncertainty_reasons.append(error_text)
             red_flags.append("图片分析失败，视觉证据暂不可靠")
+            continue
 
-    defect_type = image_result.get("defect_type")
-    defect_location = image_result.get("defect_location")
-    defect_edge = image_result.get("edge_condition")
-    has_tag_visible = image_result.get("has_tag")
-    photo_background = image_result.get("background")
-    wear_signs = image_result.get("wear_signs")
+        visual_description = str(image_result.get("visual_description", "")).strip()
+        if visual_description:
+            visual_observations.append(visual_description)
+        _extend_unique(visual_observations, image_result.get("findings"))
 
-    # 多模态返回“无法判断”时强制走不确定路径，避免错误事实带偏后续策略。
-    if isinstance(defect_type, str) and defect_type.strip() in {"无法判断", "不确定", "未知"}:
-        defect_type = None
-        missing_evidence.append("图片不清晰，请补拍瑕疵部位近景和全景各一张")
-        uncertainty_reasons.append("当前图片无法稳定识别瑕疵类型")
+        raw_attrs = image_result.get("attributes")
+        if isinstance(raw_attrs, dict):
+            for key, value in raw_attrs.items():
+                key_text = str(key or "").strip()
+                if key_text and value is not None and key_text not in attributes:
+                    attributes[key_text] = value
+
+        if defect_type is None:
+            defect_type = image_result.get("defect_type")
+        if defect_location is None:
+            defect_location = image_result.get("defect_location")
+        if defect_edge is None:
+            defect_edge = image_result.get("edge_condition")
+        if has_tag_visible is None:
+            has_tag_visible = image_result.get("has_tag")
+        if photo_background is None:
+            photo_background = image_result.get("background")
+        if wear_signs is None:
+            wear_signs = image_result.get("wear_signs")
 
     if logistics_info and goods_received is False and logistics_info.is_signed:
         red_flags.append("买家称未收到货，但物流显示已签收")
-
     if logistics_info and logistics_info.is_abnormal:
         red_flags.append(f"物流异常：停滞 {logistics_info.stagnant_days} 天")
-
-    if has_tag_visible is False and isinstance(wear_signs, str) and wear_signs:
-        red_flags.append("图片吊牌不可见，且存在使用痕迹描述")
-
-    # 通过 LLM 二次审阅事实，但只有“高置信且无需补证”时才允许覆盖字段。
-    llm_result = _llm_extract_facts(
-        text_context=text_context,
-        image_result=image_result,
-        logistics_normal=logistics_normal,
-    )
-    if isinstance(llm_result, dict):
-        llm_confidence_raw = llm_result.get("confidence")
-        try:
-            llm_confidence = float(llm_confidence_raw)
-        except (TypeError, ValueError):
-            llm_confidence = 0.0
-        parsed_need_clarify = _parse_bool(llm_result.get("need_clarify"))
-        need_clarify = parsed_need_clarify is True
-        can_override = llm_confidence >= 0.7 and not need_clarify
-
-        _extend_unique(missing_evidence, llm_result.get("missing_evidence"))
-        _extend_unique(red_flags, llm_result.get("red_flags"))
-        _extend_unique(uncertainty_reasons, llm_result.get("uncertainty_reasons"))
-        clarify_requests: list[str] = []
-        _extend_unique(clarify_requests, llm_result.get("clarify_requests"))
-        if clarify_requests:
-            _extend_unique(missing_evidence, clarify_requests)
-
-        if can_override:
-            llm_goods_received = _parse_bool(llm_result.get("goods_received"))
-            llm_has_tag_visible = _parse_bool(llm_result.get("has_tag_visible"))
-            llm_defect_type = str(llm_result.get("defect_type", "")).strip() or None
-            llm_defect_location = str(llm_result.get("defect_location", "")).strip() or None
-            llm_defect_edge = str(llm_result.get("defect_edge", "")).strip() or None
-            llm_photo_background = str(llm_result.get("photo_background", "")).strip() or None
-            llm_wear_signs = str(llm_result.get("wear_signs", "")).strip() or None
-
-            if goods_received is None and llm_goods_received is not None:
-                goods_received = llm_goods_received
-            if defect_type is None and llm_defect_type not in {None, "无法判断"}:
-                defect_type = llm_defect_type
-            if defect_location is None and llm_defect_location is not None:
-                defect_location = llm_defect_location
-            if defect_edge is None and llm_defect_edge not in {None, "无法判断"}:
-                defect_edge = llm_defect_edge
-            if has_tag_visible is None and llm_has_tag_visible is not None:
-                has_tag_visible = llm_has_tag_visible
-            if photo_background is None and llm_photo_background is not None:
-                photo_background = llm_photo_background
-            if wear_signs is None and llm_wear_signs is not None:
-                wear_signs = llm_wear_signs
-        else:
-            uncertainty_reasons.append("证据存在不确定性，已进入补证优先流程")
+    if not visual_observations and image_urls:
+        missing_evidence.append("缺少可用视觉分析结论，建议补充更清晰图片或视频")
 
     evidence_quality = _derive_evidence_quality(
         has_text=bool(text_context),
@@ -378,6 +349,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     )
     confidence = _derive_confidence(
         evidence_quality=evidence_quality,
+        llm_confidence=llm_confidence,
         red_flag_count=len(red_flags),
     )
 
@@ -400,6 +372,11 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     uncertainty_note = "；".join(dict.fromkeys(uncertainty_reasons)) if uncertainty_reasons else None
 
     return FactOutput(
+        issue_summary=issue_summary,
+        intent_tags=list(dict.fromkeys(intent_tags)),
+        visual_observations=list(dict.fromkeys(visual_observations)),
+        attributes=attributes,
+        evidence_items=evidence_items,
         goods_received=goods_received,
         defect_type=defect_type,
         defect_location=defect_location,

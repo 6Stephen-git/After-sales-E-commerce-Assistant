@@ -22,13 +22,15 @@ def test_extract_with_complete_materials():
         "order_id": "ORDER10001",
         "buyer_text": "我收到了衣服，袖子有破洞",
         "chat_history": [{"role": "buyer", "content": "已经签收，存在质量问题"}],
-        "image_urls": ["mock://tear-tag"],
+        "image_urls": ["mock://sample-damage"],
     }
 
     result = extract(materials)
+    assert result.issue_summary
+    assert result.visual_observations
+    assert result.evidence_items
     assert result.goods_received is True
-    assert result.defect_type == "破洞"
-    assert result.has_tag_visible is True
+    assert result.defect_type == "外观破损"
     assert result.logistics_normal is True
     assert result.evidence_quality in ["high", "medium"]
     assert result.confidence > 0.5
@@ -40,7 +42,7 @@ def test_extract_with_signed_but_claim_not_received():
         "order_id": "ORDER10002",
         "buyer_text": "我还没收到货",
         "chat_history": [{"role": "buyer", "content": "你们显示签收不对"}],
-        "image_urls": ["mock://stain-no-tag"],
+        "image_urls": ["mock://sample-stain"],
     }
 
     result = extract(materials)
@@ -74,23 +76,22 @@ def test_extract_empty_materials_boundary_case():
     assert result.uncertainty_note is not None
 
 
-# ---------- 场景：LLM要求补证时禁止覆盖结论，并写入补拍指引 ----------
-def test_extract_should_not_force_conclusion_when_llm_requires_clarify(monkeypatch):
-    def _mock_llm_extract_facts(**_kwargs):
+# ---------- 场景：诉求提取模型输出补证要求，需合并进缺失证据 ----------
+def test_extract_should_merge_missing_evidence_from_issue_llm(monkeypatch):
+    def _mock_llm_extract_issue(**_kwargs):
         return {
-            "need_clarify": True,
+            "issue_summary": "买家反馈商品有破损，需要核查位置",
+            "intent_tags": ["质量问题", "退款诉求"],
             "confidence": 0.95,
-            "defect_type": "破洞",
             "missing_evidence": ["请补拍破损部位近景和全景"],
-            "clarify_requests": ["请补拍吊牌与衣领位置细节"],
-            "uncertainty_reasons": ["当前图片边缘过暗，无法确认是否人为破损"],
+            "red_flags": ["描述与图片存在轻微冲突"],
         }
 
-    monkeypatch.setattr(fact_extractor_module, "_llm_extract_facts", _mock_llm_extract_facts)
+    monkeypatch.setattr(fact_extractor_module, "_llm_extract_issue", _mock_llm_extract_issue)
     monkeypatch.setattr(
         fact_extractor_module,
         "analyze_image",
-        lambda image_url: {"defect_type": "无法判断", "defect_location": "袖口"},
+        lambda **_kwargs: {"visual_description": "袖口区域疑似破损", "findings": ["袖口疑似破损"]},
     )
 
     result = extract(
@@ -101,27 +102,29 @@ def test_extract_should_not_force_conclusion_when_llm_requires_clarify(monkeypat
             "image_urls": ["mock://custom"],
         }
     )
-    assert result.defect_type is None
     assert any("补拍" in item for item in result.missing_evidence)
-    assert result.uncertainty_note is not None
+    assert any("冲突" in flag for flag in result.red_flags)
 
 
-# ---------- 场景：LLM高置信且无需补证时允许补全空字段 ----------
-def test_extract_should_fill_missing_fields_from_high_confidence_llm(monkeypatch):
-    def _mock_llm_extract_facts(**_kwargs):
-        return {
-            "need_clarify": False,
-            "confidence": 0.91,
+# ---------- 场景：诉求提取失败时回退基础摘要并保持输出可用 ----------
+def test_extract_should_fallback_when_issue_llm_unavailable(monkeypatch):
+    def _mock_llm_extract_issue(**_kwargs):
+        return None
+
+    monkeypatch.setattr(fact_extractor_module, "_llm_extract_issue", _mock_llm_extract_issue)
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "analyze_image",
+        lambda **_kwargs: {
+            "visual_description": "左袖口存在清晰破洞",
+            "findings": ["左袖口破洞", "边缘毛糙"],
+            "attributes": {"issue_location": "左袖口"},
             "defect_type": "破洞",
-            "defect_location": "袖口",
-            "defect_edge": "毛糙",
-            "has_tag_visible": True,
-            "photo_background": "木桌",
-            "wear_signs": "无明显穿着痕迹",
-        }
-
-    monkeypatch.setattr(fact_extractor_module, "_llm_extract_facts", _mock_llm_extract_facts)
-    monkeypatch.setattr(fact_extractor_module, "analyze_image", lambda image_url: {})
+            "defect_location": "左袖口",
+            "edge_condition": "毛糙",
+            "has_tag": True,
+        },
+    )
 
     result = extract(
         {
@@ -131,6 +134,55 @@ def test_extract_should_fill_missing_fields_from_high_confidence_llm(monkeypatch
             "image_urls": ["mock://custom"],
         }
     )
+    assert result.issue_summary is not None
+    assert result.visual_observations
     assert result.defect_type == "破洞"
-    assert result.defect_location == "袖口"
+    assert result.defect_location == "左袖口"
     assert result.has_tag_visible is True
+
+
+# ---------- 场景：诉求提取成功时可输出 intent_tags ----------
+def test_extract_should_keep_intent_tags_from_issue_llm(monkeypatch):
+    def _mock_llm_extract_issue(**_kwargs):
+        return {
+            "issue_summary": "买家反馈物流迟迟未更新",
+            "intent_tags": ["物流异常", "催处理"],
+            "goods_received": False,
+            "confidence": 0.91,
+        }
+
+    monkeypatch.setattr(fact_extractor_module, "_llm_extract_issue", _mock_llm_extract_issue)
+    monkeypatch.setattr(fact_extractor_module, "analyze_image", lambda **_kwargs: {"visual_description": "未见可判定瑕疵"})
+
+    result = extract(
+        {
+            "order_id": "ORDER10013ABN",
+            "buyer_text": "物流一直不更新",
+            "chat_history": [{"role": "buyer", "content": "麻烦尽快处理"}],
+            "image_urls": ["mock://custom"],
+        }
+    )
+    assert "物流异常" in result.intent_tags
+    assert result.goods_received is False
+
+
+# ---------- 场景：可疑图源线索由模型直接写入视觉描述 ----------
+def test_extract_should_keep_external_source_clue_in_visual_observations(monkeypatch):
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "analyze_image",
+        lambda **_kwargs: {
+            "visual_description": "图像右下角有 sohu.com 水印",
+            "findings": ["图片带有网址水印，疑似网络公开图片"],
+        },
+    )
+
+    result = extract(
+        {
+            "order_id": "ORDER10014",
+            "buyer_text": "香蕉发霉了",
+            "chat_history": [{"role": "buyer", "content": "这是我拍的图"}],
+            "image_urls": ["mock://custom"],
+        }
+    )
+    assert any("水印" in item or "疑似网络公开图片" in item for item in result.visual_observations)

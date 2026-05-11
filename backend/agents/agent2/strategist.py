@@ -90,8 +90,8 @@ def _score_by_facts(strategy_scores: Dict[str, float], input_data: StrategyInput
         strategy_scores[STRATEGY_DEFEND] += 0.15
         risk_factors.append("存在疑点信号，需准备更完整证据链")
     if facts.missing_evidence:
+        # 缺失证据只在事实卡展示，这里仅影响策略分，不重复生成风险文案。
         strategy_scores[STRATEGY_NEGOTIATE] += 0.1
-        risk_factors.append(f"缺失关键证据：{','.join(facts.missing_evidence)}")
 
 
 def _score_by_buyer_profile(strategy_scores: Dict[str, float], input_data: StrategyInput, risk_factors: List[str]) -> None:

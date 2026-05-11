@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- 测试/联调：mock:// 前缀走本地固定返回，不落网 ----------
-def _mock_analyze_image(image_url: str) -> dict[str, Any]:
+def _mock_analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     """
     离线模拟多模态返回结构，仅用于测试或本地联调。
 
@@ -35,32 +35,43 @@ def _mock_analyze_image(image_url: str) -> dict[str, Any]:
     """
     key = image_url.replace("mock://", "").strip().lower()
     mock_map: dict[str, dict[str, Any]] = {
-        "tear-tag": {
-            "defect_type": "破洞",
-            "defect_location": "衣袖侧边",
-            "edge_condition": "毛糙",
-            "has_tag": True,
-            "background": "桌面",
-            "wear_signs": "无明显穿着痕迹",
+        "sample-damage": {
+            "visual_description": "商品局部存在明显外观破损，边缘不规则。",
+            "findings": ["局部区域可见破损", "破损边缘不规则", "问题区域较集中"],
+            "attributes": {"issue_location": "商品局部", "damage_shape": "不规则", "damage_severity": "中等"},
+            "defect_type": "外观破损",
+            "defect_location": "商品局部",
+            "edge_condition": "不规则",
+            "background": "平面背景",
+            "wear_signs": "无法仅凭图片判断使用痕迹",
         },
-        "stain-no-tag": {
+        "sample-stain": {
+            "visual_description": "商品表面存在明显污渍，分布在局部区域。",
+            "findings": ["表面可见污渍", "污渍集中在单一区域"],
+            "attributes": {"issue_location": "表面局部", "issue_type": "污渍"},
             "defect_type": "污渍",
-            "defect_location": "胸前",
+            "defect_location": "表面局部",
             "edge_condition": "无法判断",
-            "has_tag": False,
-            "background": "床上",
-            "wear_signs": "有轻微折痕",
+            "background": "平面背景",
+            "wear_signs": "无法仅凭图片判断使用痕迹",
         },
-        "clean-tag": {
+        "sample-clean": {
+            "visual_description": "图片中未发现明显外观异常。",
+            "findings": ["未见明显破损或污渍", "整体外观较完整"],
+            "attributes": {"issue_type": "无明显瑕疵"},
             "defect_type": "无瑕疵",
             "defect_location": "无法判断",
             "edge_condition": "无法判断",
-            "has_tag": True,
-            "background": "桌面",
-            "wear_signs": "无明显穿着痕迹",
+            "background": "平面背景",
+            "wear_signs": "无法仅凭图片判断使用痕迹",
         },
     }
-    return mock_map.get(key, {"error": f"图片分析失败：未识别的 mock 图片标识 {key}"})
+    if key not in mock_map:
+        return {"error": f"图片分析失败：未识别的 mock 图片标识 {key}"}
+    payload = mock_map[key]
+    if guidance:
+        payload["guided_by"] = guidance
+    return payload
 
 
 # ---------- 端点识别：阿里云百炼多模态 generation 走专用协议 ----------
@@ -181,6 +192,30 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
         含 defect_type、edge_condition、has_tag 等键的 dict；无效项省略。
     """
     out: dict[str, Any] = {}
+    visual_description = raw.get("visual_description")
+    if isinstance(visual_description, str) and visual_description.strip():
+        out["visual_description"] = visual_description.strip()
+
+    findings = raw.get("findings")
+    if isinstance(findings, list):
+        normalized_findings: list[str] = []
+        for item in findings:
+            text = str(item or "").strip()
+            if text:
+                normalized_findings.append(text)
+        if normalized_findings:
+            out["findings"] = normalized_findings
+
+    attributes = raw.get("attributes")
+    if isinstance(attributes, dict):
+        cleaned_attributes: dict[str, Any] = {}
+        for key, value in attributes.items():
+            key_text = str(key or "").strip()
+            if key_text and value is not None:
+                cleaned_attributes[key_text] = value
+        if cleaned_attributes:
+            out["attributes"] = cleaned_attributes
+
     for key in ("defect_type", "defect_location", "edge_condition", "background", "wear_signs"):
         val = raw.get(key)
         if isinstance(val, str) and val.strip():
@@ -191,8 +226,31 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# ---------- 结果校验：半结构化模式下至少包含一种可用观察 ----------
+def _has_meaningful_vision_content(normalized: dict[str, Any]) -> bool:
+    """
+    判断多模态结果是否包含可消费的视觉信息。
+
+    仅认新模式字段：
+    - visual_description
+    - findings
+    - attributes
+    """
+    if not isinstance(normalized, dict):
+        return False
+    if isinstance(normalized.get("visual_description"), str) and normalized["visual_description"].strip():
+        return True
+    findings = normalized.get("findings")
+    if isinstance(findings, list) and any(str(item or "").strip() for item in findings):
+        return True
+    attributes = normalized.get("attributes")
+    if isinstance(attributes, dict) and len(attributes) > 0:
+        return True
+    return False
+
+
 # ---------- 百炼请求体：OpenAI 兼容 multimodal messages 结构 ----------
-def _build_dashscope_payload(image_ref: str, model: str) -> dict[str, Any]:
+def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> dict[str, Any]:
     """
     构造 DashScope multimodal-generation 请求 JSON。
 
@@ -203,16 +261,16 @@ def _build_dashscope_payload(image_ref: str, model: str) -> dict[str, Any]:
     返回:
         可作为 json= 发送的 dict。
     """
+    guide_text = guidance.strip() or "请提取图片里与买家诉求相关的关键视觉信息。"
     vision_prompt = (
-        "你是电商纠纷举证图片分析助手。请仅依据图片给出客观视觉特征，输出一个 JSON 对象，不要其它说明文字。\n"
-        "JSON 字段与取值要求：\n"
-        "- defect_type: 字符串，取值为「破洞」「污渍」「色差」「线头」「功能故障」「无瑕疵」之一，无法判断时填「无法判断」\n"
-        "- defect_location: 字符串，瑕疵所在部位，无法判断填「无法判断」\n"
-        "- edge_condition: 字符串，取值为「整齐」「毛糙」「无法判断」之一\n"
-        "- has_tag: 布尔，图片中是否清晰可见吊牌\n"
-        "- background: 字符串，拍摄背景简述\n"
-        "- wear_signs: 字符串，穿着/使用痕迹描述，没有明显痕迹则填「无明显穿着痕迹」\n"
-        "只输出 JSON。"
+        "你是电商售后视觉分析助手。请依据图片与分析指引输出 JSON，不要输出其他内容。\n"
+        f"分析指引：{guide_text}\n"
+        "JSON 字段要求：\n"
+        "- visual_description: 字符串，一两句话描述关键观察结果\n"
+        "- findings: 字符串数组，列出 3~6 条关键观察\n"
+        "- attributes: 对象，放可扩展细节（如位置、尺寸、状态）\n"
+        "- 若发现水印/网址/网图等可疑图源线索，请直接写进 visual_description 或 findings 里\n"
+        "输出必须是合法 JSON。"
     )
     return {
         "model": model,
@@ -234,6 +292,7 @@ def _analyze_image_dashscope(
     api_key: str,
     image_ref: str,
     model: str,
+    guidance: str = "",
 ) -> dict[str, Any]:
     """
     调用阿里云百炼多模态接口，将模型返回文本解析为结构化事实字段。
@@ -248,7 +307,7 @@ def _analyze_image_dashscope(
         成功为视觉特征 dict；失败为 `{"error": "中文原因"}`。
     """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    payload = _build_dashscope_payload(image_ref=image_ref, model=model)
+    payload = _build_dashscope_payload(image_ref=image_ref, model=model, guidance=guidance)
     backoff_seconds = [0.2, 0.4, 0.8]
 
     logger.info("%s 开始调用百炼多模态，model=%s", LOG_PREFIX, model)
@@ -316,14 +375,14 @@ def _analyze_image_dashscope(
             continue
 
         normalized = _normalize_vision_dict(raw=parsed)
-        if not normalized.get("defect_type"):
-            logger.error("%s 第%d次调用失败：JSON 缺少 defect_type", LOG_PREFIX, attempt + 1)
+        if not _has_meaningful_vision_content(normalized=normalized):
+            logger.error("%s 第%d次调用失败：JSON 缺少可用视觉观察字段", LOG_PREFIX, attempt + 1)
             if attempt == 2:
-                return {"error": "图片分析失败：模型 JSON 缺少 defect_type 字段"}
+                return {"error": "图片分析失败：模型 JSON 缺少可用视觉观察字段"}
             time.sleep(backoff_seconds[attempt])
             continue
 
-        logger.info("%s 百炼多模态解析成功，defect_type=%s", LOG_PREFIX, normalized.get("defect_type"))
+        logger.info("%s 百炼多模态解析成功，summary=%s", LOG_PREFIX, normalized.get("visual_description", ""))
         return normalized
 
     return {"error": "图片分析失败：未知错误"}
@@ -377,7 +436,7 @@ def _analyze_image_legacy(*, endpoint: str, api_key: str, image_url: str) -> dic
 
 
 # ---------- 生产路径：读环境变量、HTTP POST、失败返回 error 字典（不抛） ----------
-def analyze_image(image_url: str) -> dict[str, Any]:
+def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     """
     调用多模态服务，从单张图片 URL 提取视觉事实字段。
 
@@ -394,7 +453,7 @@ def analyze_image(image_url: str) -> dict[str, Any]:
         return {"error": "图片分析失败：image_url 为空"}
 
     if image_url.startswith("mock://"):
-        return _mock_analyze_image(image_url=image_url)
+        return _mock_analyze_image(image_url=image_url, guidance=guidance)
 
     endpoint = os.getenv("VISION_API_ENDPOINT", "").strip()
     api_key = os.getenv("VISION_API_KEY", "").strip()
@@ -411,6 +470,7 @@ def analyze_image(image_url: str) -> dict[str, Any]:
             api_key=api_key,
             image_ref=image_url,
             model=model,
+            guidance=guidance,
         )
 
     return _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)

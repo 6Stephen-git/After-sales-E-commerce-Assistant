@@ -82,6 +82,10 @@ python scripts/crawl_rule_documents.py --user-data-dir "C:/Users/xxx/AppData/Loc
 - `data/rules_raw/<category>/<doc_id>.json`: 结构化结果（含条款切分）
 - `data/rules_raw/_crawl_report.json`: 汇总报告（成功/失败统计和文件路径）
 
+抓取正文截断规则：
+
+- 仅以 `这篇文章是否易于理解？` 作为正文结束标识。
+
 ## 7) 落库到 MySQL（platform_rules）
 
 在项目根执行：
@@ -92,7 +96,8 @@ python scripts/import_rules_raw_to_mysql.py
 
 说明：
 
-- 脚本优先读取 `data/rules_raw/_crawl_report.json` 中的 `output_json` 列表，逐条入库。
+- 脚本会合并两类来源后入库：`_crawl_report.json` 的成功列表 + `data/rules_raw` 目录扫描结果。
+- 这样可补齐“历史已抓到文件但未在报告里登记”的遗漏项。
 - 按 `doc_id` 生成 `rule_key`（格式：`taobao_rule::<doc_id>`），执行 upsert。
 - MySQL 下会自动校验 `platform_rules.rule_content` 为 `LONGTEXT`，避免正文过长写入失败。
 - 连接配置沿用后端环境变量：`DB_URL` 或 `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD`。

@@ -30,7 +30,7 @@ from schemas import (
 # ---------- recommend：三典型策略 + 无规则无判例边界 ----------
 class TestAgent2Recommend:
     def test_recommend_compensate_when_high_quality_defect(self):
-        """高质量瑕疵证据，倾向体面善后策略。"""
+        """高质量瑕疵证据，倾向善后策略。"""
         facts = FactOutput(
             goods_received=True,
             defect_type="破洞",

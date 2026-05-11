@@ -11,21 +11,18 @@ const default_context = {
 }
 const ENABLE_ANALYZE_STREAM = String(import.meta.env.VITE_ENABLE_ANALYZE_STREAM || '0') === '1'
 
+// ---------- 模块级状态：跨路由切换保留对话和分析结果 ----------
+const messages = ref([])
+const report = ref(null)
+const loading = ref(false)
+const input_text = ref('')
+const sender_role = ref('merchant')
+const error_message = ref('')
+const progress_message = ref('')
+const message_id_seed = ref(messages.value.length + 1)
+
 // ---------- 状态管理：纠纷消息、分析报告与交互状态 ----------
 export function use_dispute() {
-  const messages = ref([
-    { id: 1, role: 'buyer', content: '衣服收到后有破洞，我要退款。' },
-    { id: 2, role: 'merchant', content: '您好，麻烦您先提供下破损位置的清晰照片。' }
-  ])
-  const report = ref(null)
-  const loading = ref(false)
-  const input_text = ref('')
-  // ---------- 发送身份：商家侧或用户扮演买家，决定 append_message 的 role ----------
-  const sender_role = ref('merchant')
-  const error_message = ref('')
-  const progress_message = ref('')
-  const message_id_seed = ref(messages.value.length + 1)
-
   // ---------- 派生状态：当前是否已有分析报告 ----------
   const has_report = computed(() => report.value !== null)
 
@@ -98,6 +95,8 @@ export function use_dispute() {
   async function request_ai_help() {
     loading.value = true
     error_message.value = ''
+    // ---------- 清理旧报告：避免新分析与上次结果混杂 ----------
+    report.value = null
     progress_message.value = '正在提交分析请求...'
     try {
       const payload = {
@@ -110,6 +109,8 @@ export function use_dispute() {
         order_id: default_context.order_id,
         order_amount: default_context.order_amount,
         buyer_id: default_context.buyer_id,
+        // ---------- 每次请求都使用前端当前材料，避免后端缓存混入历史无关图片 ----------
+        reset_context: true,
         image_urls: messages.value
           .map((item) => String(item.image_url || '').trim())
           .filter((url) => Boolean(url))

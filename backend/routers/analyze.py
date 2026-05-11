@@ -40,6 +40,7 @@ class AnalyzeRequest(BaseModel):
     order_amount: float = Field(default=0.0, description="订单金额")
     buyer_id: str = Field(default="", description="买家脱敏标识")
     image_urls: list[str] = Field(default_factory=list, description="举证图片 URL")
+    reset_context: bool = Field(default=False, description="是否重置该纠纷缓存并以本次材料为准")
 
 
 # ---------- 请求转换：从消息列表提取 buyer_text ----------
@@ -77,6 +78,7 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
         "buyer_text": _extract_buyer_text(messages=request.messages),
         "chat_history": request.messages,
         "image_urls": request.image_urls,
+        "reset_context": request.reset_context,
     }
 
 

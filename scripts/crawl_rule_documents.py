@@ -35,16 +35,8 @@ DATE_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?$")
 CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百千零〇0-9]+章")
 ARTICLE_RE = re.compile(r"^(第[一二三四五六七八九十百千零〇0-9]+条)\s*(.*)$")
 
-# 触达这些词一般代表正文已结束（进入投票、页脚、友情链接等区域）
-END_MARKERS = (
-    "这篇文章是否易于理解",
-    "规则协议",
-    "平台服务协议",
-    "新手上路",
-    "关于淘宝",
-    "阿里巴巴集团",
-    "客服",
-)
+# 正文结束标识：仅以该投票文案作为截断终点（按业务要求固定）
+END_MARKER = "这篇文章是否易于理解？"
 
 
 @dataclass
@@ -112,6 +104,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="最多抓取多少条（0 表示不限制）",
+    )
+    parser.add_argument(
+        "--doc-id-keyword",
+        action="append",
+        default=[],
+        help="仅抓取 doc_id/doc_name/url 包含该关键词的目标，可重复传入",
     )
     return parser.parse_args()
 
@@ -197,7 +195,7 @@ def find_content_start(lines: list[str], doc_name: str) -> int:
 def find_content_end(lines: list[str], start_idx: int) -> int:
     for idx in range(start_idx, len(lines)):
         line = lines[idx]
-        if any(marker in line for marker in END_MARKERS):
+        if END_MARKER in line:
             return idx
     return len(lines)
 
@@ -264,6 +262,21 @@ def parse_articles(core_lines: list[str]) -> tuple[str, str | None, list[dict[st
         current["content"] = "\n".join(current["content_lines"]).strip()
         current.pop("content_lines", None)
         articles.append(current)
+
+    # 对于表格/说明型规则（无“第X条”），兜底写入整段正文，避免 article_count=0 丢失主体内容。
+    if not articles:
+        body_lines = core_lines[1:] if len(core_lines) > 1 else core_lines
+        body_text = "\n".join(body_lines).strip()
+        if body_text:
+            articles.append(
+                {
+                    "chapter": "",
+                    "article_no": "正文",
+                    "article_title": "全文内容",
+                    "raw_header": "正文",
+                    "content": body_text,
+                }
+            )
 
     return title, published_at, articles
 
@@ -422,6 +435,23 @@ def main() -> int:
 
     if args.max_items > 0:
         targets = targets[: args.max_items]
+
+    if args.doc_id_keyword:
+        keywords = [str(item).strip() for item in args.doc_id_keyword if str(item).strip()]
+        if keywords:
+            filtered_targets: list[dict[str, Any]] = []
+            for target in targets:
+                haystack = " ".join(
+                    [
+                        str(target.get("doc_id", "")),
+                        str(target.get("doc_name", "")),
+                        str(target.get("url", "")),
+                    ]
+                )
+                if any(keyword in haystack for keyword in keywords):
+                    filtered_targets.append(target)
+            targets = filtered_targets
+            print(f"[INFO] 关键词过滤后目标数：{len(targets)}（keywords={keywords}）")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.output_dir / "_crawl_report.json"
