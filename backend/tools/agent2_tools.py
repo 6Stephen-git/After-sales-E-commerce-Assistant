@@ -22,7 +22,15 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.db.connection import get_engine  # noqa: E402
 from backend.db.models import BuyerProfileRecord  # noqa: E402
-from schemas import BuyerProfile, FactOutput, MatchedRule, SimilarCase  # noqa: E402
+from schemas import (  # noqa: E402
+    BuyerProfile,
+    CustomerValueInput,
+    CustomerValueOutput,
+    CustomerValueScoreItem,
+    FactOutput,
+    MatchedRule,
+    SimilarCase,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -142,6 +150,7 @@ def _build_default_buyer_profile(buyer_id: str) -> BuyerProfile:
         avg_order_value=99.0,
         return_rate=0.15,
         malicious_flags=0,
+        positive_review_count=1,
         credit_level="medium",
     )
 
@@ -325,3 +334,169 @@ def search_similar_cases_vector(dispute_desc: str, top_k: int = 3) -> List[Simil
         top_k,
     )
     return []
+
+
+# ---------- 客户价值评估：双维评分（长期价值 + 本单价值） ----------
+def _build_score_item(dimension: str, score: int, max_score: int, reason: str) -> CustomerValueScoreItem:
+    """
+    构建统一分项结构，确保输出格式稳定。
+    """
+    return CustomerValueScoreItem(dimension=dimension, score=score, max_score=max_score, reason=reason)
+
+
+def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutput:
+    """
+    评估客户长期价值与本单处理价值，输出结构化评分与通道触发标记。
+
+    设计约束：
+    1. 双维独立评分，避免一维高分被另一维低分稀释。
+    2. 非均权重：长期维度和本单维度均按业务重要性分配权重。
+    3. 纯函数无状态：不访问数据库，不发起外部调用。
+    """
+    profile = input_data.buyer_profile
+
+    # ----- 长期价值分（满分 100）-----
+    total_spend = max(0.0, profile.avg_order_value) * max(0, profile.purchase_count)
+    if total_spend >= 2000:
+        spend_score, spend_reason = 30, "累计消费金额高，长期贡献强"
+    elif total_spend >= 500:
+        spend_score, spend_reason = 20, "累计消费金额中高，对店铺有稳定贡献"
+    elif total_spend >= 100:
+        spend_score, spend_reason = 10, "累计消费金额一般，具备基础价值"
+    else:
+        spend_score, spend_reason = 3, "累计消费金额偏低，长期贡献有限"
+
+    purchase_count = max(0, profile.purchase_count)
+    if purchase_count >= 20:
+        order_count_score, order_count_reason = 25, "复购频次高，客户关系稳定"
+    elif purchase_count >= 10:
+        order_count_score, order_count_reason = 18, "多次复购，黏性较高"
+    elif purchase_count >= 3:
+        order_count_score, order_count_reason = 10, "已有复购行为，具备维护价值"
+    else:
+        order_count_score, order_count_reason = 3, "复购行为较少，关系尚浅"
+
+    dispute_rate = max(0.0, min(1.0, profile.dispute_rate))
+    if dispute_rate <= 0.05:
+        dispute_score, dispute_reason = 20, "历史纠纷率低，合作顺畅"
+    elif dispute_rate <= 0.15:
+        dispute_score, dispute_reason = 14, "历史纠纷率可控，合作总体稳定"
+    elif dispute_rate <= 0.3:
+        dispute_score, dispute_reason = 7, "历史纠纷率偏高，维护成本上升"
+    else:
+        dispute_score, dispute_reason = 1, "历史纠纷率高，长期合作风险大"
+
+    positive_review_count = max(0, profile.positive_review_count)
+    if positive_review_count >= 5:
+        review_score, review_reason = 15, "好评/带图反馈多，正向口碑价值高"
+    elif positive_review_count >= 2:
+        review_score, review_reason = 10, "存在稳定正向反馈，口碑贡献较好"
+    elif positive_review_count >= 1:
+        review_score, review_reason = 6, "已有正向反馈记录，具备口碑潜力"
+    else:
+        review_score, review_reason = 0, "暂无好评/带图沉淀，口碑贡献有限"
+
+    if purchase_count >= 5:
+        repurchase_score, repurchase_reason = 10, "复购行为稳定，消费规律性较好"
+    elif purchase_count >= 2:
+        repurchase_score, repurchase_reason = 6, "已形成复购习惯，规律性初步建立"
+    elif purchase_count == 1:
+        repurchase_score, repurchase_reason = 2, "仅有单次购买，规律性不足"
+    else:
+        repurchase_score, repurchase_reason = 0, "无有效复购记录"
+
+    long_term_breakdown = [
+        _build_score_item("累计消费金额", spend_score, 30, spend_reason),
+        _build_score_item("累计订单数/复购行为", order_count_score, 25, order_count_reason),
+        _build_score_item("历史纠纷率", dispute_score, 20, dispute_reason),
+        _build_score_item("好评/带图记录", review_score, 15, review_reason),
+        _build_score_item("复购间隔规律性", repurchase_score, 10, repurchase_reason),
+    ]
+    long_term_score = sum(item.score for item in long_term_breakdown)
+
+    # ----- 本单价值分（满分 100）-----
+    order_amount = max(0.0, input_data.order_amount)
+    if order_amount >= 500:
+        amount_score, amount_reason = 40, "本单金额高，处理影响大"
+    elif order_amount >= 200:
+        amount_score, amount_reason = 28, "本单金额中高，需要兼顾体验与成本"
+    elif order_amount >= 50:
+        amount_score, amount_reason = 14, "本单金额中等，建议稳妥处理"
+    else:
+        amount_score, amount_reason = 4, "本单金额较低，优先控制处理成本"
+
+    severity_key = input_data.defect_severity.strip().lower()
+    severity_score_map = {
+        "severe": (25, "问题严重，处理不当易升级"),
+        "moderate": (15, "问题中等，需给出明确方案"),
+        "minor": (5, "问题较轻，可在规则内快速收敛"),
+    }
+    severity_score, severity_reason = severity_score_map.get(severity_key, (15, "严重性未明确，按中等严重处理"))
+
+    recoverability_key = input_data.goods_recoverability.strip().lower()
+    recoverability_score_map = {
+        "unrecoverable": (20, "商品不可挽回，商家损失大，需重点处理"),
+        "repairable": (12, "商品可修复，存在一定损失与处理空间"),
+        "resalable": (4, "商品可二次销售，实际损失相对可控"),
+    }
+    recoverability_score, recoverability_reason = recoverability_score_map.get(
+        recoverability_key,
+        (12, "可挽回性未明确，按可修复处理"),
+    )
+
+    cooperation_key = input_data.buyer_cooperation.strip().lower()
+    cooperation_score_map = {
+        "good": (10, "买家配合度高，沟通成本低"),
+        "neutral": (6, "买家配合度一般，需持续引导"),
+        "poor": (2, "买家配合度低，处理阻力较大"),
+    }
+    cooperation_score, cooperation_reason = cooperation_score_map.get(cooperation_key, (6, "配合度未明确，按一般处理"))
+
+    reasonableness_key = input_data.demand_reasonableness.strip().lower()
+    reasonableness_score_map = {
+        "reasonable": (5, "诉求合理，协商成功概率更高"),
+        "borderline": (3, "诉求部分合理，需要边界沟通"),
+        "unreasonable": (1, "诉求偏离规则，需谨慎让步"),
+    }
+    reasonableness_score, reasonableness_reason = reasonableness_score_map.get(
+        reasonableness_key,
+        (3, "诉求合理性未明确，按边界诉求处理"),
+    )
+
+    order_breakdown = [
+        _build_score_item("本单金额", amount_score, 40, amount_reason),
+        _build_score_item("售后问题严重性", severity_score, 25, severity_reason),
+        _build_score_item("商品可挽回性（越差分越高）", recoverability_score, 20, recoverability_reason),
+        _build_score_item("买家配合度", cooperation_score, 10, cooperation_reason),
+        _build_score_item("诉求合理性", reasonableness_score, 5, reasonableness_reason),
+    ]
+    order_score = sum(item.score for item in order_breakdown)
+
+    # ----- 通道触发与建议输出 -----
+    long_term_triggered = long_term_score >= 60
+    order_triggered = order_score >= 60
+
+    if long_term_triggered:
+        channel = "long_term"
+        compensation_uplift = "+10%~20%"
+        tone_suggestion = "偏暖，珍惜老客"
+    elif order_triggered:
+        channel = "order"
+        compensation_uplift = "+10%~20%"
+        tone_suggestion = "快速响应，妥善处理"
+    else:
+        channel = "none"
+        compensation_uplift = None
+        tone_suggestion = None
+
+    return CustomerValueOutput(
+        long_term_score=long_term_score,
+        order_score=order_score,
+        long_term_breakdown=long_term_breakdown,
+        order_breakdown=order_breakdown,
+        long_term_triggered=long_term_triggered,
+        order_triggered=order_triggered,
+        channel=channel,
+        compensation_uplift=compensation_uplift,
+        tone_suggestion=tone_suggestion,
+    )

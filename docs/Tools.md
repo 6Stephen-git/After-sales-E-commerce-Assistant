@@ -46,6 +46,7 @@
 | `query_buyer_profile`         | 查询买家画像     | MySQL                   | 主数据库         |
 | `search_similar_cases`        | 检索历史判例     | MySQL                   | 结构化标签检索      |
 | `search_similar_cases_vector` | 向量语义检索历史判例 | ChromaDB                | 可选，不可用时返回空列表 |
+| `evaluate_customer_value`     | 双维客户价值评估  | 本地计算（纯函数）            | 无外部依赖         |
 
 
 `**match_rules**`
@@ -67,6 +68,13 @@
 - 输出：`List[SimilarCase]`
 - 实现：基于 `case_type`、`outcome` 等标签 SQL 精确匹配，不涉及向量检索。
 - 约束：只查询当前商家自己的判例库（`WHERE merchant_id = 当前商家ID`）。
+
+`**evaluate_customer_value**`
+
+- 输入：`input_data: CustomerValueInput`
+- 输出：`CustomerValueOutput`
+- 实现：按长期价值与本单价值两条独立评分链路计算，输出分项明细、触发通道和优待建议。
+- 约束：纯函数，不读取数据库，不调用 HTTP 或 LLM。
 
 ## Agent 3 — 话术生成员
 

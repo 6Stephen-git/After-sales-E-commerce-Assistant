@@ -7,24 +7,188 @@ Agent 2：策略参谋员。
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 import json
+import logging
 import os
 
 from schemas import (
+    CustomerValueInput,
     STRATEGY_COMPENSATE,
     STRATEGY_DEFEND,
     STRATEGY_NEGOTIATE,
     StrategyInput,
     StrategyOutput,
 )
+from backend.tools.agent2_tools import evaluate_customer_value
 from backend.tools.llm_client import chat_completion
 
 
 AGENT2_LOG_PREFIX = "[Agent2]"
+logger = logging.getLogger(__name__)
 
 
 # ---------- 多源加权：规则票权、事实、画像、判例、订单金额 ----------
+def _build_customer_value_infer_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    构建客户价值字段推断提示词（规则化判定 + 跨品类 few-shot）。
+
+    设计要点：
+    1. 明确四个字段的判定优先级与边界条件，减少模型随意发挥。
+    2. 使用跨品类示例提升泛化能力，避免退化为单类目经验匹配。
+    3. 强制结构化 JSON 输出，便于后续严格校验。
+    """
+    system_prompt = (
+        "你是电商售后策略分析器。任务是从输入事实中推断 4 个结构化字段，"
+        "用于后续客户价值评估。禁止假设固定品类；必须遵循以下判定规则。\n"
+        "\n"
+        "【字段1：defect_severity】\n"
+        "- severe：核心功能不可用/影响安全/无法正常履约，或损坏程度显著。\n"
+        "- moderate：存在明确问题并影响体验，但不构成完全不可用。\n"
+        "- minor：轻微瑕疵或主观体验差异，基本功能可用。\n"
+        "优先看事实证据（facts）中的问题描述、证据质量、使用影响，不要看品类名。\n"
+        "\n"
+        "【字段2：goods_recoverability】\n"
+        "- unrecoverable：退回后基本无法二次销售，或修复成本显著不经济。\n"
+        "- repairable：可修复后再处理，但存在明确损失。\n"
+        "- resalable：可直接二次销售或轻微处理即可再次流转。\n"
+        "优先看损坏可逆性与再销售可能性，不依赖类目经验。\n"
+        "\n"
+        "【字段3：buyer_cooperation】\n"
+        "- good：愿意配合补充证据、反馈及时、沟通一致。\n"
+        "- neutral：部分配合或信息不完整，但可继续推进。\n"
+        "- poor：明显拒绝配合、前后矛盾、反复施压且缺乏有效信息。\n"
+        "优先看聊天行为和证据配合度。\n"
+        "\n"
+        "【字段4：demand_reasonableness】\n"
+        "- reasonable：诉求与事实证据、平台常规规则基本一致。\n"
+        "- borderline：诉求有部分合理性，但金额或方式偏激进。\n"
+        "- unreasonable：诉求明显超出事实支撑或违背规则边界。\n"
+        "优先看诉求-证据一致性，再看金额与处理方式是否成比例。\n"
+        "\n"
+        "输出要求：\n"
+        "1) 只输出 JSON 对象，不输出解释文本。\n"
+        "2) JSON 严格包含且仅包含 4 个键：\n"
+        '{"defect_severity":"minor|moderate|severe","goods_recoverability":"resalable|repairable|unrecoverable",'
+        '"buyer_cooperation":"good|neutral|poor","demand_reasonableness":"reasonable|borderline|unreasonable"}\n'
+        "3) 不允许返回 null、空字符串或中文枚举。"
+    )
+
+    # 跨品类 few-shot：服饰、3C、家居三个场景，增强泛化。
+    few_shot_user_1 = (
+        "示例输入1："
+        '{"facts":{"defect_type":"污渍","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
+        '"buyer_profile":{"purchase_count":6},"order_amount":159.0,'
+        '"chat_behavior":"买家上传清晰图片并同意补充细节，诉求为部分退款"}'
+    )
+    few_shot_assistant_1 = (
+        '{"defect_severity":"moderate","goods_recoverability":"repairable",'
+        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
+    )
+
+    few_shot_user_2 = (
+        "示例输入2："
+        '{"facts":{"defect_type":"功能故障","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
+        '"buyer_profile":{"purchase_count":2},"order_amount":899.0,'
+        '"chat_behavior":"买家提供故障视频，诉求全额退款"}'
+    )
+    few_shot_assistant_2 = (
+        '{"defect_severity":"severe","goods_recoverability":"unrecoverable",'
+        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
+    )
+
+    few_shot_user_3 = (
+        "示例输入3："
+        '{"facts":{"defect_type":"无瑕疵","evidence_quality":"low","missing_evidence":["清晰照片"],"red_flags":["前后说法不一致"]},'
+        '"buyer_profile":{"purchase_count":1},"order_amount":299.0,'
+        '"chat_behavior":"拒绝补证，坚持仅退款并威胁差评"}'
+    )
+    few_shot_assistant_3 = (
+        '{"defect_severity":"minor","goods_recoverability":"resalable",'
+        '"buyer_cooperation":"poor","demand_reasonableness":"unreasonable"}'
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": few_shot_user_1},
+        {"role": "assistant", "content": few_shot_assistant_1},
+        {"role": "user", "content": few_shot_user_2},
+        {"role": "assistant", "content": few_shot_assistant_2},
+        {"role": "user", "content": few_shot_user_3},
+        {"role": "assistant", "content": few_shot_assistant_3},
+        {"role": "user", "content": f"请按相同规则输出当前输入的 JSON：{json.dumps(payload, ensure_ascii=False)}"},
+    ]
+
+
+def _strip_markdown_json(raw_text: str) -> str:
+    """
+    去除 LLM 可能返回的 markdown 代码块包裹，便于 JSON 解析。
+    """
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _require_customer_value_field(value: str, valid_values: set[str], field_name: str) -> str:
+    """
+    校验 LLM 推断字段值；不合法时直接抛错，避免多路径兜底。
+    """
+    normalized = (value or "").strip().lower()
+    if normalized not in valid_values:
+        raise ValueError(f"字段 {field_name} 返回非法值：{value}")
+    return normalized
+
+
+def _llm_infer_customer_value_fields(input_data: StrategyInput) -> Dict[str, str]:
+    """
+    通过 LLM 推断客户价值工具所需字段，保证对全品类场景的普适性。
+    """
+    payload: Dict[str, Any] = {
+        "facts": input_data.facts.model_dump(),
+        "buyer_profile": input_data.buyer_profile.model_dump(),
+        "order_amount": input_data.order_amount,
+    }
+    logger.info("%s 开始调用 LLM 推断客户价值字段", AGENT2_LOG_PREFIX)
+    llm_text = chat_completion(
+        messages=_build_customer_value_infer_messages(payload),
+        model_env_key="AGENT2_LLM_MODEL",
+        temperature=0.0,
+    )
+    if not llm_text:
+        raise RuntimeError("客户价值字段推断失败：LLM 无返回内容")
+
+    try:
+        parsed = json.loads(_strip_markdown_json(llm_text))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"客户价值字段推断失败：LLM 输出解析异常，原因：{exc}") from exc
+
+    return {
+        "defect_severity": _require_customer_value_field(
+            str(parsed.get("defect_severity", "")),
+            {"minor", "moderate", "severe"},
+            "defect_severity",
+        ),
+        "goods_recoverability": _require_customer_value_field(
+            str(parsed.get("goods_recoverability", "")),
+            {"resalable", "repairable", "unrecoverable"},
+            "goods_recoverability",
+        ),
+        "buyer_cooperation": _require_customer_value_field(
+            str(parsed.get("buyer_cooperation", "")),
+            {"good", "neutral", "poor"},
+            "buyer_cooperation",
+        ),
+        "demand_reasonableness": _require_customer_value_field(
+            str(parsed.get("demand_reasonableness", "")),
+            {"reasonable", "borderline", "unreasonable"},
+            "demand_reasonableness",
+        ),
+    }
+
+
 def _extract_rule_strategy_votes(matched_rules: List) -> Tuple[Dict[str, float], List[str]]:
     """
     解析已匹配规则列表，得到各策略英文键的票权分数及规则 id 列表。
@@ -81,9 +245,9 @@ def _score_by_facts(strategy_scores: Dict[str, float], input_data: StrategyInput
     else:
         strategy_scores[STRATEGY_NEGOTIATE] += 0.15
 
-    if facts.defect_type == "色差":
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.2
-    if facts.defect_type == "无瑕疵" and facts.has_tag_visible:
+    if facts.defect_type and facts.defect_type != "无瑕疵":
+        strategy_scores[STRATEGY_NEGOTIATE] += 0.1
+    if facts.defect_type == "无瑕疵" and facts.evidence_quality.lower().strip() == "low":
         strategy_scores[STRATEGY_DEFEND] += 0.2
 
     if facts.red_flags:
@@ -361,6 +525,24 @@ def recommend(
 
     _score_by_facts(strategy_scores, input_data, risk_factors)
     _score_by_buyer_profile(strategy_scores, input_data, risk_factors)
+    logger.info("%s 开始生成客户价值评估输入字段", AGENT2_LOG_PREFIX)
+    inferred_fields = _llm_infer_customer_value_fields(input_data)
+    customer_value_input = CustomerValueInput(
+        buyer_profile=input_data.buyer_profile,
+        order_amount=input_data.order_amount,
+        defect_severity=inferred_fields["defect_severity"],
+        goods_recoverability=inferred_fields["goods_recoverability"],
+        buyer_cooperation=inferred_fields["buyer_cooperation"],
+        demand_reasonableness=inferred_fields["demand_reasonableness"],
+    )
+    logger.info("%s 客户价值输入字段生成完成：%s", AGENT2_LOG_PREFIX, inferred_fields)
+    customer_value = evaluate_customer_value(customer_value_input)
+    if customer_value.channel == "long_term":
+        strategy_scores[STRATEGY_NEGOTIATE] += 0.12
+        risk_factors.append("客户价值评估触发长期优待通道，建议优先协商维护关系")
+    elif customer_value.channel == "order":
+        strategy_scores[STRATEGY_NEGOTIATE] += 0.06
+        risk_factors.append("客户价值评估触发本单重点处理，建议快速协商收敛纠纷")
     _score_by_similar_cases(strategy_scores, input_data)
 
     if input_data.order_amount >= 500:
@@ -397,4 +579,5 @@ def recommend(
         reasoning=reasoning,
         risk_factors=dedup_risks,
         confidence=confidence,
+        customer_value=customer_value,
     )

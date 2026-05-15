@@ -15,9 +15,10 @@ if ROOT_DIR not in sys.path:
 
 from backend.agents.agent2.strategist import recommend
 import backend.agents.agent2.strategist as strategist_module
-from backend.tools.agent2_tools import match_rules, query_buyer_profile, search_similar_cases
+from backend.tools.agent2_tools import evaluate_customer_value, match_rules, query_buyer_profile, search_similar_cases
 from schemas import (
     BuyerProfile,
+    CustomerValueInput,
     FactOutput,
     MatchedRule,
     StrategyInput,
@@ -29,8 +30,22 @@ from schemas import (
 
 # ---------- recommend：三典型策略 + 无规则无判例边界 ----------
 class TestAgent2Recommend:
-    def test_recommend_compensate_when_high_quality_defect(self):
+    def _mock_customer_value_fields(self, monkeypatch):
+        """屏蔽客户价值字段推断的外部依赖，保证单测稳定。"""
+        monkeypatch.setattr(
+            strategist_module,
+            "_llm_infer_customer_value_fields",
+            lambda _input: {
+                "defect_severity": "moderate",
+                "goods_recoverability": "repairable",
+                "buyer_cooperation": "neutral",
+                "demand_reasonableness": "borderline",
+            },
+        )
+
+    def test_recommend_compensate_when_high_quality_defect(self, monkeypatch):
         """高质量瑕疵证据，倾向善后策略。"""
+        self._mock_customer_value_fields(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="破洞",
@@ -58,8 +73,9 @@ class TestAgent2Recommend:
         assert 0.0 <= output.estimated_win_rate <= 1.0
         assert output.policy_ref and "R002" in output.policy_ref
 
-    def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self):
+    def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self, monkeypatch):
         """证据不足且买家风险高，倾向抗辩。"""
+        self._mock_customer_value_fields(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="无瑕疵",
@@ -93,8 +109,9 @@ class TestAgent2Recommend:
         assert output.strategy == STRATEGY_DEFEND, f"期望 defend，实际 {output.strategy}"
         assert output.risk_factors, "期望输出风险因素列表"
 
-    def test_recommend_negotiate_for_medium_evidence_color_diff(self):
+    def test_recommend_negotiate_for_medium_evidence_color_diff(self, monkeypatch):
         """色差且证据中等，倾向协商。"""
+        self._mock_customer_value_fields(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="色差",
@@ -123,8 +140,9 @@ class TestAgent2Recommend:
         assert "风险点：" in output.reasoning
         assert "建议动作：" in output.reasoning
 
-    def test_recommend_boundary_with_empty_rules_and_cases(self):
+    def test_recommend_boundary_with_empty_rules_and_cases(self, monkeypatch):
         """边界场景：无规则无判例时仍应输出合法策略。"""
+        self._mock_customer_value_fields(monkeypatch)
         facts = FactOutput(evidence_quality="medium")
         profile = BuyerProfile(buyer_id="buyer_unknown")
         input_data = StrategyInput(
@@ -138,9 +156,11 @@ class TestAgent2Recommend:
         output = recommend(input_data)
         assert output.strategy in {STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE}
         assert 0.0 <= output.confidence <= 1.0
+        assert output.customer_value is not None
 
     def test_recommend_should_use_fallback_reasoning_when_llm_unavailable(self, monkeypatch):
         """LLM不可用时，reasoning 仍应保持三段结构。"""
+        self._mock_customer_value_fields(monkeypatch)
         monkeypatch.setattr(strategist_module, "_llm_generate_reasoning", lambda **kwargs: None)
         facts = FactOutput(evidence_quality="medium", missing_evidence=["缺少清晰图片"])
         profile = BuyerProfile(buyer_id="buyer_fallback")
@@ -158,6 +178,7 @@ class TestAgent2Recommend:
 
     def test_recommend_should_accept_llm_reasoning_when_format_valid(self, monkeypatch):
         """LLM输出三段结构时应直接采用。"""
+        self._mock_customer_value_fields(monkeypatch)
         monkeypatch.setattr(
             strategist_module,
             "_llm_generate_reasoning",
@@ -201,3 +222,50 @@ class TestAgent2Tools:
         cases = search_similar_cases("物流异常退款", top_k=2)
         assert len(cases) == 2
         assert cases[0].similarity >= cases[1].similarity
+
+    def test_evaluate_customer_value_should_trigger_long_term_channel(self):
+        """客户长期价值高时应触发长期优待通道。"""
+        profile = BuyerProfile(
+            buyer_id="buyer_loyal",
+            purchase_count=20,
+            dispute_rate=0.02,
+            avg_order_value=180.0,
+            positive_review_count=6,
+        )
+        input_data = CustomerValueInput(
+            buyer_profile=profile,
+            order_amount=120.0,
+            defect_severity="minor",
+            goods_recoverability="resalable",
+            buyer_cooperation="good",
+            demand_reasonableness="reasonable",
+        )
+        result = evaluate_customer_value(input_data)
+        assert result.long_term_triggered is True
+        assert result.channel == "long_term"
+        assert result.compensation_uplift == "+10%~20%"
+
+    def test_evaluate_customer_value_should_score_recoverability_as_higher_when_worse(self):
+        """商品越不可挽回，本单得分应越高。"""
+        profile = BuyerProfile(buyer_id="buyer_case")
+        low_loss = evaluate_customer_value(
+            CustomerValueInput(
+                buyer_profile=profile,
+                order_amount=260.0,
+                defect_severity="moderate",
+                goods_recoverability="resalable",
+                buyer_cooperation="neutral",
+                demand_reasonableness="borderline",
+            )
+        )
+        high_loss = evaluate_customer_value(
+            CustomerValueInput(
+                buyer_profile=profile,
+                order_amount=260.0,
+                defect_severity="moderate",
+                goods_recoverability="unrecoverable",
+                buyer_cooperation="neutral",
+                demand_reasonableness="borderline",
+            )
+        )
+        assert high_loss.order_score > low_loss.order_score

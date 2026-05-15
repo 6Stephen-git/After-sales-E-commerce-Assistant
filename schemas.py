@@ -44,6 +44,7 @@ class BuyerProfile(BaseModel):
     avg_order_value: float = Field(default=0.0, description="本店平均客单价")
     return_rate: float = Field(default=0.0, ge=0.0, le=1.0, description="本店退货率")
     malicious_flags: int = Field(default=0, description="被标记恶意次数（脱敏计数）")
+    positive_review_count: int = Field(default=0, description="在本店累计好评/带图评价次数")
     credit_level: Optional[str] = Field(default=None, description="平台信誉等级")
 
 
@@ -109,6 +110,44 @@ class StrategyInput(BaseModel):
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
 
 
+class CustomerValueInput(BaseModel):
+    """客户价值评估输入"""
+    buyer_profile: BuyerProfile = Field(..., description="买家画像，长期价值评估主输入")
+    order_amount: float = Field(default=0.0, description="当前纠纷订单金额")
+    defect_severity: str = Field(default="moderate", description="问题严重性：minor/moderate/severe")
+    goods_recoverability: str = Field(
+        default="repairable",
+        description="商品可挽回性：resalable/repairable/unrecoverable（越不可挽回分越高）",
+    )
+    buyer_cooperation: str = Field(default="neutral", description="买家配合度：good/neutral/poor")
+    demand_reasonableness: str = Field(
+        default="borderline",
+        description="诉求合理性：reasonable/borderline/unreasonable",
+    )
+    emotion_note: Optional[str] = Field(default=None, description="Agent 4 输出的情绪描述（可选）")
+
+
+class CustomerValueScoreItem(BaseModel):
+    """客户价值评估分项"""
+    dimension: str = Field(..., description="评估维度名称")
+    score: int = Field(default=0, description="该维度得分")
+    max_score: int = Field(default=0, description="该维度满分")
+    reason: str = Field(default="", description="该维度打分原因")
+
+
+class CustomerValueOutput(BaseModel):
+    """客户价值评估输出"""
+    long_term_score: int = Field(default=0, description="长期价值总分（0-100）")
+    order_score: int = Field(default=0, description="本单价值总分（0-100）")
+    long_term_breakdown: List[CustomerValueScoreItem] = Field(default_factory=list, description="长期价值分项")
+    order_breakdown: List[CustomerValueScoreItem] = Field(default_factory=list, description="本单价值分项")
+    long_term_triggered: bool = Field(default=False, description="是否触发长期客户优待通道")
+    order_triggered: bool = Field(default=False, description="是否触发本单重点处理通道")
+    channel: str = Field(default="none", description="触发通道：long_term/order/none")
+    compensation_uplift: Optional[str] = Field(default=None, description="补偿上限提升幅度建议")
+    tone_suggestion: Optional[str] = Field(default=None, description="话术温度建议")
+
+
 class StrategyOutput(BaseModel):
     """Agent 2 输出：策略建议"""
     strategy: str = Field(..., description=f"策略方向：{'/'.join(VALID_STRATEGIES)}")
@@ -117,6 +156,7 @@ class StrategyOutput(BaseModel):
     reasoning: str = Field(default="", description="推理依据说明")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="策略置信度")
+    customer_value: Optional[CustomerValueOutput] = Field(default=None, description="客户价值评估结果")
 
 
 # ============================================================
