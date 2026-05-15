@@ -108,6 +108,8 @@ class StrategyInput(BaseModel):
     matched_rules: List[MatchedRule] = Field(default_factory=list, description="匹配到的规则")
     similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例")
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
+    chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表（用于语义分析）")
+    emotion_note: Optional[str] = Field(default=None, description="Agent 4 情绪摘要（可选）")
 
 
 class CustomerValueInput(BaseModel):
@@ -148,6 +150,38 @@ class CustomerValueOutput(BaseModel):
     tone_suggestion: Optional[str] = Field(default=None, description="话术温度建议")
 
 
+class MaliciousSignal(BaseModel):
+    """恶意行为信号分项"""
+    signal_type: str = Field(..., description="信号类型标识，如 fake_evidence / abuse_refund_only")
+    description: str = Field(default="", description="触发描述（面向商家可读）")
+    score: int = Field(default=0, description="本信号贡献分值")
+    source: str = Field(default="hard_rule", description="信号来源：hard_rule / llm_semantic")
+
+
+class MaliciousDetectionInput(BaseModel):
+    """恶意行为检测输入"""
+    buyer_profile: BuyerProfile = Field(..., description="买家画像")
+    facts: FactOutput = Field(..., description="事实输出")
+    order_amount: float = Field(default=0.0, description="本单金额")
+    order_address: Optional[str] = Field(default=None, description="收货地址（可选）")
+    recent_refund_only_count: int = Field(default=0, description="近期仅退款次数")
+    return_rate_category_avg: float = Field(default=0.16, description="类目退货率均值")
+    freight_insurance_used: bool = Field(default=False, description="是否使用运费险")
+    swap_flag_count: int = Field(default=0, description="历史调包/少件标记次数")
+    related_account_count: int = Field(default=0, description="关联账号数量")
+    chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表")
+    emotion_note: Optional[str] = Field(default=None, description="情绪摘要（可选）")
+
+
+class MaliciousDetectionOutput(BaseModel):
+    """恶意行为检测输出"""
+    risk_score: int = Field(default=0, description="综合风险评分（0-100）")
+    risk_level: str = Field(default="low", description="风险等级：low/medium/high")
+    triggered_signals: List[MaliciousSignal] = Field(default_factory=list, description="触发信号明细")
+    hard_rule_summary: str = Field(default="", description="硬规则层摘要")
+    disposition_advice: str = Field(default="", description="处置建议方向")
+
+
 class StrategyOutput(BaseModel):
     """Agent 2 输出：策略建议"""
     strategy: str = Field(..., description=f"策略方向：{'/'.join(VALID_STRATEGIES)}")
@@ -157,6 +191,7 @@ class StrategyOutput(BaseModel):
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="策略置信度")
     customer_value: Optional[CustomerValueOutput] = Field(default=None, description="客户价值评估结果")
+    malicious_detection: Optional[MaliciousDetectionOutput] = Field(default=None, description="恶意行为检测结果")
 
 
 # ============================================================

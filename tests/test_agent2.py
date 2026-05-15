@@ -15,11 +15,19 @@ if ROOT_DIR not in sys.path:
 
 from backend.agents.agent2.strategist import recommend
 import backend.agents.agent2.strategist as strategist_module
-from backend.tools.agent2_tools import evaluate_customer_value, match_rules, query_buyer_profile, search_similar_cases
+import backend.tools.agent2_tools as agent2_tools_module
+from backend.tools.agent2_tools import (
+    detect_malicious_behavior,
+    evaluate_customer_value,
+    match_rules,
+    query_buyer_profile,
+    search_similar_cases,
+)
 from schemas import (
     BuyerProfile,
     CustomerValueInput,
     FactOutput,
+    MaliciousDetectionInput,
     MatchedRule,
     StrategyInput,
     STRATEGY_COMPENSATE,
@@ -269,3 +277,69 @@ class TestAgent2Tools:
             )
         )
         assert high_loss.order_score > low_loss.order_score
+
+    def test_detect_malicious_behavior_should_trigger_hard_rules(self):
+        """硬规则命中时应输出风险分与等级。"""
+        profile = BuyerProfile(
+            buyer_id="buyer_risk",
+            purchase_count=8,
+            dispute_rate=0.62,
+            return_rate=0.55,
+            malicious_flags=3,
+        )
+        input_data = MaliciousDetectionInput(
+            buyer_profile=profile,
+            facts=FactOutput(evidence_quality="low", red_flags=["凭证异常"], logistics_normal=False),
+            order_amount=299.0,
+            order_address="广东省深圳市南山区",
+            recent_refund_only_count=4,
+            return_rate_category_avg=0.16,
+            freight_insurance_used=True,
+            swap_flag_count=2,
+            related_account_count=4,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert result.risk_score >= 60
+        assert result.risk_level == "high"
+        assert len(result.triggered_signals) >= 4
+
+    def test_detect_malicious_behavior_should_merge_semantic_signals(self, monkeypatch):
+        """语义层返回结构化信号时应参与综合评分。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL", "mock-model")
+        monkeypatch.setattr(
+            agent2_tools_module,
+            "chat_completion",
+            lambda **kwargs: (
+                '[{"signal_type":"review_blackmail","description":"出现差评勒索语义","score":12,"source":"llm_semantic"}]'
+            ),
+        )
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_semantic", return_rate=0.05),
+            facts=FactOutput(evidence_quality="medium", red_flags=[]),
+            order_amount=99.0,
+            chat_history=["不给赔偿我就差评并投诉你们店"],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert result.risk_score >= 12
+        assert any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
+
+    def test_detect_malicious_behavior_should_not_mark_emotional_complaint_as_blackmail(self, monkeypatch):
+        """仅情绪激动+提及投诉但无条件交换，不应计为勒索恶意分。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL", "mock-model")
+        monkeypatch.setattr(
+            agent2_tools_module,
+            "chat_completion",
+            lambda **kwargs: (
+                '[{"signal_type":"review_blackmail","description":"出现投诉表述","score":12,"source":"llm_semantic"}]'
+            ),
+        )
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_emotional", return_rate=0.05),
+            facts=FactOutput(evidence_quality="high", red_flags=[]),
+            order_amount=129.0,
+            chat_history=["这次体验很差，我会投诉平台，希望你们尽快给处理方案"],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert result.risk_score == 0
+        assert not any(item.signal_type == "review_blackmail" for item in result.triggered_signals)

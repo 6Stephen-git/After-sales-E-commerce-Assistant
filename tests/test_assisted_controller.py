@@ -14,6 +14,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from backend.controllers.assisted_controller import clear_cache, run
+import backend.agents.agent2.strategist as strategist_module
 from schemas import EVIDENCE_LOW
 
 
@@ -23,6 +24,12 @@ def setup_function() -> None:
     每个用例前清空控制器缓存，避免互相污染。
     """
     clear_cache()
+    strategist_module._llm_infer_customer_value_fields = lambda _input: {
+        "defect_severity": "moderate",
+        "goods_recoverability": "repairable",
+        "buyer_cooperation": "neutral",
+        "demand_reasonableness": "borderline",
+    }
 
 
 # ---------- 场景一：首次全量材料，三 Agent 串行产出完整报告 ----------

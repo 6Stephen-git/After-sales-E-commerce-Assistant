@@ -98,6 +98,21 @@ def _build_dispute_desc(merged_materials: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _extract_chat_history_texts(merged_materials: dict[str, Any]) -> list[str]:
+    """
+    提取聊天文本列表，供 Agent2 语义分析使用。
+    """
+    lines: list[str] = []
+    for message in _to_list(merged_materials.get("chat_history")):
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                lines.append(content.strip())
+        elif isinstance(message, str) and message.strip():
+            lines.append(message.strip())
+    return lines
+
+
 # ---------- 金额等标量：容错转换，避免策略/话术链路因脏数据中断 ----------
 def _safe_order_amount(raw_value: Any) -> float:
     """
@@ -400,6 +415,8 @@ def run_with_events(
             matched_rules=matched_rules,
             similar_cases=similar_cases,
             order_amount=_safe_order_amount(merged_materials.get("order_amount", 0.0)),
+            chat_history=_extract_chat_history_texts(merged_materials),
+            emotion_note=merged_materials.get("emotion_note"),
         )
         def emit_reasoning_delta(delta_text: str) -> None:
             """

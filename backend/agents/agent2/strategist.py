@@ -14,13 +14,14 @@ import os
 
 from schemas import (
     CustomerValueInput,
+    MaliciousDetectionInput,
     STRATEGY_COMPENSATE,
     STRATEGY_DEFEND,
     STRATEGY_NEGOTIATE,
     StrategyInput,
     StrategyOutput,
 )
-from backend.tools.agent2_tools import evaluate_customer_value
+from backend.tools.agent2_tools import detect_malicious_behavior, evaluate_customer_value
 from backend.tools.llm_client import chat_completion
 
 
@@ -525,6 +526,20 @@ def recommend(
 
     _score_by_facts(strategy_scores, input_data, risk_factors)
     _score_by_buyer_profile(strategy_scores, input_data, risk_factors)
+    malicious_input = MaliciousDetectionInput(
+        buyer_profile=input_data.buyer_profile,
+        facts=input_data.facts,
+        order_amount=input_data.order_amount,
+        chat_history=input_data.chat_history,
+        emotion_note=input_data.emotion_note,
+    )
+    malicious_result = detect_malicious_behavior(malicious_input)
+    if malicious_result.risk_level == "high":
+        risk_factors.append(f"恶意风险高（综合分{malicious_result.risk_score}）：建议优先抗辩并准备平台介入")
+    elif malicious_result.risk_level == "medium":
+        risk_factors.append(f"恶意风险中（综合分{malicious_result.risk_score}）：建议加强举证并谨慎协商")
+    elif malicious_result.triggered_signals:
+        risk_factors.append(f"恶意风险低（综合分{malicious_result.risk_score}）：存在轻微信号，建议持续观察")
     logger.info("%s 开始生成客户价值评估输入字段", AGENT2_LOG_PREFIX)
     inferred_fields = _llm_infer_customer_value_fields(input_data)
     customer_value_input = CustomerValueInput(
@@ -580,4 +595,5 @@ def recommend(
         risk_factors=dedup_risks,
         confidence=confidence,
         customer_value=customer_value,
+        malicious_detection=malicious_result,
     )

@@ -47,6 +47,7 @@
 | `search_similar_cases`        | 检索历史判例     | MySQL                   | 结构化标签检索      |
 | `search_similar_cases_vector` | 向量语义检索历史判例 | ChromaDB                | 可选，不可用时返回空列表 |
 | `evaluate_customer_value`     | 双维客户价值评估  | 本地计算（纯函数）            | 无外部依赖         |
+| `detect_malicious_behavior`   | 恶意行为双层检测  | 本地硬规则 + LLM 语义        | `agent2_tools.py` |
 
 
 `**match_rules**`
@@ -75,6 +76,13 @@
 - 输出：`CustomerValueOutput`
 - 实现：按长期价值与本单价值两条独立评分链路计算，输出分项明细、触发通道和优待建议。
 - 约束：纯函数，不读取数据库，不调用 HTTP 或 LLM。
+
+`**detect_malicious_behavior**`
+
+- 输入：`input_data: MaliciousDetectionInput`
+- 输出：`MaliciousDetectionOutput`
+- 实现：先执行硬规则层，再执行 LLM 语义层，最终融合输出风险分、等级和处置建议。
+- 约束：硬规则层必须可解释；语义层必须结构化 JSON 输出，不允许自由文本。
 
 ## Agent 3 — 话术生成员
 

@@ -22,12 +22,16 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.db.connection import get_engine  # noqa: E402
 from backend.db.models import BuyerProfileRecord  # noqa: E402
+from backend.tools.llm_client import chat_completion  # noqa: E402
 from schemas import (  # noqa: E402
     BuyerProfile,
     CustomerValueInput,
     CustomerValueOutput,
     CustomerValueScoreItem,
     FactOutput,
+    MaliciousDetectionInput,
+    MaliciousDetectionOutput,
+    MaliciousSignal,
     MatchedRule,
     SimilarCase,
 )
@@ -499,4 +503,315 @@ def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutp
         channel=channel,
         compensation_uplift=compensation_uplift,
         tone_suggestion=tone_suggestion,
+    )
+
+
+# ---------- 恶意行为检测：第一层硬规则 + 第二层语义分析 ----------
+def _make_malicious_signal(signal_type: str, description: str, score: int, source: str) -> MaliciousSignal:
+    """
+    统一构造恶意信号对象，避免不同分支输出字段不一致。
+    """
+    return MaliciousSignal(
+        signal_type=signal_type,
+        description=description,
+        score=max(0, score),
+        source=source,
+    )
+
+
+def _run_hard_rules(
+    input_data: MaliciousDetectionInput,
+    *,
+    refund_only_count_threshold: int = 3,
+    return_rate_multiple_threshold: float = 2.0,
+    high_return_rate_multiple_for_insurance: float = 3.0,
+    batch_order_purchase_threshold: int = 5,
+    batch_order_dispute_rate_threshold: float = 0.5,
+    swap_flag_threshold: int = 2,
+    related_account_threshold: int = 3,
+) -> List[MaliciousSignal]:
+    """
+    第一层硬规则匹配：纯代码判定，可解释、可配置。
+    """
+    signals: List[MaliciousSignal] = []
+    facts = input_data.facts
+    profile = input_data.buyer_profile
+    category_avg = max(0.0001, input_data.return_rate_category_avg)
+
+    if facts.evidence_quality.lower().strip() == "low" and len(facts.red_flags) > 0:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="fake_evidence",
+                description="证据质量低且存在疑点，疑似虚假凭证骗退款",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if (
+        input_data.recent_refund_only_count >= refund_only_count_threshold
+        or profile.return_rate >= category_avg * return_rate_multiple_threshold
+    ):
+        signals.append(
+            _make_malicious_signal(
+                signal_type="abuse_refund_only",
+                description=(
+                    f"仅退款频次或退货率异常（仅退款{input_data.recent_refund_only_count}次，"
+                    f"退货率{profile.return_rate:.2f}，类目均值{category_avg:.2f}）"
+                ),
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if profile.purchase_count >= batch_order_purchase_threshold and profile.dispute_rate > batch_order_dispute_rate_threshold:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="batch_malicious_orders",
+                description="购买频次高且纠纷率异常，疑似批量恶意下单",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if input_data.freight_insurance_used and profile.return_rate >= category_avg * high_return_rate_multiple_for_insurance:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="freight_insurance_abuse",
+                description="运费险使用与高退货率叠加，疑似骗取运费险",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if input_data.swap_flag_count >= swap_flag_threshold:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="swap_or_missing_items",
+                description=f"历史调包/少件标记达到{input_data.swap_flag_count}次",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if input_data.order_address and facts.logistics_normal is False:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="abnormal_return_address",
+                description="存在地址信息且物流状态异常，疑似退货地址异常",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    if input_data.related_account_count >= related_account_threshold:
+        signals.append(
+            _make_malicious_signal(
+                signal_type="related_accounts",
+                description=f"关联账号数量达到{input_data.related_account_count}，疑似多账号协同",
+                score=20,
+                source="hard_rule",
+            )
+        )
+
+    return signals
+
+
+def _build_hard_rule_summary(hard_signals: List[MaliciousSignal]) -> str:
+    """
+    构建硬规则层摘要，供 LLM 二层校验与前端展示复用。
+    """
+    if not hard_signals:
+        return "硬规则层未命中异常项。"
+    return "；".join([f"{item.signal_type}:{item.description}" for item in hard_signals])
+
+
+def _strip_markdown_json(text: str) -> str:
+    """
+    清理 markdown 代码块外壳，提升 JSON 解析稳定性。
+    """
+    content = text.strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if len(lines) >= 3:
+            content = "\n".join(lines[1:-1]).strip()
+    return content
+
+
+def _build_malicious_semantic_messages(
+    input_data: MaliciousDetectionInput,
+    hard_rule_summary: str,
+) -> List[Dict[str, str]]:
+    """
+    构造语义层提示词：规则化判定 + 跨品类 few-shot。
+    """
+    system_prompt = (
+        "你是电商恶意行为语义分析器。任务：识别对话中的恶意语义信号，并校验硬规则提示是否有聊天证据支持。\n"
+        "判定类别：\n"
+        "1) review_blackmail：差评/投诉/曝光勒索（必须满足“威胁词+条件交换词”双条件）。\n"
+        "2) identity_impersonation：冒充平台/执法/鉴定身份施压。\n"
+        "3) evidence_contradiction：话术与已知事实证据矛盾。\n"
+        "4) professional_claim_pattern：职业索赔话术（大量规则术语、模板化表达）。\n"
+        "特别约束：仅表达不满、要求正常处理、提及投诉但未出现条件交换，不应标记为 review_blackmail。\n"
+        "输出必须是 JSON 数组，每项字段：signal_type, description, score, source。\n"
+        "score 范围 1-15，source 固定 llm_semantic。无命中返回空数组 []。"
+    )
+    example_user_1 = (
+        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['不给我赔100我就给你一星再投诉12315'],"
+        "'facts':{'evidence_quality':'medium','defect_type':'污渍'},'emotion_note':'买家情绪激动'}"
+    )
+    example_assistant_1 = (
+        '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":12,"source":"llm_semantic"}]'
+    )
+    example_user_2 = (
+        "输入：{'hard_rule_summary':'abuse_refund_only:仅退款频次异常','chat_history':['我是平台风控人员，现在必须先赔付'],"
+        "'facts':{'evidence_quality':'low','defect_type':'无瑕疵'},'emotion_note':null}"
+    )
+    example_assistant_2 = (
+        '[{"signal_type":"identity_impersonation","description":"聊天中疑似冒充平台身份施压","score":11,"source":"llm_semantic"}]'
+    )
+    example_user_3 = (
+        "输入：{'hard_rule_summary':'related_accounts:关联账号异常','chat_history':['依据平台规则第32条第2款，你必须退一赔三，这是固定模板'],"
+        "'facts':{'evidence_quality':'medium','defect_type':'色差'},'emotion_note':null}"
+    )
+    example_assistant_3 = (
+        '[{"signal_type":"professional_claim_pattern","description":"大量规则术语与模板化表达，疑似职业索赔话术","score":10,"source":"llm_semantic"}]'
+    )
+    example_user_4 = (
+        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['这个质量我非常不满意，我会考虑投诉平台，请尽快给解决方案'],"
+        "'facts':{'evidence_quality':'high','defect_type':'破洞'},'emotion_note':'买家情绪激动'}"
+    )
+    example_assistant_4 = "[]"
+
+    user_payload = {
+        "hard_rule_summary": hard_rule_summary,
+        "chat_history": input_data.chat_history,
+        "facts": input_data.facts.model_dump(),
+        "emotion_note": input_data.emotion_note,
+    }
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": example_user_1},
+        {"role": "assistant", "content": example_assistant_1},
+        {"role": "user", "content": example_user_2},
+        {"role": "assistant", "content": example_assistant_2},
+        {"role": "user", "content": example_user_3},
+        {"role": "assistant", "content": example_assistant_3},
+        {"role": "user", "content": example_user_4},
+        {"role": "assistant", "content": example_assistant_4},
+        {"role": "user", "content": f"输入：{json.dumps(user_payload, ensure_ascii=False)}"},
+    ]
+
+
+def _is_review_blackmail_chat(chat_history: List[str]) -> bool:
+    """
+    review_blackmail 双条件校验：威胁词 + 条件交换词同时存在才算勒索。
+    """
+    merged = " ".join(chat_history)
+    threat_keywords = ("差评", "投诉", "12315", "曝光", "举报")
+    exchange_keywords = ("不给", "不赔", "否则", "不然", "就", "先赔", "赔我", "转账")
+    has_threat = any(word in merged for word in threat_keywords)
+    has_exchange = any(word in merged for word in exchange_keywords)
+    return has_threat and has_exchange
+
+
+def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[MaliciousSignal]) -> List[MaliciousSignal]:
+    """
+    第二层语义分析：在硬规则结果基础上补充威胁与矛盾类风险信号。
+    """
+    if not input_data.chat_history:
+        return []
+    if not os.getenv("AGENT2_LLM_MODEL", "").strip():
+        logger.info("%s 未配置 AGENT2_LLM_MODEL，语义层跳过，仅保留硬规则层结果", AGENT2_LOG_PREFIX)
+        return []
+
+    hard_rule_summary = _build_hard_rule_summary(hard_signals)
+    llm_text = chat_completion(
+        messages=_build_malicious_semantic_messages(input_data=input_data, hard_rule_summary=hard_rule_summary),
+        model_env_key="AGENT2_LLM_MODEL",
+        temperature=0.0,
+    )
+    if not llm_text:
+        raise RuntimeError("恶意语义分析失败：LLM 无返回内容")
+
+    try:
+        parsed = json.loads(_strip_markdown_json(llm_text))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"恶意语义分析失败：JSON 解析异常，原因：{exc}") from exc
+    if not isinstance(parsed, list):
+        raise RuntimeError("恶意语义分析失败：输出不是 JSON 数组")
+
+    signals: List[MaliciousSignal] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        signal_type = str(item.get("signal_type", "")).strip()
+        description = str(item.get("description", "")).strip()
+        score_raw = item.get("score", 0)
+        source = str(item.get("source", "llm_semantic")).strip()
+        if not signal_type or not description or source != "llm_semantic":
+            continue
+        try:
+            score = int(score_raw)
+        except Exception:  # noqa: BLE001
+            continue
+        if score < 1:
+            continue
+        if signal_type == "review_blackmail" and not _is_review_blackmail_chat(input_data.chat_history):
+            logger.info("%s review_blackmail 未通过双条件校验，按情绪激动处理，不计入恶意分", AGENT2_LOG_PREFIX)
+            continue
+        signals.append(_make_malicious_signal(signal_type, description, min(15, score), "llm_semantic"))
+    return signals
+
+
+def _risk_level_from_score(risk_score: int) -> str:
+    """
+    根据综合分映射风险等级。
+    """
+    if risk_score >= 60:
+        return "high"
+    if risk_score >= 30:
+        return "medium"
+    return "low"
+
+
+def _disposition_advice_from_level(risk_level: str) -> str:
+    """
+    根据风险等级生成处置建议。
+    """
+    if risk_level == "high":
+        return "建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。"
+    if risk_level == "medium":
+        return "建议谨慎协商并加强举证要求，控制补偿上限。"
+    return "建议按常规流程处理，持续观察风险信号变化。"
+
+
+def detect_malicious_behavior(input_data: MaliciousDetectionInput) -> MaliciousDetectionOutput:
+    """
+    恶意行为检测统一入口：硬规则层 + 语义层融合输出。
+    """
+    logger.info("%s 开始执行恶意行为检测", AGENT2_LOG_PREFIX)
+    hard_signals = _run_hard_rules(input_data=input_data)
+    semantic_signals = _run_llm_semantic(input_data=input_data, hard_signals=hard_signals)
+    all_signals = hard_signals + semantic_signals
+
+    risk_total_score = min(100, sum(signal.score for signal in all_signals))
+    risk_level = _risk_level_from_score(risk_total_score)
+    hard_rule_summary = _build_hard_rule_summary(hard_signals)
+    disposition_advice = _disposition_advice_from_level(risk_level)
+
+    logger.info(
+        "%s 恶意行为检测完成 risk_score=%s risk_level=%s signal_count=%s",
+        AGENT2_LOG_PREFIX,
+        risk_total_score,
+        risk_level,
+        len(all_signals),
+    )
+    return MaliciousDetectionOutput(
+        risk_score=risk_total_score,
+        risk_level=risk_level,
+        triggered_signals=all_signals,
+        hard_rule_summary=hard_rule_summary,
+        disposition_advice=disposition_advice,
     )
