@@ -6,8 +6,8 @@ Agent 2：策略参谋员。
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List
 import json
 import logging
 import os
@@ -15,9 +15,9 @@ import os
 from schemas import (
     CustomerValueInput,
     MaliciousDetectionInput,
-    STRATEGY_COMPENSATE,
-    STRATEGY_DEFEND,
-    STRATEGY_NEGOTIATE,
+    DISPOSITION_COMPENSATE,
+    DISPOSITION_DEFEND,
+    DISPOSITION_NEGOTIATE,
     StrategyInput,
     StrategyOutput,
 )
@@ -190,189 +190,236 @@ def _llm_infer_customer_value_fields(input_data: StrategyInput) -> Dict[str, str
     }
 
 
-def _extract_rule_strategy_votes(matched_rules: List) -> Tuple[Dict[str, float], List[str]]:
+def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
     """
-    解析已匹配规则列表，得到各策略英文键的票权分数及规则 id 列表。
-
-    从 rule_summary + condition_result 拼接文本中识别「建议策略:xxx」或中文关键词，
-    命中则给对应策略加较高分；无法归类时给 negotiate 少量分，体现规则优先下的保守倾向。
-
-    参数:
-        matched_rules: Agent2 工具 match_rules 的输出，元素为 MatchedRule。
-
-    返回:
-        (votes, policy_refs)：votes 为 strategy -> 浮点得分；policy_refs 为 rule_id 顺序列表。
+    解析规则命中站位，输出规则引用、站位方向与命中数。
     """
-    votes = defaultdict(float)
+    merchant_support = 0
+    buyer_support = 0
     policy_refs: List[str] = []
-
-    for rule in matched_rules:
+    for rule in input_data.matched_rules:
         combined_text = f"{rule.rule_summary} {rule.condition_result}".lower()
         policy_refs.append(rule.rule_id)
-
-        if "建议策略:defend" in combined_text or "抗辩" in combined_text:
-            votes[STRATEGY_DEFEND] += 0.45
-        elif "建议策略:negotiate" in combined_text or "协商" in combined_text:
-            votes[STRATEGY_NEGOTIATE] += 0.45
-        elif "建议策略:compensate" in combined_text or "退款" in combined_text or "赔付" in combined_text:
-            votes[STRATEGY_COMPENSATE] += 0.45
-        else:
-            # 规则存在但无法归因时，给保守协商少量票权。
-            votes[STRATEGY_NEGOTIATE] += 0.1
-
-    return votes, policy_refs
+        if "建议策略:defend" in combined_text or "抗辩" in combined_text or "支持商家" in combined_text:
+            merchant_support += 1
+        elif "建议策略:compensate" in combined_text or "退款" in combined_text or "赔付" in combined_text or "支持买家" in combined_text:
+            buyer_support += 1
+    if merchant_support > buyer_support:
+        return policy_refs, "merchant", len(input_data.matched_rules)
+    if buyer_support > merchant_support:
+        return policy_refs, "buyer", len(input_data.matched_rules)
+    return policy_refs, "neutral", len(input_data.matched_rules)
 
 
-def _score_by_facts(strategy_scores: Dict[str, float], input_data: StrategyInput, risk_factors: List[str]) -> None:
+def _apply_malicious_layer(input_data: StrategyInput) -> tuple:
     """
-    根据 Agent1 的 FactOutput 对三策略得分做增量调整，并写入可读风险文案。
+    第二层：恶意行为风险过滤层，输出标准备注。
 
-    考虑证据质量、瑕疵类型、吊牌可见、red_flags、missing_evidence 等；
-    本函数原地修改 strategy_scores 与 risk_factors，无返回值。
-
-    参数:
-        strategy_scores: 三策略累计分数字典，键为 defend/negotiate/compensate。
-        input_data: 含 facts 的完整策略输入。
-        risk_factors: 风险说明字符串列表，可能被 append。
+    返回 (malicious_result, new_risk_factors) 元组，不修改外部 risk_factors，
+    保证并发安全。
     """
-    facts = input_data.facts
-    evidence_quality = facts.evidence_quality.lower().strip()
-
-    if evidence_quality == "high" and facts.defect_type not in (None, "无瑕疵"):
-        strategy_scores[STRATEGY_COMPENSATE] += 0.25
-    elif evidence_quality == "low":
-        strategy_scores[STRATEGY_DEFEND] += 0.25
-        risk_factors.append("买家证据质量低，可能触发补充举证")
-    else:
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.15
-
-    if facts.defect_type and facts.defect_type != "无瑕疵":
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.1
-    if facts.defect_type == "无瑕疵" and facts.evidence_quality.lower().strip() == "low":
-        strategy_scores[STRATEGY_DEFEND] += 0.2
-
-    if facts.red_flags:
-        strategy_scores[STRATEGY_DEFEND] += 0.15
-        risk_factors.append("存在疑点信号，需准备更完整证据链")
-    if facts.missing_evidence:
-        # 缺失证据只在事实卡展示，这里仅影响策略分，不重复生成风险文案。
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.1
+    malicious_input = MaliciousDetectionInput(
+        buyer_profile=input_data.buyer_profile,
+        facts=input_data.facts,
+        order_amount=input_data.order_amount,
+        chat_history=input_data.chat_history,
+        emotion_note=input_data.emotion_note,
+    )
+    malicious_result = detect_malicious_behavior(malicious_input)
+    layer_risks: List[str] = []
+    if malicious_result.risk_level == "high":
+        layer_risks.append("[恶意层] 高风险恶意：优先抗辩并准备平台介入，先固定证据链后再沟通")
+    elif malicious_result.risk_level == "medium":
+        layer_risks.append("[恶意层] 中风险恶意：谨慎协商；若证据质量 low，则先走抗辩补证路径")
+    return malicious_result, layer_risks
 
 
-def _score_by_buyer_profile(strategy_scores: Dict[str, float], input_data: StrategyInput, risk_factors: List[str]) -> None:
+def _apply_customer_value_layer(input_data: StrategyInput) -> tuple:
     """
-    根据 BuyerProfile 对三策略得分做增量调整。
+    第三层：客户价值评估层（双维价值 + 触发通道）。
 
-    高纠纷率、恶意标记、高退货率偏向 defend；高信誉低纠纷略偏向 negotiate；
-    老客低纠纷略偏向 negotiate。原地修改 strategy_scores 与 risk_factors。
-
-    参数:
-        strategy_scores: 三策略累计分。
-        input_data: 含 buyer_profile。
-        risk_factors: 风险文案列表。
+    返回 (customer_value, new_risk_factors) 元组，不修改外部 risk_factors，
+    保证并发安全。
     """
-    profile = input_data.buyer_profile
+    logger.info("%s 开始生成客户价值评估输入字段", AGENT2_LOG_PREFIX)
+    inferred_fields = _llm_infer_customer_value_fields(input_data)
+    customer_value_input = CustomerValueInput(
+        buyer_profile=input_data.buyer_profile,
+        order_amount=input_data.order_amount,
+        defect_severity=inferred_fields["defect_severity"],
+        goods_recoverability=inferred_fields["goods_recoverability"],
+        buyer_cooperation=inferred_fields["buyer_cooperation"],
+        demand_reasonableness=inferred_fields["demand_reasonableness"],
+    )
+    logger.info("%s 客户价值输入字段生成完成：%s", AGENT2_LOG_PREFIX, inferred_fields)
+    customer_value = evaluate_customer_value(customer_value_input)
+    layer_risks: List[str] = []
+    if customer_value.channel == "long_term":
+        layer_risks.append("[客户价值层] 触发长期优待通道，优先协商维护关系")
+    elif customer_value.channel == "order":
+        layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
+    return customer_value, layer_risks
 
-    if profile.dispute_rate >= 0.4 or profile.malicious_flags >= 2:
-        strategy_scores[STRATEGY_DEFEND] += 0.25
-        risk_factors.append("买家历史纠纷率较高，存在重复争议风险")
-    elif profile.credit_level == "high" and profile.dispute_rate <= 0.1:
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.1
 
-    if profile.return_rate >= 0.4:
-        strategy_scores[STRATEGY_DEFEND] += 0.1
-    if profile.purchase_count >= 10 and profile.dispute_count <= 1:
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.1
-
-
-def _score_by_similar_cases(strategy_scores: Dict[str, float], input_data: StrategyInput) -> None:
+def _determine_disposition(
+    input_data: StrategyInput,
+    *,
+    malicious_result,
+    customer_value,
+    rule_stance: str,
+) -> str:
     """
-    根据相似判例列表 outcome / merchant_action 关键词向三策略加分。
-
-    每条判例贡献 similarity 映射后的权重；原地修改 strategy_scores。
-
-    参数:
-        strategy_scores: 三策略累计分。
-        input_data: 含 similar_cases。
+    单链路处置决策：默认协商，强信号覆盖。
     """
-    for case in input_data.similar_cases:
-        case_weight = max(0.0, min(1.0, case.similarity)) * 0.2
-        outcome_text = case.outcome.lower()
-        action_text = case.merchant_action.lower()
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
 
-        if "支持商家" in outcome_text or "抗辩" in action_text:
-            strategy_scores[STRATEGY_DEFEND] += case_weight
-        elif "和解" in outcome_text or "协商" in action_text:
-            strategy_scores[STRATEGY_NEGOTIATE] += case_weight
-        elif "支持买家" in outcome_text or "退款" in action_text:
-            strategy_scores[STRATEGY_COMPENSATE] += case_weight
+    if malicious_result.risk_level == "high":
+        return DISPOSITION_DEFEND
+    if malicious_result.risk_level == "medium" and merchant_fault_signal:
+        return DISPOSITION_NEGOTIATE
+    if malicious_result.risk_level == "medium" and evidence_quality == "low" and not merchant_fault_signal:
+        return DISPOSITION_DEFEND
+    if merchant_fault_signal and malicious_result.risk_level == "low":
+        return DISPOSITION_COMPENSATE
+    if customer_value.channel in {"long_term", "order"} and malicious_result.risk_level == "low":
+        return DISPOSITION_NEGOTIATE
+    return DISPOSITION_NEGOTIATE
 
 
-# ---------- 输出侧量化：胜率裁剪、主策略胜率估计、策略置信度 ----------
 def _normalize_win_rate(raw_rate: float) -> float:
     """
-    将原始胜率裁剪到 [0.05, 0.95] 并保留三位小数，避免对外输出极端 0/1。
-
-    参数:
-        raw_rate: 未裁剪的胜率估计。
-
-    返回:
-        裁剪后的浮点数。
+    胜率裁剪到 [0.05, 0.95]，避免极值。
     """
     return max(0.05, min(0.95, round(raw_rate, 3)))
 
 
-def _estimate_win_rate(strategy: str, strategy_scores: Dict[str, float], risk_factors: List[str]) -> float:
+def _count_supportive_cases(input_data: StrategyInput) -> int:
     """
-    为最终选定的主策略估计 0～1 胜率。
-
-    思路：主策略得分占总分的比例越高基础胜率越高；risk_factors 条数带来惩罚；
-    compensate 略上调、defend 略下调以反映平台倾向差异。
-
-    参数:
-        strategy: 已选主策略，defend / negotiate / compensate。
-        strategy_scores: 三策略最终得分。
-        risk_factors: 风险项列表，用于惩罚项计数。
-
-    返回:
-        经 _normalize_win_rate 处理后的胜率。
+    统计支持抗辩方向的相似判例数（similarity >= 0.6）。
     """
-    total_score = max(0.001, sum(strategy_scores.values()))
-    chosen_score = strategy_scores[strategy]
-    dominance = chosen_score / total_score
-
-    base_rate = 0.42 + dominance * 0.42
-    risk_penalty = min(0.2, len(risk_factors) * 0.03)
-
-    if strategy == STRATEGY_COMPENSATE:
-        base_rate += 0.05
-    elif strategy == STRATEGY_DEFEND:
-        base_rate -= 0.03
-
-    return _normalize_win_rate(base_rate - risk_penalty)
+    count = 0
+    for case in input_data.similar_cases:
+        if case.similarity < 0.6:
+            continue
+        outcome_text = case.outcome.lower()
+        action_text = case.merchant_action.lower()
+        if "支持商家" in outcome_text or "抗辩" in action_text:
+            count += 1
+    return count
 
 
-def _estimate_confidence(strategy_scores: Dict[str, float]) -> float:
+def _estimate_win_rate(
+    input_data: StrategyInput,
+    *,
+    disposition: str,
+    malicious_result,
+    rule_stance: str,
+    rule_count: int,
+) -> float | None:
     """
-    根据三策略得分的「第一名与第二名分差」估计策略置信度。
-
-    分差越大置信越高；结果限制在 [0.1, 0.95]。
-
-    参数:
-        strategy_scores: 三策略最终得分。
-
-    返回:
-        0～1 之间的置信度浮点数。
+    仅在抗辩方向计算胜率（平台支持商家概率）。
     """
-    ranked = sorted(strategy_scores.values(), reverse=True)
-    top_score = ranked[0]
-    second_score = ranked[1] if len(ranked) > 1 else 0.0
-    gap = max(0.0, top_score - second_score)
-    confidence = 0.5 + min(0.45, gap * 0.9)
-    return max(0.1, min(0.95, round(confidence, 3)))
+    if disposition != DISPOSITION_DEFEND:
+        return None
+
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    missing_count = len(input_data.facts.missing_evidence)
+    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+
+    # 规则轴
+    if rule_stance == "merchant" and rule_count >= 2:
+        rule_score = 0.40
+    elif rule_stance == "merchant" and rule_count == 1:
+        rule_score = 0.28
+    else:
+        rule_score = 0.16
+
+    # 证据轴
+    if evidence_quality == "high" and missing_count == 0:
+        evidence_score = 0.25
+    elif evidence_quality == "medium" or (evidence_quality == "high" and missing_count <= 1):
+        evidence_score = 0.16
+    else:
+        evidence_score = 0.07
+
+    # 强信号轴
+    if malicious_result.risk_level == "high":
+        signal_score = 0.20
+    elif malicious_result.risk_level == "medium" and evidence_quality == "low":
+        signal_score = 0.14
+    elif malicious_result.risk_level == "medium":
+        signal_score = 0.10
+    else:
+        signal_score = 0.06
+    if merchant_fault_signal:
+        signal_score = max(0.0, signal_score - 0.08)
+
+    # 判例轴
+    supportive_count = _count_supportive_cases(input_data)
+    if supportive_count >= 2:
+        case_score = 0.15
+    elif supportive_count == 1:
+        case_score = 0.09
+    else:
+        case_score = 0.04
+
+    return _normalize_win_rate(rule_score + evidence_score + signal_score + case_score)
 
 
-# ---------- LLM推理：基于既定主策略生成可执行 reasoning（不改策略结果） ----------
+def _estimate_confidence(
+    input_data: StrategyInput,
+    *,
+    malicious_result,
+    rule_stance: str,
+    rule_count: int,
+) -> float:
+    """
+    置信度：规则确定性 + 证据充分性 + 信号一致性。
+    """
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    missing_count = len(input_data.facts.missing_evidence)
+    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+
+    # 维度一：规则确定性
+    if rule_count >= 1 and rule_stance in {"merchant", "buyer"}:
+        dim_rule = 0.40
+    elif rule_count >= 1:
+        dim_rule = 0.20
+    else:
+        dim_rule = 0.08
+
+    # 维度二：证据充分性
+    if evidence_quality == "high" and missing_count == 0:
+        dim_evidence = 0.35
+    elif evidence_quality == "medium" or (evidence_quality == "high" and missing_count <= 1):
+        dim_evidence = 0.20
+    else:
+        dim_evidence = 0.07
+
+    # 维度三：信号一致性
+    if malicious_result.risk_level in {"high", "medium"} and merchant_fault_signal:
+        dim_consistency = 0.05
+    elif rule_stance == "merchant" and _count_supportive_cases(input_data) == 0 and input_data.similar_cases:
+        dim_consistency = 0.13
+    else:
+        dim_consistency = 0.25
+
+    confidence = dim_rule + dim_evidence + dim_consistency
+    if malicious_result.risk_level in {"high", "medium"} and merchant_fault_signal:
+        confidence = min(confidence, 0.65)
+    return max(0.10, min(0.95, round(confidence, 3)))
+
+
+def _has_major_signal_conflict(input_data: StrategyInput, *, malicious_result, rule_stance: str) -> bool:
+    """
+    判断是否存在恶意风险与商责明确信号的主要矛盾。
+    """
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    return malicious_result.risk_level in {"high", "medium"} and merchant_fault_signal
+
+
 def _infer_customer_intent(input_data: StrategyInput) -> str:
     """
     基于事实与画像推断买家主诉意图标签。
@@ -389,37 +436,38 @@ def _infer_customer_intent(input_data: StrategyInput) -> str:
 
 def _build_fallback_reasoning(
     *,
-    strategy: str,
+    disposition: str,
     input_data: StrategyInput,
-    strategy_scores: Dict[str, float],
     risk_factors: List[str],
+    estimated_win_rate: float | None,
 ) -> str:
     """
     当 LLM 不可用时，输出结构化三段 reasoning。
     """
     intent = _infer_customer_intent(input_data)
     risk_text = "；".join(risk_factors[:3]) if risk_factors else "当前未识别到高风险项"
-    if strategy == STRATEGY_DEFEND:
+    if disposition == DISPOSITION_DEFEND:
         action = "先固定证据链并要求买家补证，再按规则提交抗辩材料"
-    elif strategy == STRATEGY_COMPENSATE:
+    elif disposition == DISPOSITION_COMPENSATE:
         action = "主动体面善后：及时补救并同步方案，把体验与口碑损失压到最低"
     else:
         action = "先给可接受协商方案，保留后续平台申诉与补证空间"
-
+    win_rate_note = ""
+    if estimated_win_rate is not None:
+        win_rate_note = f"；当前抗辩胜率={estimated_win_rate:.3f}"
     return (
         f"客户意图：{intent}。\n"
         f"风险点：{risk_text}。\n"
-        f"建议动作：{action}；当前得分 defend={strategy_scores[STRATEGY_DEFEND]:.2f}、"
-        f"negotiate={strategy_scores[STRATEGY_NEGOTIATE]:.2f}、compensate={strategy_scores[STRATEGY_COMPENSATE]:.2f}。"
+        f"建议动作：{action}{win_rate_note}。"
     )
 
 
 def _llm_generate_reasoning(
     *,
-    strategy: str,
+    disposition: str,
     input_data: StrategyInput,
-    strategy_scores: Dict[str, float],
     risk_factors: List[str],
+    estimated_win_rate: float | None,
     fast_path: bool = False,
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> str | None:
@@ -429,18 +477,14 @@ def _llm_generate_reasoning(
     fast_path=True 时优先小模型，若格式不符合约定则自动回退主模型补调一次。
     """
     prompt_payload = {
-        "strategy": strategy,
-        "scores": {
-            "defend": round(strategy_scores[STRATEGY_DEFEND], 3),
-            "negotiate": round(strategy_scores[STRATEGY_NEGOTIATE], 3),
-            "compensate": round(strategy_scores[STRATEGY_COMPENSATE], 3),
-        },
+        "disposition": disposition,
         "facts": input_data.facts.model_dump(),
         "buyer_profile": input_data.buyer_profile.model_dump(),
         "matched_rules": [item.model_dump() for item in input_data.matched_rules],
         "similar_cases": [item.model_dump() for item in input_data.similar_cases],
         "risk_factors": risk_factors,
         "order_amount": input_data.order_amount,
+        "estimated_win_rate": estimated_win_rate,
     }
     model_env_key = "AGENT2_LLM_MODEL_FAST" if fast_path else "AGENT2_LLM_MODEL"
     fallback_key = "AGENT2_LLM_MODEL" if fast_path else None
@@ -500,7 +544,7 @@ def recommend(
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> StrategyOutput:
     """
-    综合规则票权、事实、画像、判例与订单金额，输出主策略与说明。
+    综合规则、恶意、价值与判例，输出单链路处置方向与说明。
 
     纯函数：不读环境变量、不访问网络与数据库；所有外部数据须由调用方
     通过 StrategyInput 注入。
@@ -511,84 +555,66 @@ def recommend(
         reasoning_delta_callback: 推理文本流式回调（用于前端增量展示）。
 
     返回:
-        StrategyOutput，含 strategy、estimated_win_rate、reasoning、risk_factors 等。
+        StrategyOutput，含 disposition、estimated_win_rate、reasoning、risk_factors 等。
     """
-    strategy_scores = {
-        STRATEGY_DEFEND: 0.0,
-        STRATEGY_NEGOTIATE: 0.0,
-        STRATEGY_COMPENSATE: 0.0,
-    }
     risk_factors: List[str] = []
 
-    rule_votes, policy_refs = _extract_rule_strategy_votes(input_data.matched_rules)
-    for strategy, score in rule_votes.items():
-        strategy_scores[strategy] += score
+    # 第一层：规则层（纯计算，无外部依赖）
+    policy_refs, rule_stance, rule_count = _analyze_rule_stance(input_data)
 
-    _score_by_facts(strategy_scores, input_data, risk_factors)
-    _score_by_buyer_profile(strategy_scores, input_data, risk_factors)
-    malicious_input = MaliciousDetectionInput(
-        buyer_profile=input_data.buyer_profile,
-        facts=input_data.facts,
-        order_amount=input_data.order_amount,
-        chat_history=input_data.chat_history,
-        emotion_note=input_data.emotion_note,
+    # 第二层 + 第三层：恶意检测与客户价值评估并发执行
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_malicious = executor.submit(_apply_malicious_layer, input_data)
+        future_value = executor.submit(_apply_customer_value_layer, input_data)
+        malicious_result, malicious_risks = future_malicious.result()
+        customer_value, value_risks = future_value.result()
+    risk_factors.extend(malicious_risks)
+    risk_factors.extend(value_risks)
+
+    if _has_major_signal_conflict(input_data, malicious_result=malicious_result, rule_stance=rule_stance):
+        risk_factors.append("[信号一致性] 恶意风险与商责明确信号同时存在，需说明冲突并按优先级谨慎处理")
+
+    disposition = _determine_disposition(
+        input_data,
+        malicious_result=malicious_result,
+        customer_value=customer_value,
+        rule_stance=rule_stance,
     )
-    malicious_result = detect_malicious_behavior(malicious_input)
-    if malicious_result.risk_level == "high":
-        risk_factors.append(f"恶意风险高（综合分{malicious_result.risk_score}）：建议优先抗辩并准备平台介入")
-    elif malicious_result.risk_level == "medium":
-        risk_factors.append(f"恶意风险中（综合分{malicious_result.risk_score}）：建议加强举证并谨慎协商")
-    elif malicious_result.triggered_signals:
-        risk_factors.append(f"恶意风险低（综合分{malicious_result.risk_score}）：存在轻微信号，建议持续观察")
-    logger.info("%s 开始生成客户价值评估输入字段", AGENT2_LOG_PREFIX)
-    inferred_fields = _llm_infer_customer_value_fields(input_data)
-    customer_value_input = CustomerValueInput(
-        buyer_profile=input_data.buyer_profile,
-        order_amount=input_data.order_amount,
-        defect_severity=inferred_fields["defect_severity"],
-        goods_recoverability=inferred_fields["goods_recoverability"],
-        buyer_cooperation=inferred_fields["buyer_cooperation"],
-        demand_reasonableness=inferred_fields["demand_reasonableness"],
+    estimated_win_rate = _estimate_win_rate(
+        input_data,
+        disposition=disposition,
+        malicious_result=malicious_result,
+        rule_stance=rule_stance,
+        rule_count=rule_count,
     )
-    logger.info("%s 客户价值输入字段生成完成：%s", AGENT2_LOG_PREFIX, inferred_fields)
-    customer_value = evaluate_customer_value(customer_value_input)
-    if customer_value.channel == "long_term":
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.12
-        risk_factors.append("客户价值评估触发长期优待通道，建议优先协商维护关系")
-    elif customer_value.channel == "order":
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.06
-        risk_factors.append("客户价值评估触发本单重点处理，建议快速协商收敛纠纷")
-    _score_by_similar_cases(strategy_scores, input_data)
-
-    if input_data.order_amount >= 500:
-        strategy_scores[STRATEGY_NEGOTIATE] += 0.08
-        risk_factors.append("订单金额较高，升级纠纷成本更高")
-
-    strategy = max(strategy_scores, key=strategy_scores.get)
-    estimated_win_rate = _estimate_win_rate(strategy, strategy_scores, risk_factors)
-    confidence = _estimate_confidence(strategy_scores)
+    confidence = _estimate_confidence(
+        input_data,
+        malicious_result=malicious_result,
+        rule_stance=rule_stance,
+        rule_count=rule_count,
+    )
 
     reasoning = _llm_generate_reasoning(
-        strategy=strategy,
+        disposition=disposition,
         input_data=input_data,
-        strategy_scores=strategy_scores,
         risk_factors=risk_factors,
+        estimated_win_rate=estimated_win_rate,
         fast_path=fast_path,
         reasoning_delta_callback=reasoning_delta_callback,
     )
     if not reasoning:
         reasoning = _build_fallback_reasoning(
-            strategy=strategy,
+            disposition=disposition,
             input_data=input_data,
-            strategy_scores=strategy_scores,
             risk_factors=risk_factors,
+            estimated_win_rate=estimated_win_rate,
         )
 
     policy_ref = ",".join(policy_refs[:3]) if policy_refs else None
     dedup_risks = list(dict.fromkeys(risk_factors))
 
     return StrategyOutput(
-        strategy=strategy,
+        disposition=disposition,
         estimated_win_rate=estimated_win_rate,
         policy_ref=policy_ref,
         reasoning=reasoning,

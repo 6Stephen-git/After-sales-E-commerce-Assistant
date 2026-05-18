@@ -8,8 +8,9 @@
       <el-descriptions-item label="策略方向">
         <el-tag type="primary">{{ strategy_label }}</el-tag>
       </el-descriptions-item>
-      <el-descriptions-item label="预估胜率">
-        <el-progress :percentage="win_rate_percent" :stroke-width="14" />
+      <el-descriptions-item label="抗辩胜率">
+        <el-progress v-if="show_win_rate" :percentage="win_rate_percent" :stroke-width="14" />
+        <span v-else>-</span>
       </el-descriptions-item>
       <el-descriptions-item label="策略置信度">
         {{ confidence_percent }}%
@@ -31,7 +32,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { getStrategyLabel } from '../../utils/enums'
+import { getDispositionLabel } from '../../utils/enums'
 
 // ---------- 组件输入：策略分析结果 ----------
 const props = defineProps({
@@ -43,13 +44,18 @@ const props = defineProps({
 
 // ---------- 派生状态：策略方向中文化 ----------
 const strategy_label = computed(() => {
-  return getStrategyLabel(props.strategy?.strategy)
+  return getDispositionLabel(props.strategy?.disposition)
 })
 
 // ---------- 派生状态：胜率百分比 ----------
 const win_rate_percent = computed(() => {
   const value = Number(props.strategy?.estimated_win_rate || 0)
   return Math.max(0, Math.min(100, Math.round(value * 100)))
+})
+
+// ---------- 派生状态：仅抗辩方向展示胜率 ----------
+const show_win_rate = computed(() => {
+  return props.strategy?.disposition === 'defend' && props.strategy?.estimated_win_rate !== null && props.strategy?.estimated_win_rate !== undefined
 })
 
 // ---------- 派生状态：策略置信度百分比 ----------

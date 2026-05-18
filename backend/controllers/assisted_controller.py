@@ -525,12 +525,13 @@ def run_with_events(
         normalized_dispute_id,
         total_elapsed,
     )
+    win_rate_text = "None" if report.strategy.estimated_win_rate is None else f"{report.strategy.estimated_win_rate:.3f}"
     logger.info(
-        "%s 质量基线：%s strategy=%s win_rate=%.3f confidence=%.3f evidence=%s risk_count=%s",
+        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s",
         ASSISTED_LOG_PREFIX,
         normalized_dispute_id,
-        report.strategy.strategy,
-        report.strategy.estimated_win_rate,
+        report.strategy.disposition,
+        win_rate_text,
         report.strategy.confidence,
         report.facts.evidence_quality,
         len(report.strategy.risk_factors),

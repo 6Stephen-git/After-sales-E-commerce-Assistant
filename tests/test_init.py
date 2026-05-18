@@ -41,10 +41,10 @@ class TestSchemas:
         assert obj.dispute_rate >= 0.0
 
     def test_strategy_output_instantiation(self):
-        """StrategyOutput 可实例化，必填字段 strategy 需传入"""
-        from schemas import StrategyOutput, STRATEGY_DEFEND
-        obj = StrategyOutput(strategy=STRATEGY_DEFEND)
-        assert obj.strategy == "defend"
+        """StrategyOutput 可实例化，必填字段 disposition 需传入"""
+        from schemas import StrategyOutput, DISPOSITION_DEFEND
+        obj = StrategyOutput(disposition=DISPOSITION_DEFEND)
+        assert obj.disposition == "defend"
 
     def test_script_output_instantiation(self):
         """ScriptOutput 可使用默认值实例化"""
@@ -74,22 +74,22 @@ class TestSchemas:
 
     def test_analysis_report_instantiation(self):
         """AnalysisReport 聚合结构可实例化"""
-        from schemas import AnalysisReport, FactOutput, StrategyOutput, ScriptOutput, STRATEGY_DEFEND
+        from schemas import AnalysisReport, FactOutput, StrategyOutput, ScriptOutput, DISPOSITION_DEFEND
         obj = AnalysisReport(
             dispute_id="D202600001",
             facts=FactOutput(),
-            strategy=StrategyOutput(strategy=STRATEGY_DEFEND),
+            strategy=StrategyOutput(disposition=DISPOSITION_DEFEND),
             scripts=ScriptOutput(),
         )
         assert obj.dispute_id == "D202600001"
         assert obj.emotion_alert is None
 
     def test_valid_strategy_enums(self):
-        """策略枚举值定义正确"""
-        from schemas import VALID_STRATEGIES, STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE
-        assert STRATEGY_DEFEND in VALID_STRATEGIES
-        assert STRATEGY_NEGOTIATE in VALID_STRATEGIES
-        assert STRATEGY_COMPENSATE in VALID_STRATEGIES
+        """处置方向枚举值定义正确"""
+        from schemas import VALID_DISPOSITIONS, DISPOSITION_DEFEND, DISPOSITION_NEGOTIATE, DISPOSITION_COMPENSATE
+        assert DISPOSITION_DEFEND in VALID_DISPOSITIONS
+        assert DISPOSITION_NEGOTIATE in VALID_DISPOSITIONS
+        assert DISPOSITION_COMPENSATE in VALID_DISPOSITIONS
 
     def test_valid_evidence_quality_enums(self):
         """证据质量枚举值定义正确"""

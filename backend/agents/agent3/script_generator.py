@@ -11,12 +11,12 @@ import json
 import os
 
 from schemas import (
+    DISPOSITION_COMPENSATE,
+    DISPOSITION_DEFEND,
+    DISPOSITION_NEGOTIATE,
     SCRIPT_COMPENSATE,
     SCRIPT_DEFENSE,
     SCRIPT_NEGOTIATE,
-    STRATEGY_COMPENSATE,
-    STRATEGY_DEFEND,
-    STRATEGY_NEGOTIATE,
     ScriptInput,
     ScriptOutput,
 )
@@ -115,22 +115,22 @@ def _fill_template(template: str, variables: Dict[str, str]) -> str:
     return result.strip()
 
 
-def _strategy_to_recommended_version(strategy: str) -> str:
+def _disposition_to_recommended_version(disposition: str) -> str:
     """
-    将 Agent2 输出的策略英文值映射为 ScriptOutput 中的 recommended_version 字段值。
+    将 Agent2 输出的处置方向映射为 ScriptOutput.recommended_version。
 
     参数:
-        strategy: defend / negotiate / compensate。
+        disposition: defend / negotiate / compensate。
 
     返回:
         defense_version / negotiate_version / compensate_version 三者之一；
-        未知策略时默认 negotiate_version。
+        未知方向时默认 negotiate_version。
     """
-    normalized = (strategy or "").strip().lower()
+    normalized = (disposition or "").strip().lower()
     mapping = {
-        STRATEGY_DEFEND: SCRIPT_DEFENSE,
-        STRATEGY_NEGOTIATE: SCRIPT_NEGOTIATE,
-        STRATEGY_COMPENSATE: SCRIPT_COMPENSATE,
+        DISPOSITION_DEFEND: SCRIPT_DEFENSE,
+        DISPOSITION_NEGOTIATE: SCRIPT_NEGOTIATE,
+        DISPOSITION_COMPENSATE: SCRIPT_COMPENSATE,
     }
     return mapping.get(normalized, SCRIPT_NEGOTIATE)
 
@@ -176,7 +176,7 @@ def _derive_tone_profile(input_data: ScriptInput) -> Dict[str, str]:
     tone_style = "professional"
     if any(word in emotion_note for word in angry_keywords):
         tone_style = "calm"
-    elif input_data.strategy_output.strategy == STRATEGY_COMPENSATE:
+    elif input_data.strategy_output.disposition == DISPOSITION_COMPENSATE:
         tone_style = "empathetic"
 
     return {
@@ -250,7 +250,7 @@ def _llm_generate_scripts(
     fast_path=True 时优先小模型，若输出结构不合规则自动回退主模型补调一次。
     """
     payload = {
-        "strategy": input_data.strategy_output.strategy,
+        "disposition": input_data.strategy_output.disposition,
         "reasoning": input_data.strategy_output.reasoning,
         "fact_summary": variables["fact_summary"],
         "order_id": variables["order_id"],
@@ -330,9 +330,9 @@ def generate(input_data: ScriptInput, fast_path: bool = False) -> ScriptOutput:
     }
     tone_profile = _derive_tone_profile(input_data=input_data)
 
-    defense_template = get_script_template(STRATEGY_DEFEND)
-    negotiate_template = get_script_template(STRATEGY_NEGOTIATE)
-    compensate_template = get_script_template(STRATEGY_COMPENSATE)
+    defense_template = get_script_template(DISPOSITION_DEFEND)
+    negotiate_template = get_script_template(DISPOSITION_NEGOTIATE)
+    compensate_template = get_script_template(DISPOSITION_COMPENSATE)
 
     defense_version = _fill_template(defense_template, variables)
     negotiate_version = _fill_template(negotiate_template, variables)
@@ -357,7 +357,7 @@ def generate(input_data: ScriptInput, fast_path: bool = False) -> ScriptOutput:
         negotiate_version = _compress_short_sentence(negotiate_version)
         compensate_version = _compress_short_sentence(compensate_version)
 
-    recommended_version = _strategy_to_recommended_version(input_data.strategy_output.strategy)
+    recommended_version = _disposition_to_recommended_version(input_data.strategy_output.disposition)
     usage_tip = _build_usage_tip(input_data=input_data, recommended_version=recommended_version)
 
     return ScriptOutput(

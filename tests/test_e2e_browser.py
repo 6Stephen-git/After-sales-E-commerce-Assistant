@@ -34,7 +34,7 @@ MOCK_ANALYZE_REPORT = {
         "uncertainty_note": None,
     },
     "strategy": {
-        "strategy": "defend",
+        "disposition": "defend",
         "reasoning": "证据充分且风险低，优先抗辩。",
         "estimated_win_rate": 0.78,
         "risk_factors": [],

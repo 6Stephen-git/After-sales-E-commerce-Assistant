@@ -7,10 +7,17 @@
 from __future__ import annotations
 
 from typing import Any
+import os
+import sys
 
 import pytest
 
-from schemas import VALID_STRATEGIES
+# ---------- 与仓库根对齐的导入路径 ----------
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from schemas import VALID_DISPOSITIONS
 
 
 # ---------- 依赖守卫：未安装 httpx 时跳过该测试文件 ----------
@@ -68,7 +75,7 @@ def test_e2e_first_analysis_should_return_valid_report(backend_server: str) -> N
     report = response.json()
     assert report["dispute_id"] == "E2E-001"
     assert report["facts"]["defect_type"] == "破洞"
-    assert report["strategy"]["strategy"] in VALID_STRATEGIES
+    assert report["strategy"]["disposition"] in VALID_DISPOSITIONS
     assert report["scripts"]["recommended_version"] in {
         "defense_version",
         "negotiate_version",

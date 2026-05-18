@@ -61,7 +61,7 @@ def _find_first_text_by_keys(payload: Any, keys: set[str]) -> str:
 # ---------- 轨迹扫描：递归识别 AI 策略类型 ----------
 def _detect_strategy(payload: Any) -> str:
     """
-    从轨迹中识别 AI 策略（defend/negotiate/compensate）。
+    从轨迹中识别 AI 处置方向（defend/negotiate/compensate）。
 
     参数:
         payload: 任意嵌套轨迹结构。
@@ -73,7 +73,7 @@ def _detect_strategy(payload: Any) -> str:
     if isinstance(payload, dict):
         for key, value in payload.items():
             key_text = str(key).strip().lower()
-            if key_text in {"strategy", "recommended_strategy", "ai_strategy"}:
+            if key_text in {"strategy", "recommended_strategy", "ai_strategy", "disposition"}:
                 candidate = str(value or "").strip().lower()
                 if candidate in valid_strategies:
                     return candidate

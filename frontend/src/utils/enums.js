@@ -1,5 +1,5 @@
 // ---------- 枚举映射表：内部英文值统一映射为中文展示 ----------
-const STRATEGY_LABEL_MAP = {
+const DISPOSITION_LABEL_MAP = {
   defend: '抗辩',
   negotiate: '协商',
   compensate: '体面善后'
@@ -23,9 +23,9 @@ const SCRIPT_VERSION_LABEL_MAP = {
   compensate_version: '善后版'
 }
 
-// ---------- 映射函数：策略方向 ----------
-export function getStrategyLabel(value) {
-  return STRATEGY_LABEL_MAP[value] || '未知策略'
+// ---------- 映射函数：处置方向 ----------
+export function getDispositionLabel(value) {
+  return DISPOSITION_LABEL_MAP[value] || '未知处置方向'
 }
 
 // ---------- 映射函数：证据质量 ----------

@@ -27,16 +27,18 @@ from schemas import (
     BuyerProfile,
     CustomerValueInput,
     FactOutput,
+    MaliciousDetectionOutput,
+    MaliciousSignal,
     MaliciousDetectionInput,
     MatchedRule,
     StrategyInput,
-    STRATEGY_COMPENSATE,
-    STRATEGY_DEFEND,
-    STRATEGY_NEGOTIATE,
+    DISPOSITION_COMPENSATE,
+    DISPOSITION_DEFEND,
+    DISPOSITION_NEGOTIATE,
 )
 
 
-# ---------- recommend：三典型策略 + 无规则无判例边界 ----------
+# ---------- recommend：单链路处置方向 + 胜率/置信度 ----------
 class TestAgent2Recommend:
     def _mock_customer_value_fields(self, monkeypatch):
         """屏蔽客户价值字段推断的外部依赖，保证单测稳定。"""
@@ -50,6 +52,7 @@ class TestAgent2Recommend:
                 "demand_reasonableness": "borderline",
             },
         )
+        monkeypatch.setattr(strategist_module, "_llm_generate_reasoning", lambda **kwargs: None)
 
     def test_recommend_compensate_when_high_quality_defect(self, monkeypatch):
         """高质量瑕疵证据，倾向善后策略。"""
@@ -77,8 +80,9 @@ class TestAgent2Recommend:
         )
 
         output = recommend(input_data)
-        assert output.strategy == STRATEGY_COMPENSATE, f"期望 compensate，实际 {output.strategy}"
-        assert 0.0 <= output.estimated_win_rate <= 1.0
+        assert output.disposition == DISPOSITION_COMPENSATE, f"期望 compensate，实际 {output.disposition}"
+        assert output.estimated_win_rate is None
+        assert 0.6 <= output.confidence <= 0.95
         assert output.policy_ref and "R002" in output.policy_ref
 
     def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self, monkeypatch):
@@ -114,7 +118,9 @@ class TestAgent2Recommend:
         )
 
         output = recommend(input_data)
-        assert output.strategy == STRATEGY_DEFEND, f"期望 defend，实际 {output.strategy}"
+        assert output.disposition == DISPOSITION_DEFEND, f"期望 defend，实际 {output.disposition}"
+        assert output.estimated_win_rate is not None
+        assert 0.05 <= output.estimated_win_rate <= 0.95
         assert output.risk_factors, "期望输出风险因素列表"
 
     def test_recommend_negotiate_for_medium_evidence_color_diff(self, monkeypatch):
@@ -143,10 +149,49 @@ class TestAgent2Recommend:
         )
 
         output = recommend(input_data)
-        assert output.strategy == STRATEGY_NEGOTIATE, f"期望 negotiate，实际 {output.strategy}"
+        assert output.disposition == DISPOSITION_NEGOTIATE, f"期望 negotiate，实际 {output.disposition}"
+        assert output.estimated_win_rate is None
+        assert 0.1 <= output.confidence <= 0.95
         assert "客户意图：" in output.reasoning
         assert "风险点：" in output.reasoning
         assert "建议动作：" in output.reasoning
+
+    def test_recommend_negotiate_when_medium_risk_conflicts_with_merchant_fault(self, monkeypatch):
+        """中风险恶意与商责明确信号冲突时，应协商且降低置信度。"""
+        self._mock_customer_value_fields(monkeypatch)
+        monkeypatch.setattr(
+            strategist_module,
+            "detect_malicious_behavior",
+            lambda _input: MaliciousDetectionOutput(
+                risk_score=42,
+                risk_level="medium",
+                triggered_signals=[],
+                hard_rule_summary="存在中风险信号。",
+                disposition_advice="建议谨慎协商并加强举证要求，控制补偿上限。",
+            ),
+        )
+        facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
+        matched_rules = [
+            MatchedRule(
+                rule_id="R002",
+                rule_summary="买家提供清晰瑕疵图片，平台倾向支持买家退款",
+                condition_result="规则条件全部满足；建议策略:compensate",
+            )
+        ]
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_conflict"),
+            matched_rules=matched_rules,
+            similar_cases=[],
+            order_amount=128.0,
+        )
+
+        output = recommend(input_data)
+        assert output.disposition == DISPOSITION_NEGOTIATE
+        assert output.estimated_win_rate is None
+        assert output.confidence <= 0.65
+        assert any("信号一致性" in item for item in output.risk_factors)
+        assert "信号一致性" in output.reasoning or "冲突" in output.reasoning
 
     def test_recommend_boundary_with_empty_rules_and_cases(self, monkeypatch):
         """边界场景：无规则无判例时仍应输出合法策略。"""
@@ -162,7 +207,7 @@ class TestAgent2Recommend:
         )
 
         output = recommend(input_data)
-        assert output.strategy in {STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE}
+        assert output.disposition in {DISPOSITION_DEFEND, DISPOSITION_NEGOTIATE, DISPOSITION_COMPENSATE}
         assert 0.0 <= output.confidence <= 1.0
         assert output.customer_value is not None
 
@@ -204,11 +249,61 @@ class TestAgent2Recommend:
         output = recommend(input_data)
         assert output.reasoning.startswith("客户意图：")
 
+    def test_recommend_should_expose_malicious_layer_result(self, monkeypatch):
+        """A2-4 分层编排后，应透传恶意检测层输出并写入风险提示。"""
+        self._mock_customer_value_fields(monkeypatch)
+        monkeypatch.setattr(
+            strategist_module,
+            "detect_malicious_behavior",
+            lambda _input: MaliciousDetectionOutput(
+                risk_score=72,
+                risk_level="high",
+                triggered_signals=[
+                    MaliciousSignal(
+                        signal_type="review_blackmail",
+                        description="条件交换式投诉威胁",
+                        score=12,
+                        source="llm_semantic",
+                    )
+                ],
+                hard_rule_summary="硬规则层未命中异常项。",
+                disposition_advice="建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。",
+            ),
+        )
+        input_data = StrategyInput(
+            facts=FactOutput(evidence_quality="medium"),
+            buyer_profile=BuyerProfile(buyer_id="buyer_layer"),
+            matched_rules=[],
+            similar_cases=[],
+            order_amount=120.0,
+            chat_history=["不给补偿我就去投诉平台"],
+        )
+        output = recommend(input_data)
+        assert output.malicious_detection is not None
+        assert output.malicious_detection.risk_level == "high"
+        assert any(item.startswith("[恶意层]") for item in output.risk_factors)
+
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
 class TestAgent2Tools:
-    def test_match_rules_should_hit_known_rule(self):
-        """规则匹配应至少命中一条已知规则。"""
+    def test_match_rules_should_hit_mysql_rule(self, monkeypatch):
+        """规则匹配应以 MySQL 加载结果为主链。"""
+        monkeypatch.setattr(
+            agent2_tools_module,
+            "_load_rules_from_mysql",
+            lambda: [
+                {
+                    "rule_id": "R002",
+                    "conditions": {
+                        "goods_received": True,
+                        "defect_type": "破洞",
+                        "evidence_quality": "high",
+                    },
+                    "rule_summary": "买家提供清晰瑕疵图片且证据质量高，平台倾向支持买家退款",
+                    "outcome_suggestion": "compensate",
+                }
+            ],
+        )
         facts = FactOutput(
             goods_received=True,
             defect_type="破洞",
@@ -218,6 +313,16 @@ class TestAgent2Tools:
         matched = match_rules(facts)
         assert matched, "期望至少命中一条规则"
         assert any(rule.rule_id == "R002" for rule in matched), "期望命中 R002"
+
+    def test_match_rules_should_not_use_json_without_dev_fallback(self, monkeypatch):
+        """未开启开发回退时，MySQL 无规则不应再读取本地 JSON。"""
+        monkeypatch.delenv("ENABLE_LOCAL_RULES_FALLBACK", raising=False)
+        monkeypatch.setattr(agent2_tools_module, "_load_rules_from_mysql", lambda: [])
+        facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high", logistics_normal=True)
+
+        matched = match_rules(facts)
+
+        assert matched == []
 
     def test_query_buyer_profile_should_return_default_when_unknown(self):
         """未知买家 ID 返回默认画像。"""

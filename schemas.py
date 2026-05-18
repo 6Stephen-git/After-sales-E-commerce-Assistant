@@ -13,11 +13,11 @@ from typing import Any, Optional, List
 # 一、基础枚举
 # ============================================================
 
-# 策略枚举（内部英文）
-STRATEGY_DEFEND = "defend"
-STRATEGY_NEGOTIATE = "negotiate"
-STRATEGY_COMPENSATE = "compensate"
-VALID_STRATEGIES = [STRATEGY_DEFEND, STRATEGY_NEGOTIATE, STRATEGY_COMPENSATE]
+# 处置方向枚举（内部英文）
+DISPOSITION_DEFEND = "defend"
+DISPOSITION_NEGOTIATE = "negotiate"
+DISPOSITION_COMPENSATE = "compensate"
+VALID_DISPOSITIONS = [DISPOSITION_DEFEND, DISPOSITION_NEGOTIATE, DISPOSITION_COMPENSATE]
 
 # 证据质量枚举（内部英文）
 EVIDENCE_HIGH = "high"
@@ -184,8 +184,8 @@ class MaliciousDetectionOutput(BaseModel):
 
 class StrategyOutput(BaseModel):
     """Agent 2 输出：策略建议"""
-    strategy: str = Field(..., description=f"策略方向：{'/'.join(VALID_STRATEGIES)}")
-    estimated_win_rate: float = Field(default=0.0, ge=0.0, le=1.0, description="预估胜率")
+    disposition: str = Field(..., description=f"处置方向：{'/'.join(VALID_DISPOSITIONS)}")
+    estimated_win_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="抗辩胜率（仅抗辩方向返回）")
     policy_ref: Optional[str] = Field(default=None, description="引用的平台规则条款")
     reasoning: str = Field(default="", description="推理依据说明")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")

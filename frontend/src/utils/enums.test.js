@@ -1,21 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getDispositionLabel,
   getEvidenceQualityLabel,
   getScriptVersionLabel,
-  getSentimentLabel,
-  getStrategyLabel
+  getSentimentLabel
 } from './enums'
 
-// ---------- 策略枚举：合法值映射为约定中文 ----------
-describe('getStrategyLabel', () => {
-  it('将内部策略值映射为中文展示', () => {
-    expect(getStrategyLabel('defend')).toBe('抗辩')
-    expect(getStrategyLabel('negotiate')).toBe('协商')
-    expect(getStrategyLabel('compensate')).toBe('体面善后')
+// ---------- 处置方向枚举：合法值映射为约定中文 ----------
+describe('getDispositionLabel', () => {
+  it('将内部处置方向值映射为中文展示', () => {
+    expect(getDispositionLabel('defend')).toBe('抗辩')
+    expect(getDispositionLabel('negotiate')).toBe('协商')
+    expect(getDispositionLabel('compensate')).toBe('体面善后')
   })
 
   it('未知值回退为占位文案', () => {
-    expect(getStrategyLabel('unknown')).toBe('未知策略')
+    expect(getDispositionLabel('unknown')).toBe('未知处置方向')
   })
 })
 
