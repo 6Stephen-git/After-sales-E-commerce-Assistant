@@ -11,6 +11,7 @@ from typing import Callable, List
 import json
 import logging
 import os
+import re
 
 from schemas import (
     MaliciousDetectionInput,
@@ -34,6 +35,35 @@ _MERCHANT_INTEREST_GOAL = (
 )
 
 
+def _polish_merchant_facing_text(text: str) -> str:
+    """去除条号/章节等内部引用，使文案更适合商家阅读。"""
+    if not text:
+        return text
+    cleaned = re.sub(r"第[一二三四五六七八九十百千零\d]+条", "", text)
+    cleaned = re.sub(r"第[一二三四五六七八九十]+节[^，。；\n]*", "", cleaned)
+    cleaned = re.sub(r"[（(]篇首[）)]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" 。；，,")
+    return cleaned.strip()
+
+
+def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
+    """从 rule_briefs（品类优先）提取面向商家的规则要点列表。"""
+    lines: List[str] = []
+    seen: set[str] = set()
+    for brief in input_data.rule_briefs or []:
+        text = _polish_merchant_facing_text(str(getattr(brief, "brief", "") or ""))
+        if text and text not in seen:
+            seen.add(text)
+            lines.append(text)
+    if not lines:
+        for rule in input_data.matched_rules or []:
+            text = _polish_merchant_facing_text(str(getattr(rule, "rule_summary", "") or ""))
+            if text and text not in seen:
+                seen.add(text)
+                lines.append(text)
+    return lines[:5]
+
+
 def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
     """
     解析规则命中站位，输出规则引用、站位方向与命中数。
@@ -41,18 +71,33 @@ def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int
     merchant_support = 0
     buyer_support = 0
     policy_refs: List[str] = []
-    for rule in input_data.matched_rules:
-        combined_text = f"{rule.rule_summary} {rule.condition_result}".lower()
-        policy_refs.append(rule.rule_id)
-        if "建议策略:defend" in combined_text or "抗辩" in combined_text or "支持商家" in combined_text:
+    briefs = input_data.rule_briefs or []
+    rules_for_stance = briefs if briefs else input_data.matched_rules
+    for rule in rules_for_stance:
+        if hasattr(rule, "stance_hint"):
+            stance = str(getattr(rule, "stance_hint", "") or "").lower()
+            summary = str(getattr(rule, "brief", "") or getattr(rule, "rule_summary", ""))
+            ref = str(getattr(rule, "article_ref", "") or getattr(rule, "rule_id", ""))
+        else:
+            stance = str(getattr(rule, "stance_hint", "") or "").lower()
+            summary = str(getattr(rule, "rule_summary", ""))
+            ref = str(getattr(rule, "rule_id", ""))
+        policy_refs.append(ref)
+        combined_text = f"{summary} {getattr(rule, 'condition_result', '')}".lower()
+        if stance == "merchant" or "支持打款" in combined_text:
             merchant_support += 1
-        elif "建议策略:compensate" in combined_text or "退款" in combined_text or "赔付" in combined_text or "支持买家" in combined_text:
+        elif stance == "buyer" or "支持买家" in combined_text:
             buyer_support += 1
+        elif "建议策略:defend" in combined_text or "抗辩" in combined_text:
+            merchant_support += 1
+        elif "建议策略:compensate" in combined_text or ("退款" in combined_text and "支持买家" in combined_text):
+            buyer_support += 1
+    hit_count = len(rules_for_stance)
     if merchant_support > buyer_support:
-        return policy_refs, "merchant", len(input_data.matched_rules)
+        return policy_refs, "merchant", hit_count
     if buyer_support > merchant_support:
-        return policy_refs, "buyer", len(input_data.matched_rules)
-    return policy_refs, "neutral", len(input_data.matched_rules)
+        return policy_refs, "buyer", hit_count
+    return policy_refs, "neutral", hit_count
 
 
 def _apply_malicious_layer(input_data: StrategyInput) -> tuple:
@@ -452,22 +497,28 @@ def _compose_strategy_direction_rationale(
     parts: List[str] = []
     summary = (input_data.facts.issue_summary or "").strip()
     if summary:
-        parts.append(f"当前诉求：{summary}")
+        parts.append(f"买家主要在说：{summary}")
     missing = input_data.facts.missing_evidence or []
     if missing:
-        parts.append("关键举证仍不足：" + "；".join(str(item) for item in missing[:2]))
+        parts.append(f"现在还缺{ '、'.join(str(item) for item in missing[:2]) }，直接认责或退款风险比较大")
     elif (input_data.facts.evidence_quality or "").lower() in {"low", "medium", "弱", "中"}:
-        parts.append("现有图文/描述尚不足以闭环认定责任，宜先补证再决策。")
+        parts.append("现有材料还不足以把责任说清楚，先补证更稳妥")
+    briefs = input_data.rule_briefs or []
+    if briefs:
+        hint = _polish_merchant_facing_text(briefs[0].brief)
+        if hint:
+            parts.append(f"平台相关规则倾向于：{hint}")
     if risk_factors:
-        parts.append("主要风险：" + "；".join(risk_factors[:2]))
+        parts.append(f"另外要注意：{'；'.join(risk_factors[:2])}")
     if disposition == DISPOSITION_DEFEND and estimated_win_rate is not None:
-        parts.append(f"抗辩胜率约 {estimated_win_rate:.0%}，优先固定证据与规则口径以控制损失。")
+        parts.append(f"按目前情况看，抗辩成功率大约 {estimated_win_rate:.0%}，先把证据和口径站稳更划算")
     elif disposition == DISPOSITION_COMPENSATE:
-        parts.append("责任倾向明确，及时善后可降低升级投诉与体验损失。")
+        parts.append("责任已经比较清楚，及时处理可以少扯皮、少升级投诉")
     elif disposition == DISPOSITION_NEGOTIATE:
-        parts.append("举证已较充分，可在规则边界内通过单点协商争取本单与客户价值的综合最优。")
-    parts.append("分阶段推进：本步只做当下最优动作，待证据或买家反馈后再进入补偿或合理拒赔。")
-    return "。".join(parts[:4]) + ("。" if parts else "综合事实与规则后给出上述单一路径建议。")
+        parts.append("证据差不多够了，在规则允许范围内谈一步，往往比硬扛更省成本")
+    if not parts:
+        parts.append("综合买家说法、现有证据和平台规则，先按上面这一步走比较稳")
+    return "。".join(parts[:4]) + "。"
 
 
 def _compose_customer_intent_analysis(input_data: StrategyInput) -> str:
@@ -530,7 +581,9 @@ def _build_strategy_reasoning_system_prompt() -> str:
         "若 strategy_stage=evidence_first：只能要求补证、固定己方证据、说明规则依据，禁止先给退款/部分退款/换新/优惠券等终局方案。"
         "若 strategy_stage=negotiate_settle：可给一条协商口径，须注明以证据与规则为前提。"
         "禁止罗列多套备选、禁止“例如/或者/可同时”式展开。"
-        "推理理由：2～4句，说明本步如何兼顾本单损益、客户价值与平台规则。避免空话，不要使用AI口吻。"
+        "推理理由：2～4句，用商家能直接看懂的口语向店长解释「为什么建议这一步」；"
+        "可说「买家这边」「您这边」「平台一般会」；禁止写第几条、第几章、条号、法规腔和 AI 套话；"
+        "可概括平台规则倾向，但不要逐条引用条文编号。"
     )
 
 
@@ -550,10 +603,10 @@ def _llm_generate_reasoning(
     fast_path=True 时优先小模型，若格式不符合约定则自动回退主模型补调一次。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    briefs_for_fault = input_data.rule_briefs or []
     merchant_fault_signal = any(
-        "建议策略:compensate" in f"{rule.rule_summary} {rule.condition_result}".lower()
-        or "支持买家" in f"{rule.rule_summary} {rule.condition_result}"
-        for rule in input_data.matched_rules
+        getattr(b, "stance_hint", "") == "buyer" or "支持买家" in b.brief
+        for b in briefs_for_fault
     ) and evidence_quality == "high"
     prompt_payload = {
         "disposition": disposition,
@@ -562,6 +615,7 @@ def _llm_generate_reasoning(
         "merchant_fault_clear": merchant_fault_signal,
         "facts": input_data.facts.model_dump(),
         "buyer_profile": input_data.buyer_profile.model_dump(),
+        "rule_briefs": [item.model_dump() for item in (input_data.rule_briefs or [])],
         "matched_rules": [item.model_dump() for item in input_data.matched_rules],
         "similar_cases": [item.model_dump() for item in input_data.similar_cases],
         "risk_factors": risk_factors,
@@ -713,11 +767,14 @@ def recommend(
         input_data=input_data,
     )
     rationale_extracted = _extract_strategy_rationale_from_reasoning(reasoning)
-    strategy_direction_rationale = rationale_extracted or _compose_strategy_direction_rationale(
-        disposition=disposition,
-        input_data=input_data,
-        risk_factors=dedup_risks,
-        estimated_win_rate=estimated_win_rate,
+    strategy_direction_rationale = _polish_merchant_facing_text(
+        rationale_extracted
+        or _compose_strategy_direction_rationale(
+            disposition=disposition,
+            input_data=input_data,
+            risk_factors=dedup_risks,
+            estimated_win_rate=estimated_win_rate,
+        )
     )
 
     return StrategyOutput(
@@ -727,6 +784,7 @@ def recommend(
         customer_intent_analysis=customer_intent_analysis,
         strategy_direction_summary=strategy_direction_summary,
         strategy_direction_rationale=strategy_direction_rationale,
+        platform_rule_basis=_build_platform_rule_basis(input_data),
         reasoning=reasoning,
         risk_factors=dedup_risks,
         confidence=confidence,

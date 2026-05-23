@@ -17,8 +17,8 @@ from typing import Any, Callable
 from backend.agents.agent1 import extract
 from backend.agents.agent2 import recommend
 from backend.agents.agent3 import generate
-from backend.tools.agent2_tools import match_rules, query_buyer_profile, search_similar_cases
-from schemas import AnalysisReport, ScriptInput, StrategyInput
+from backend.tools.agent2_tools import match_rules_full, query_buyer_profile, search_similar_cases
+from schemas import AnalysisReport, MatchedRule, RuleBrief, ScriptInput, StrategyInput
 
 # ---------- 日志前缀与纠纷材料缓存（按 dispute_id） ----------
 ASSISTED_LOG_PREFIX = "[AssistedController]"
@@ -216,14 +216,14 @@ def _run_agent2_tools_sequential(
     buyer_id: str,
     merchant_id: str,
     dispute_desc: str,
-) -> tuple[Any, Any, Any]:
+) -> tuple[list[MatchedRule], list[RuleBrief], Any, Any]:
     """
     串行执行 Agent2 工具调用（兼容路径）。
     """
-    matched_rules = match_rules(facts=facts)
+    rule_result = match_rules_full(facts=facts)
     buyer_profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id)
     similar_cases = search_similar_cases(dispute_desc=dispute_desc, top_k=3)
-    return matched_rules, buyer_profile, similar_cases
+    return rule_result.display_rules, rule_result.rule_briefs, buyer_profile, similar_cases
 
 
 def _run_agent2_tools_parallel(
@@ -232,18 +232,18 @@ def _run_agent2_tools_parallel(
     buyer_id: str,
     merchant_id: str,
     dispute_desc: str,
-) -> tuple[Any, Any, Any]:
+) -> tuple[list[MatchedRule], list[RuleBrief], Any, Any]:
     """
     并行执行 Agent2 工具调用，降低规则/画像/判例的等待时间。
     """
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_rules = executor.submit(match_rules, facts=facts)
+        future_rules = executor.submit(match_rules_full, facts=facts)
         future_profile = executor.submit(query_buyer_profile, buyer_id=buyer_id, merchant_id=merchant_id)
         future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
-        matched_rules = future_rules.result()
+        rule_result = future_rules.result()
         buyer_profile = future_profile.result()
         similar_cases = future_cases.result()
-    return matched_rules, buyer_profile, similar_cases
+    return rule_result.display_rules, rule_result.rule_briefs, buyer_profile, similar_cases
 
 
 def clear_cache(dispute_id: str | None = None) -> None:
@@ -371,14 +371,14 @@ def run_with_events(
     try:
         buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(merged_materials=merged_materials)
         if tools_parallel_enabled:
-            matched_rules, buyer_profile, similar_cases = _run_agent2_tools_parallel(
+            matched_rules, rule_briefs, buyer_profile, similar_cases = _run_agent2_tools_parallel(
                 facts=facts,
                 buyer_id=buyer_id,
                 merchant_id=merchant_id,
                 dispute_desc=dispute_desc,
             )
         else:
-            matched_rules, buyer_profile, similar_cases = _run_agent2_tools_sequential(
+            matched_rules, rule_briefs, buyer_profile, similar_cases = _run_agent2_tools_sequential(
                 facts=facts,
                 buyer_id=buyer_id,
                 merchant_id=merchant_id,
@@ -393,6 +393,9 @@ def run_with_events(
                 "elapsed_ms": tools_elapsed,
                 "dispute_id": normalized_dispute_id,
                 "parallel": tools_parallel_enabled,
+                "partial_report": {
+                    "matched_rules": [item.model_dump() for item in matched_rules],
+                },
             },
         )
         logger.info(
@@ -413,6 +416,7 @@ def run_with_events(
             facts=facts,
             buyer_profile=buyer_profile,
             matched_rules=matched_rules,
+            rule_briefs=rule_briefs,
             similar_cases=similar_cases,
             order_amount=_safe_order_amount(merged_materials.get("order_amount", 0.0)),
             chat_history=_extract_chat_history_texts(merged_materials),

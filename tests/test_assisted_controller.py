@@ -17,7 +17,7 @@ from backend.controllers.assisted_controller import clear_cache, run
 import backend.controllers.assisted_controller as assisted_controller_module
 import backend.tools.agent2_tools as agent2_tools_module
 import backend.agents.agent2.strategist as strategist_module
-from schemas import EVIDENCE_LOW, MatchedRule
+from schemas import EVIDENCE_LOW, MatchedRule, RuleBrief, RuleMatchResult, RULE_RELEVANCE_SHOULD
 
 
 # ---------- 每个用例前：清空进程内缓存 ----------
@@ -26,13 +26,21 @@ def setup_function() -> None:
     每个用例前清空控制器缓存，避免互相污染。
     """
     clear_cache()
-    assisted_controller_module.match_rules = lambda facts: [
-        MatchedRule(
-            rule_id="R002",
-            rule_summary="买家提供清晰瑕疵图片且证据质量高，平台倾向支持买家退款",
-            condition_result="规则条件全部满足；建议策略:compensate",
-        )
-    ] if facts.defect_type == "破洞" and facts.evidence_quality == "high" else []
+    def _mock_match_rules_full(facts):
+        if facts.defect_type == "破洞" and facts.evidence_quality == "high":
+            rule = MatchedRule(
+                rule_id="mock::第六十五条",
+                rule_summary="买家主张商品存在质量问题系肉眼可识别的，应提供初步凭证",
+                condition_result="mock",
+                relevance=RULE_RELEVANCE_SHOULD,
+                stance_hint="merchant",
+            )
+            brief = RuleBrief(article_ref="第六十五条", brief=rule.rule_summary, relevance=RULE_RELEVANCE_SHOULD)
+            return RuleMatchResult(matched_rules=[rule], rule_briefs=[brief], display_rules=[rule])
+        return RuleMatchResult()
+
+    agent2_tools_module.match_rules_full = _mock_match_rules_full
+    assisted_controller_module.match_rules_full = _mock_match_rules_full
     agent2_tools_module.infer_customer_value_fields = lambda _input: {
         "defect_severity": "moderate",
         "goods_recoverability": "repairable",

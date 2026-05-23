@@ -20,6 +20,7 @@ from backend.tools.agent2_tools import (
     detect_malicious_behavior,
     evaluate_customer_value,
     match_rules,
+    match_rules_full,
     query_buyer_profile,
     search_similar_cases,
 )
@@ -84,6 +85,8 @@ class TestAgent2Recommend:
         assert output.estimated_win_rate is None
         assert 0.6 <= output.confidence <= 0.95
         assert output.policy_ref and "R002" in output.policy_ref
+        assert output.platform_rule_basis
+        assert "退款" in output.platform_rule_basis[0]
 
     def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self, monkeypatch):
         """证据不足且买家风险高，倾向抗辩。"""
@@ -326,43 +329,155 @@ class TestAgent2Recommend:
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
 class TestAgent2Tools:
-    def test_match_rules_should_hit_mysql_rule(self, monkeypatch):
-        """规则匹配应以 MySQL 加载结果为主链。"""
+    def test_match_rules_should_score_articles_from_plan(self, monkeypatch):
+        """规则匹配应基于 rule_match_plan 与 MySQL 爬取正文（篇内双层词）。"""
+        base_doc_id = "争议处理基本规则_淘宝平台争议处理规则_1154_99"
+        phone_doc_id = "特殊品类争议处理_淘宝平台手机类商品争议处理规范_1155_11003755"
+        mock_docs = {
+            base_doc_id: {
+                "doc_id": base_doc_id,
+                "articles": [
+                    {
+                        "article_no": "第六十五条",
+                        "article_title": "买家主张商品存在质量问题系肉眼可识别的，应提供初步凭证予以证明。",
+                        "content": "买家未提供初步凭证的，交易支持打款。",
+                        "chapter": "",
+                    }
+                ],
+            },
+            phone_doc_id: {
+                "doc_id": phone_doc_id,
+                "articles": [
+                    {
+                        "article_no": "第四条",
+                        "article_title": "商品质量问题",
+                        "content": "买家主张收到的商品存在包括但不限于以下情形的：花屏、闪屏。举证要求。",
+                        "chapter": "",
+                    }
+                ],
+            },
+        }
         monkeypatch.setattr(
-            agent2_tools_module,
-            "_load_rules_from_mysql",
-            lambda: [
-                {
-                    "rule_id": "R002",
-                    "conditions": {
-                        "goods_received": True,
-                        "defect_type": "破洞",
-                        "evidence_quality": "high",
-                    },
-                    "rule_summary": "买家提供清晰瑕疵图片且证据质量高，平台倾向支持买家退款",
-                    "outcome_suggestion": "compensate",
-                }
-            ],
+            "backend.tools.rule_matcher._load_documents",
+            lambda doc_ids: {k: v for k, v in mock_docs.items() if k in doc_ids},
         )
+        from schemas import RuleMatchPlan, RuleSearchTerms, SectionSelection
+
         facts = FactOutput(
             goods_received=True,
-            defect_type="破洞",
-            evidence_quality="high",
+            defect_type="划痕",
+            evidence_quality="low",
             logistics_normal=True,
+            rule_match_plan=RuleMatchPlan(
+                target_doc_ids=[base_doc_id, phone_doc_id],
+                section_selections=[
+                    SectionSelection(doc_id=base_doc_id, section_keys=[], confidence=0.9, reason=""),
+                    SectionSelection(doc_id=phone_doc_id, section_keys=[], confidence=0.9, reason=""),
+                ],
+                search_terms=RuleSearchTerms(
+                    must_terms=["商品质量问题", "初步凭证", "肉眼可识别"],
+                    should_terms=["表面不一致"],
+                    case_terms=["划痕"],
+                    exclude_terms=[],
+                ),
+            ),
         )
-        matched = match_rules(facts)
-        assert matched, "期望至少命中一条规则"
-        assert any(rule.rule_id == "R002" for rule in matched), "期望命中 R002"
+        result = match_rules_full(facts)
+        assert result.display_rules, "期望有前端代表条"
+        ids = " ".join(r.rule_id for r in result.matched_rules)
+        assert "第六十五条" in ids or "第四条" in ids
+        assert any(r.relevance == "must" for r in result.matched_rules)
+        display = result.display_rules[0]
+        assert "第六十五条" not in display.rule_summary
+        assert "第四条" not in display.rule_summary
+        summaries = " ".join(r.rule_summary for r in result.display_rules)
+        assert "初步凭证" in summaries or "花屏" in summaries or "质量问题" in summaries
 
-    def test_match_rules_should_not_use_json_without_dev_fallback(self, monkeypatch):
-        """未开启开发回退时，MySQL 无规则不应再读取本地 JSON。"""
-        monkeypatch.delenv("ENABLE_LOCAL_RULES_FALLBACK", raising=False)
-        monkeypatch.setattr(agent2_tools_module, "_load_rules_from_mysql", lambda: [])
-        facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high", logistics_normal=True)
+    def test_format_merchant_rule_text_strips_article_no(self):
+        """商家展示文案应去除条号。"""
+        from backend.tools.rule_matcher import _format_merchant_rule_text
 
-        matched = match_rules(facts)
+        text = _format_merchant_rule_text(
+            {
+                "article_no": "第六十五条",
+                "article_title": "第六十五条 买家主张商品存在质量问题系肉眼可识别的，应提供初步凭证予以证明。",
+                "content": "买家未提供初步凭证的，交易支持打款。",
+                "chapter": "",
+            }
+        )
+        assert "第六十五条" not in text
+        assert "初步凭证" in text
 
-        assert matched == []
+    def test_display_rules_prioritize_category_over_base(self):
+        """前端代表条应优先展示品类专项规则，而非基本规则刷屏。"""
+        from backend.tools.rule_matcher import _pick_display_rules
+        from schemas import MatchedRule, RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD
+
+        base_doc = "争议处理基本规则_淘宝平台争议处理规则_1154_99"
+        fresh_doc = "特殊品类争议处理_淘宝平台生鲜类商品争议处理规范_1155_11003608"
+        pool = [
+            MatchedRule(
+                rule_id=f"{base_doc}::第{i}条",
+                rule_summary=f"基本规则通用要点{i}",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id=base_doc,
+            )
+            for i in range(1, 6)
+        ] + [
+            MatchedRule(
+                rule_id=f"{fresh_doc}::第七条",
+                rule_summary="生鲜腐烂需在签收48小时内举证并提供拆包视频",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id=fresh_doc,
+            ),
+            MatchedRule(
+                rule_id=f"{fresh_doc}::第八条",
+                rule_summary="买家主张生鲜变质且举证有效的，支持退货退款",
+                condition_result="",
+                relevance=RULE_RELEVANCE_SHOULD,
+                doc_id=fresh_doc,
+            ),
+        ]
+        picked = _pick_display_rules(pool)
+        assert picked[0].doc_id == fresh_doc
+        assert any("48小时" in r.rule_summary or "变质" in r.rule_summary for r in picked)
+        assert sum(1 for r in picked if r.doc_id == base_doc) <= 1
+
+    def test_briefs_follow_category_first_order(self):
+        """rule_briefs 顺序应与品类优先策略一致。"""
+        from backend.tools.rule_matcher import _sort_pool_category_first
+        from schemas import MatchedRule, RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD
+
+        base_doc = "争议处理基本规则_淘宝平台争议处理规则_1154_99"
+        fresh_doc = "特殊品类争议处理_淘宝平台生鲜类商品争议处理规范_1155_11003608"
+        pool = [
+            MatchedRule(
+                rule_id=f"{base_doc}::第{i}条",
+                rule_summary=f"基本规则{i}",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id=base_doc,
+            )
+            for i in range(1, 8)
+        ] + [
+            MatchedRule(
+                rule_id=f"{fresh_doc}::第七条",
+                rule_summary="生鲜48小时举证",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id=fresh_doc,
+            ),
+        ]
+        ordered = _sort_pool_category_first(pool)
+        assert ordered[0].doc_id == fresh_doc
+        assert sum(1 for r in ordered if r.doc_id == base_doc) <= 5
+
+    def test_match_rules_empty_without_plan(self):
+        """无 target_doc_ids 时不应匹配。"""
+        facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
+        assert match_rules(facts) == []
 
     def test_query_buyer_profile_should_return_default_when_unknown(self):
         """未知买家 ID 返回默认画像。"""

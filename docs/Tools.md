@@ -42,7 +42,7 @@
 
 | 工具名                           | 功能         | 来源                      | 技术选型         |
 | ----------------------------- | ---------- | ----------------------- | ------------ |
-| `match_rules`                 | 匹配平台规则     | 本地 `dispute_rules.json` | JSON 规则引擎    |
+| `match_rules`                 | 匹配平台规则     | MySQL `platform_rules` + `rule_match_lexicon.json` | 节内双层检索词 |
 | `query_buyer_profile`         | 查询买家画像     | MySQL                   | 主数据库         |
 | `search_similar_cases`        | 检索历史判例     | MySQL                   | 结构化标签检索      |
 | `search_similar_cases_vector` | 向量语义检索历史判例 | ChromaDB                | 可选，不可用时返回空列表 |
@@ -52,10 +52,11 @@
 
 `**match_rules**`
 
-- 输入：`facts: FactOutput`
-- 输出：`List[MatchedRule]`
-- 实现：读取 `data/dispute_rules.json`，按条件字段精确匹配，非向量检索。
-- 约束：规则文件路径通过环境变量 `RULES_PATH` 获取，不可硬编码。
+- 输入：`facts: FactOutput`（含 `rule_match_plan`，由 Agent1 同次产出）
+- 输出：`List[MatchedRule]`（前端代表条 3～5）；完整结果见 `match_rules_full()` → `RuleMatchResult`
+- 实现：锁 doc → 锁 section → 篇内 `must_terms`/`case_terms` 匹配 → `must/should/weak` 分级；正文来自 MySQL 爬取 `taobao_rule::*`
+- 索引：`data/rule_match_lexicon.json`（环境变量 `RULE_MATCH_LEXICON_PATH`）
+- 约束：不再使用 `dispute_rules.json` / `conditions` 引擎路径
 
 `**query_buyer_profile**`
 

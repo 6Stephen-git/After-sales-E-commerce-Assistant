@@ -41,6 +41,14 @@ class AnalyzeRequest(BaseModel):
     buyer_id: str = Field(default="", description="买家脱敏标识")
     image_urls: list[str] = Field(default_factory=list, description="举证图片 URL")
     reset_context: bool = Field(default=False, description="是否重置该纠纷缓存并以本次材料为准")
+    product_category_slug: str = Field(
+        default="",
+        description="平台商品品类 slug（API 接入后填入；有则直接激活对应品类规范）",
+    )
+    platform_service_tags: list[str] = Field(
+        default_factory=list,
+        description="订单服务标原文列表（如七天无理由、破损包退；有则直接激活对应服务规范）",
+    )
 
 
 # ---------- 请求转换：从消息列表提取 buyer_text ----------
@@ -79,6 +87,10 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
         "chat_history": request.messages,
         "image_urls": request.image_urls,
         "reset_context": request.reset_context,
+        "product_category_slug": request.product_category_slug.strip(),
+        "platform_service_tags": [
+            str(tag).strip() for tag in request.platform_service_tags if str(tag).strip()
+        ],
     }
 
 

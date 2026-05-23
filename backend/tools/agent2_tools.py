@@ -21,7 +21,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from backend.db.connection import get_engine  # noqa: E402
-from backend.db.models import BuyerProfileRecord, PlatformRule  # noqa: E402
+from backend.db.models import BuyerProfileRecord  # noqa: E402
 from backend.tools.llm_client import chat_completion  # noqa: E402
 from schemas import (  # noqa: E402
     BuyerProfile,
@@ -33,6 +33,7 @@ from schemas import (  # noqa: E402
     MaliciousDetectionOutput,
     MaliciousSignal,
     MatchedRule,
+    RuleMatchResult,
     SimilarCase,
     StrategyInput,
 )
@@ -42,151 +43,32 @@ logger = logging.getLogger(__name__)
 AGENT2_LOG_PREFIX = "[Agent2]"
 
 
-# ---------- 规则库：MySQL主链、开发JSON回退、单条件判定（供 match_rules 使用） ----------
-def _resolve_rules_path() -> Path:
-    """
-    解析开发回退用 dispute_rules.json 所在路径。
-
-    优先读取环境变量 RULES_PATH；未设置则使用项目根下 data/dispute_rules.json。
-
-    返回:
-        规则文件的 Path 对象（未必已存在文件）。
-    """
-    env_path = os.getenv("RULES_PATH")
-    if env_path:
-        return Path(env_path)
-    return ROOT_DIR / "data" / "dispute_rules.json"
-
-
-def _is_local_rule_fallback_enabled() -> bool:
-    """
-    判断是否允许使用本地 JSON 作为开发回退规则源。
-    """
-    return os.getenv("ENABLE_LOCAL_RULES_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on", "y"}
-
-
-def _load_rules_from_mysql() -> List[Dict[str, Any]]:
-    """
-    从 MySQL platform_rules 加载规则列表（生产主链）。
-
-    兼容两种 rule_content 结构：
-    1) {"rules":[...]}；
-    2) 单条规则对象。
-    """
-    engine = get_engine()
-    rules: List[Dict[str, Any]] = []
-    with Session(bind=engine) as session:
-        records = session.execute(select(PlatformRule)).scalars().all()
-    for row in records:
-        try:
-            payload = json.loads(row.rule_content or "{}")
-        except Exception:  # noqa: BLE001
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("rules"), list):
-            for item in payload["rules"]:
-                if isinstance(item, dict):
-                    rules.append(item)
-            continue
-        if isinstance(payload, dict) and payload.get("conditions"):
-            rules.append(payload)
-    return rules
-
-
-def _is_condition_matched(field_value: Any, expected_value: Any, field_name: str) -> bool:
-    """
-    判断单条规则条件是否满足。
-
-    支持：键名以 `_gte` 结尾时表示数值大于等于比较；expected 为 list 时表示
-    field_value 也须为 list 且包含所有 expected 元素；否则做相等比较。
-    JSON 中 null 与 Python None 对齐。
-
-    参数:
-        field_value: 来自 FactOutput.model_dump() 的当前字段值。
-        expected_value: 规则 JSON 中的期望值。
-        field_name: 条件键名，可能带 _gte 后缀。
-
-    返回:
-        是否匹配。
-    """
-    if field_name.endswith("_gte"):
-        if field_value is None:
-            return False
-        return float(field_value) >= float(expected_value)
-
-    if isinstance(expected_value, list):
-        if not isinstance(field_value, list):
-            return False
-        return all(item in field_value for item in expected_value)
-
-    return field_value == expected_value
-
-
-# ---------- 对外工具：MySQL规则命中列表 ----------
+# ---------- 规则匹配：lexicon 导航 + MySQL 爬取正文（单一路径） ----------
 def match_rules(facts: FactOutput) -> List[MatchedRule]:
     """
-    从 MySQL platform_rules 中筛选条件全部满足的规则，并转为 MatchedRule 列表。
+    执行平台规则匹配，返回前端代表条（3～5 条，含 relevance 等扩展字段）。
 
-    仅当 ENABLE_LOCAL_RULES_FALLBACK=true 时，才允许使用本地 JSON 作为开发回退。
-
-    参数:
-        facts: Agent1 输出，字段名须与 rules 中 conditions 键一致。
-
-    返回:
-        命中规则的 MatchedRule 列表，可能为空。
+    完整命中池与 rule_briefs 见 match_rules_full()。
     """
-    rules: List[Dict[str, Any]] = []
+    return match_rules_full(facts).display_rules
+
+
+def match_rules_full(facts: FactOutput) -> "RuleMatchResult":
+    """
+    返回完整匹配结果：命中池、策略 brief、前端代表条。
+    """
+    from backend.tools.rule_matcher import match_rules_from_facts
+    from schemas import RuleMatchResult
+
+    if not facts.rule_match_plan.target_doc_ids:
+        logger.warning("%s rule_match_plan 为空，跳过规则匹配", AGENT2_LOG_PREFIX)
+        return RuleMatchResult()
+
     try:
-        rules = _load_rules_from_mysql()
-        logger.info("%s 规则来源=MySQL，加载数量=%s", AGENT2_LOG_PREFIX, len(rules))
+        return match_rules_from_facts(facts)
     except Exception as exc:  # noqa: BLE001
-        logger.error("%s MySQL规则加载失败，原因=%s", AGENT2_LOG_PREFIX, exc)
-        if not _is_local_rule_fallback_enabled():
-            raise RuntimeError(f"平台规则加载失败：{exc}") from exc
-
-    # 开发回退：显式开启时，才在 MySQL 不可用或无规则时读取本地 JSON。
-    if not rules:
-        if not _is_local_rule_fallback_enabled():
-            logger.warning("%s MySQL未加载到可用规则，未启用本地JSON回退", AGENT2_LOG_PREFIX)
-            return []
-        rules_path = _resolve_rules_path()
-        logger.info("%s 规则来源=JSON回退，rules_path=%s", AGENT2_LOG_PREFIX, rules_path)
-        if not rules_path.is_file():
-            logger.error("%s 规则文件不存在：%s", AGENT2_LOG_PREFIX, rules_path)
-            return []
-        try:
-            with rules_path.open("r", encoding="utf-8") as file:
-                payload = json.load(file)
-            rules = payload.get("rules", []) if isinstance(payload, dict) else []
-        except Exception as exc:  # noqa: BLE001
-            logger.error("%s 读取规则文件失败：%s", AGENT2_LOG_PREFIX, exc)
-            return []
-
-    matched: List[MatchedRule] = []
-    facts_dict = facts.model_dump()
-    for rule in rules:
-        conditions: Dict[str, Any] = rule.get("conditions", {})
-        is_match = True
-
-        for condition_key, expected in conditions.items():
-            source_key = condition_key[:-4] if condition_key.endswith("_gte") else condition_key
-            actual = facts_dict.get(source_key)
-            if not _is_condition_matched(actual, expected, condition_key):
-                is_match = False
-                break
-
-        if is_match:
-            suggestion = str(rule.get("outcome_suggestion", "")).strip().lower()
-            condition_result = f"规则条件全部满足；建议策略:{suggestion}"
-            matched.append(
-                MatchedRule(
-                    rule_id=str(rule.get("rule_id", "")),
-                    rule_summary=str(rule.get("rule_summary", "")),
-                    condition_result=condition_result,
-                )
-            )
-
-    logger.info("%s 规则匹配完成，命中数量=%s", AGENT2_LOG_PREFIX, len(matched))
-    return matched
+        logger.error("%s 规则匹配失败：%s", AGENT2_LOG_PREFIX, exc)
+        raise RuntimeError(f"规则匹配失败：{exc}") from exc
 
 
 # ---------- 买家画像：默认值与数据库记录解析 ----------

@@ -9,7 +9,7 @@
 
 ## 可用工具
 
-- `match_rules(facts) → List[MatchedRule]`：从规则库中匹配适用于当前事实的平台规则
+- `match_rules(facts) → List[MatchedRule]`：基于 Agent1 `rule_match_plan` 与 lexicon，从 MySQL 爬取正文匹配条款；策略 LLM 使用 `rule_briefs`
 - `query_buyer_profile(buyer_id) → BuyerProfile`：查询买家在本店的历史购买、纠纷、退货数据
 - `search_similar_cases(dispute_desc, top_k) → List[SimilarCase]`：检索商家历史相似判例，参考过往经验
 

@@ -45,20 +45,15 @@
 
       <div class="text-block">
         <h4>平台规则依据</h4>
-        <template v-if="matched_rules_list.length > 0">
-          <div
-            v-for="(r, idx) in matched_rules_list"
-            :key="(r.rule_id || 'rule') + '-' + idx"
-            class="rule-block"
+        <ol v-if="platform_rule_lines.length > 0" class="rule-list">
+          <li
+            v-for="(line, idx) in platform_rule_lines"
+            :key="'rule-line-' + idx"
+            class="rule-item"
           >
-            <el-descriptions :column="1" border size="small">
-              <el-descriptions-item label="规则编号">{{ r.rule_id }}</el-descriptions-item>
-              <el-descriptions-item label="规则摘要">{{ r.rule_summary }}</el-descriptions-item>
-              <el-descriptions-item label="匹配说明">{{ r.condition_result }}</el-descriptions-item>
-            </el-descriptions>
-          </div>
-        </template>
-        <p v-else-if="policy_ref_fallback" class="plain-text">{{ policy_ref_fallback }}</p>
+            {{ line }}
+          </li>
+        </ol>
         <el-empty v-else description="暂无规则命中" :image-size="60" />
       </div>
 
@@ -307,15 +302,47 @@ const red_flag_items = computed(() => {
   return [...new Set(normalized)]
 })
 
-// ---------- 派生状态：结构化规则命中列表 ----------
-const matched_rules_list = computed(() => {
-  return Array.isArray(props.matched_rules) ? props.matched_rules : []
+// ---------- 工具函数：平台规则展示文案（去条号/章节/内部 doc 引用） ----------
+function polish_rule_line(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return ''
+  return raw
+    .replace(/第[一二三四五六七八九十百千零\d]+条/g, '')
+    .replace(/第[一二三四五六七八九十]+节[^，。；]*/g, '')
+    .replace(/特殊品类争议处理_[^:：]+::/g, '')
+    .replace(/争议处理基本规则_[^:：]+::/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function format_rule_for_merchant(rule) {
+  return polish_rule_line(rule?.rule_summary)
+}
+
+// ---------- 派生状态：平台规则依据展示行（优先 strategy.platform_rule_basis） ----------
+const platform_rule_lines = computed(() => {
+  const from_strategy = props.strategy?.platform_rule_basis
+  if (Array.isArray(from_strategy) && from_strategy.length > 0) {
+    return from_strategy.map((item) => polish_rule_line(item)).filter(Boolean)
+  }
+  return matched_rules_list.value.map((rule) => format_rule_for_merchant(rule)).filter(Boolean)
 })
 
-// ---------- 派生状态：无结构化规则时的 policy_ref 兜底 ----------
-const policy_ref_fallback = computed(() => {
-  const raw = props.strategy?.policy_ref
-  return raw ? String(raw).trim() : ''
+// ---------- 派生状态：前端代表规则（3～5 条，must 优先） ----------
+const matched_rules_list = computed(() => {
+  const raw = Array.isArray(props.matched_rules) ? props.matched_rules : []
+  const rank = { must: 0, should: 1, weak: 2 }
+  const sorted = [...raw].sort(
+    (a, b) => (rank[a?.relevance] ?? 9) - (rank[b?.relevance] ?? 9)
+  )
+  const must = sorted.filter((r) => r?.relevance === 'must')
+  const should = sorted.filter((r) => r?.relevance === 'should')
+  const picked = [...must]
+  if (picked.length < 3) {
+    picked.push(...should.slice(0, 3 - picked.length))
+  }
+  const display = picked.length > 0 ? picked : sorted
+  return display.slice(0, 5)
 })
 
 // ---------- 派生状态：恶意风险等级对应标签颜色 ----------
@@ -420,11 +447,18 @@ const channel_type = computed(() => {
   margin-bottom: 8px;
 }
 
-.rule-block {
-  margin-bottom: 10px;
+.rule-list {
+  margin: 0;
+  padding-left: 20px;
+  color: #606266;
+  line-height: 1.7;
 }
 
-.break-row {
-  margin-bottom: 6px;
+.rule-item {
+  margin-bottom: 8px;
+}
+
+.rule-item:last-child {
+  margin-bottom: 0;
 }
 </style>

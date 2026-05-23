@@ -2,7 +2,7 @@
 
 ## 口径冻结
 
-- 规则主轴：平台规则定责为最高优先级，规则来源统一走 MySQL，不再使用本地 `dispute_rules.json` 作为主链。
+- 规则主轴：平台规则定责为最高优先级；规则正文来自 MySQL 爬取文档，导航来自 `rule_match_lexicon.json` + Agent1 `rule_match_plan`（已移除 `dispute_rules.json` / conditions 引擎）。
 - 决策范式：取消三策略竞争式框架，改为单链路 `disposition` 决策。
 - 默认处置：除“明显恶意行为”与“商家过失明确”外，默认进入协商范畴。
 - 胜率含义：以“平台规则站位 + 证据强弱 + 恶意/过失强信号”计算，不再用三策略分差推导。

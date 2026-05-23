@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput
+from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput, RuleMatchPlan
+
+from backend.agents.agent1.rule_plan import build_rule_navigation_prompt_block, merge_llm_rule_plan
 
 from backend.tools.agent1_tools import analyze_image
 from backend.tools.llm_client import chat_completion
@@ -158,12 +160,31 @@ def _derive_confidence(evidence_quality: str, llm_confidence: float, red_flag_co
 
 
 # ---------- 诉求提取：先从聊天记录抽核心诉求，再指导视觉分析 ----------
-def _llm_extract_issue(text_context: str, logistics_signed: bool | None) -> dict[str, Any] | None:
+def _llm_extract_issue(
+    text_context: str,
+    logistics_signed: bool | None,
+    materials: dict[str, Any],
+) -> dict[str, Any] | None:
     """
-    调用 LLM 提取核心诉求、标签、收货判断与补证建议。
+    调用 LLM 提取核心诉求、标签、收货判断、补证建议与 rule_match_plan。
     """
     if not text_context:
         return None
+    intent_hint: list[str] = []
+    for kw, tag in (
+        ("物流", "物流异常"),
+        ("退款", "退款诉求"),
+        ("质量", "质量问题"),
+        ("瑕疵", "质量问题"),
+        ("破损", "质量问题"),
+    ):
+        if kw in text_context and tag not in intent_hint:
+            intent_hint.append(tag)
+    nav_block = build_rule_navigation_prompt_block(
+        materials=materials,
+        intent_tags=intent_hint,
+        text_context=text_context,
+    )
     system_prompt = (
         "你是售后事实提取助手。只抽取客观事实，不做责任归因；疑点仅描述「观察到的矛盾或待核实点」，不对买家做道德定性。"
         "请输出 JSON。"
@@ -184,9 +205,14 @@ def _llm_extract_issue(text_context: str, logistics_signed: bool | None) -> dict
         "  · 物流、签收、商品状态等与其他字段或常识存在矛盾\n"
         "  · 诉求与已提供证据能支撑的结论相比过度或不清\n"
         "  无则填 []；禁止把整段聊天粘进单条 red_flags；禁止单一条目硬编码某一品类示例句。\n"
+        "- rule_match_plan: 对象，含 activated_lanes、target_doc_ids、section_selections、search_terms、"
+        "category_confidence、service_confidence（规则导航，见下方候选表）\n"
+        f"{nav_block}\n"
         "聊天记录：\n"
         f"{text_context}\n"
         f"物流签收状态：{logistics_signed}\n"
+        f"product_category_slug={materials.get('product_category_slug', '')}\n"
+        f"platform_service_tags={materials.get('platform_service_tags', [])}\n"
     )
     llm_text = chat_completion(
         messages=[
@@ -256,6 +282,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     issue_result = _llm_extract_issue(
         text_context=text_context,
         logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
+        materials=materials,
     )
     issue_summary = None
     intent_tags: list[str] = []
@@ -377,6 +404,16 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     uncertainty_note = "；".join(dict.fromkeys(uncertainty_reasons)) if uncertainty_reasons else None
 
+    raw_plan = issue_result.get("rule_match_plan") if isinstance(issue_result, dict) else None
+    rule_match_plan = merge_llm_rule_plan(
+        raw_plan=raw_plan if isinstance(raw_plan, dict) else None,
+        materials=materials,
+        intent_tags=intent_tags,
+        logistics_normal=logistics_normal,
+        text_context=text_context,
+        issue_summary=issue_summary,
+    )
+
     return FactOutput(
         issue_summary=issue_summary,
         intent_tags=list(dict.fromkeys(intent_tags)),
@@ -396,4 +433,5 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         evidence_quality=evidence_quality,
         confidence=confidence,
         uncertainty_note=uncertainty_note,
+        rule_match_plan=rule_match_plan,
     )

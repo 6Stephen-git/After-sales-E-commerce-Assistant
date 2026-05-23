@@ -56,9 +56,46 @@ class LogisticsInfo(BaseModel):
     is_abnormal: bool = Field(default=False, description="物流是否异常")
 
 
+# 规则匹配相关常量
+RULE_RELEVANCE_MUST = "must"
+RULE_RELEVANCE_SHOULD = "should"
+RULE_RELEVANCE_WEAK = "weak"
+VALID_RULE_RELEVANCE = [RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD, RULE_RELEVANCE_WEAK]
+
+RULE_STANCE_MERCHANT = "merchant"
+RULE_STANCE_BUYER = "buyer"
+RULE_STANCE_NEUTRAL = "neutral"
+
+
 # ============================================================
 # 三、Agent 1 — 事实还原员
 # ============================================================
+
+class RuleSearchTerms(BaseModel):
+    """规则篇内检索词（规则词为主，案情词为辅）"""
+    must_terms: List[str] = Field(default_factory=list, description="规则正文用语，篇内匹配主力")
+    should_terms: List[str] = Field(default_factory=list, description="补充规则词，权重较低")
+    case_terms: List[str] = Field(default_factory=list, description="买家案情用语，仅辅助")
+    exclude_terms: List[str] = Field(default_factory=list, description="命中则剔除该条")
+
+
+class SectionSelection(BaseModel):
+    """单文档内选中的节/条块"""
+    doc_id: str = Field(..., description="平台规则文档 doc_id")
+    section_keys: List[str] = Field(default_factory=list, description="lexicon section_key 列表")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="本节选择置信度")
+    reason: str = Field(default="", description="选择理由（简短）")
+
+
+class RuleMatchPlan(BaseModel):
+    """Agent1 输出的规则导航计划，供 match_rules 执行"""
+    activated_lanes: List[str] = Field(default_factory=list, description="激活通道：A/B/C/D/E/F/G/H/I")
+    target_doc_ids: List[str] = Field(default_factory=list, description="待检索的规范 doc_id 列表")
+    section_selections: List[SectionSelection] = Field(default_factory=list, description="各 doc 选中的节")
+    search_terms: RuleSearchTerms = Field(default_factory=RuleSearchTerms, description="篇内检索词")
+    category_confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="品类规范激活置信度")
+    service_confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="服务保障激活置信度")
+
 
 class FactOutput(BaseModel):
     """Agent 1 输出：结构化事实"""
@@ -80,6 +117,7 @@ class FactOutput(BaseModel):
     evidence_quality: str = Field(default=EVIDENCE_MEDIUM, description="证据质量：high/medium/low")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="事实提取置信度")
     uncertainty_note: Optional[str] = Field(default=None, description="当某些事实无法确定时，用自然语言说明原因")
+    rule_match_plan: RuleMatchPlan = Field(default_factory=RuleMatchPlan, description="规则匹配导航计划")
 
 # ============================================================
 # 四、Agent 2 — 策略参谋员
@@ -87,9 +125,29 @@ class FactOutput(BaseModel):
 
 class MatchedRule(BaseModel):
     """匹配到的平台规则"""
-    rule_id: str = Field(..., description="规则编号")
+    rule_id: str = Field(..., description="规则编号（doc_id::article_no）")
     rule_summary: str = Field(..., description="规则摘要")
     condition_result: str = Field(..., description="条件匹配结果描述")
+    relevance: str = Field(default=RULE_RELEVANCE_SHOULD, description="must/should/weak")
+    doc_id: str = Field(default="", description="来源文档 doc_id")
+    section_key: str = Field(default="", description="来源节 section_key")
+    article_no: str = Field(default="", description="条号")
+    stance_hint: str = Field(default=RULE_STANCE_NEUTRAL, description="merchant/buyer/neutral")
+
+
+class RuleBrief(BaseModel):
+    """供策略 LLM 使用的规则 brief"""
+    article_ref: str = Field(..., description="条号引用，如 第六十五条")
+    brief: str = Field(..., description="1～2 句要点")
+    relevance: str = Field(default=RULE_RELEVANCE_SHOULD, description="must/should")
+    stance_hint: str = Field(default=RULE_STANCE_NEUTRAL, description="merchant/buyer/neutral")
+
+
+class RuleMatchResult(BaseModel):
+    """match_rules 完整输出"""
+    matched_rules: List[MatchedRule] = Field(default_factory=list, description="命中池（最多 cap）")
+    rule_briefs: List[RuleBrief] = Field(default_factory=list, description="策略 LLM 用 brief 列表")
+    display_rules: List[MatchedRule] = Field(default_factory=list, description="前端代表条 3～5 条")
 
 
 class SimilarCase(BaseModel):
@@ -105,7 +163,8 @@ class StrategyInput(BaseModel):
     """Agent 2 输入"""
     facts: FactOutput = Field(..., description="Agent 1 的输出")
     buyer_profile: BuyerProfile = Field(..., description="买家画像")
-    matched_rules: List[MatchedRule] = Field(default_factory=list, description="匹配到的规则")
+    matched_rules: List[MatchedRule] = Field(default_factory=list, description="匹配到的规则（代表条或全量）")
+    rule_briefs: List[RuleBrief] = Field(default_factory=list, description="规则 brief，供策略 LLM")
     similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例")
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
     chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表（用于语义分析）")
@@ -202,6 +261,10 @@ class StrategyOutput(BaseModel):
     strategy_direction_rationale: str = Field(
         default="",
         description="推理理由：核心结论区展示，简述为何采取该策略方向（2～4句）",
+    )
+    platform_rule_basis: List[str] = Field(
+        default_factory=list,
+        description="平台规则依据：面向商家的规则要点列表（无条号/章节，供前端直接展示）",
     )
     reasoning: str = Field(default="", description="完整策略说明（含客户意图/风险点/建议动作/推理理由四段，供流式与话术引用）")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")

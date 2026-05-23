@@ -48,6 +48,7 @@ class TestSchemas:
         assert obj.customer_intent_analysis == ""
         assert obj.strategy_direction_summary == ""
         assert obj.strategy_direction_rationale == ""
+        assert obj.platform_rule_basis == []
 
     def test_script_output_instantiation(self):
         """ScriptOutput 可使用默认值实例化"""
@@ -111,46 +112,31 @@ class TestSchemas:
 
 
 # ============================================================
-# 2. dispute_rules.json 存在且 JSON 合法
+# 2. rule_match_lexicon.json 存在且结构合法
 # ============================================================
 
-RULES_PATH = os.path.join(ROOT_DIR, "data", "dispute_rules.json")
+LEXICON_PATH = os.path.join(ROOT_DIR, "data", "rule_match_lexicon.json")
 
-class TestDisputeRules:
+
+class TestRuleMatchLexicon:
     def test_file_exists(self):
-        """data/dispute_rules.json 文件存在"""
-        assert os.path.isfile(RULES_PATH), f"规则库文件不存在：{RULES_PATH}"
+        """data/rule_match_lexicon.json 文件存在"""
+        assert os.path.isfile(LEXICON_PATH), f"规则索引文件不存在：{LEXICON_PATH}"
 
     def test_valid_json(self):
-        """dispute_rules.json 是合法 JSON"""
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        """rule_match_lexicon.json 是合法 JSON"""
+        with open(LEXICON_PATH, "r", encoding="utf-8") as file:
+            data = json.load(file)
         assert data is not None
 
-    def test_has_minimum_rules(self):
-        """规则库至少包含 3 条规则"""
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        assert "rules" in data, "规则库缺少 rules 字段"
-        assert len(data["rules"]) >= 3, f"规则数量不足，当前：{len(data['rules'])}，要求：>=3"
-
-    def test_rule_structure(self):
-        """每条规则包含必需字段"""
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        required_fields = {"rule_id", "rule_summary", "outcome_suggestion"}
-        for rule in data["rules"]:
-            missing = required_fields - set(rule.keys())
-            assert not missing, f"规则 {rule.get('rule_id', '未知')} 缺少字段：{missing}"
-
-    def test_outcome_suggestion_valid(self):
-        """所有规则的 outcome_suggestion 值合法"""
-        valid_outcomes = {"defend", "negotiate", "compensate"}
-        with open(RULES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for rule in data["rules"]:
-            assert rule["outcome_suggestion"] in valid_outcomes, \
-                f"规则 {rule['rule_id']} 的 outcome_suggestion 非法：{rule['outcome_suggestion']}"
+    def test_has_docs_and_lanes(self):
+        """索引包含 docs 与 lanes"""
+        with open(LEXICON_PATH, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        assert isinstance(data.get("docs"), list)
+        assert len(data["docs"]) >= 1
+        assert isinstance(data.get("lanes"), dict)
+        assert data["lanes"].get("A_base")
 
 
 # ============================================================
@@ -181,7 +167,7 @@ REQUIRED_FILES = [
     "schemas.py",
     "backend/main.py",
     "backend/requirements.txt",
-    "data/dispute_rules.json",
+    "data/rule_match_lexicon.json",
     "frontend/package.json",
     "frontend/vite.config.js",
     "frontend/src/main.js",
