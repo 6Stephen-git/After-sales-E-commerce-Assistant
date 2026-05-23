@@ -206,6 +206,16 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
         if normalized_findings:
             out["findings"] = normalized_findings
 
+    vflags = raw.get("visual_red_flags")
+    if isinstance(vflags, list):
+        vf_out: list[str] = []
+        for item in vflags:
+            t = str(item or "").strip()
+            if t:
+                vf_out.append(t)
+        if vf_out:
+            out["visual_red_flags"] = vf_out
+
     attributes = raw.get("attributes")
     if isinstance(attributes, dict):
         cleaned_attributes: dict[str, Any] = {}
@@ -243,6 +253,9 @@ def _has_meaningful_vision_content(normalized: dict[str, Any]) -> bool:
     findings = normalized.get("findings")
     if isinstance(findings, list) and any(str(item or "").strip() for item in findings):
         return True
+    vflags = normalized.get("visual_red_flags")
+    if isinstance(vflags, list) and any(str(item or "").strip() for item in vflags):
+        return True
     attributes = normalized.get("attributes")
     if isinstance(attributes, dict) and len(attributes) > 0:
         return True
@@ -268,8 +281,10 @@ def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> 
         "JSON 字段要求：\n"
         "- visual_description: 字符串，一两句话描述关键观察结果\n"
         "- findings: 字符串数组，列出 3~6 条关键观察\n"
+        "- visual_red_flags: 字符串数组，**仅基于本张图片**可客观陈述的疑点或待核实点（如水印/网址截屏、"
+        "明显非本单商品环境、与买家文字描述无法对齐等）；无疑点则 []\n"
         "- attributes: 对象，放可扩展细节（如位置、尺寸、状态）\n"
-        "- 若发现水印/网址/网图等可疑图源线索，请直接写进 visual_description 或 findings 里\n"
+        "- 若发现水印/网址/网图等可疑图源线索，请同时写入 findings 或 visual_description，并在 visual_red_flags 给一条可展示短句\n"
         "输出必须是合法 JSON。"
     )
     return {

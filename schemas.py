@@ -178,7 +178,11 @@ class MaliciousDetectionOutput(BaseModel):
     risk_score: int = Field(default=0, description="综合风险评分（0-100）")
     risk_level: str = Field(default="low", description="风险等级：low/medium/high")
     triggered_signals: List[MaliciousSignal] = Field(default_factory=list, description="触发信号明细")
-    hard_rule_summary: str = Field(default="", description="硬规则层摘要")
+    hard_rule_summary: str = Field(default="", description="硬规则层摘要（仅硬规则命中，供日志与兼容）")
+    malicious_risk_hints: str = Field(
+        default="",
+        description="恶意风险提示聚合文案（硬规则+语义全部命中项，供前端「风险提示」区）",
+    )
     disposition_advice: str = Field(default="", description="处置建议方向")
 
 
@@ -187,7 +191,19 @@ class StrategyOutput(BaseModel):
     disposition: str = Field(..., description=f"处置方向：{'/'.join(VALID_DISPOSITIONS)}")
     estimated_win_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="抗辩胜率（仅抗辩方向返回）")
     policy_ref: Optional[str] = Field(default=None, description="引用的平台规则条款")
-    reasoning: str = Field(default="", description="推理依据说明")
+    customer_intent_analysis: str = Field(
+        default="",
+        description="客户意图分析（核心结论区展示，可与 reasoning 中「客户意图」段对齐）",
+    )
+    strategy_direction_summary: str = Field(
+        default="",
+        description="策略方向：基于当前事实的单一路径局部动作（1～2句，禁止罗列多套备选方案）",
+    )
+    strategy_direction_rationale: str = Field(
+        default="",
+        description="推理理由：核心结论区展示，简述为何采取该策略方向（2～4句）",
+    )
+    reasoning: str = Field(default="", description="完整策略说明（含客户意图/风险点/建议动作/推理理由四段，供流式与话术引用）")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="策略置信度")
     customer_value: Optional[CustomerValueOutput] = Field(default=None, description="客户价值评估结果")
@@ -263,6 +279,12 @@ class AnalysisReport(BaseModel):
     """Controller 返回的完整分析报告"""
     dispute_id: str = Field(..., description="纠纷编号")
     facts: FactOutput = Field(..., description="事实分析结果")
-    strategy: StrategyOutput = Field(..., description="策略建议")
+    strategy: StrategyOutput = Field(..., description="策略分析结果（含处置方向、胜率、置信度、客户价值、恶意检测）")
     scripts: ScriptOutput = Field(..., description="生成话术")
     emotion_alert: Optional[EmotionOutput] = Field(default=None, description="情绪预警（如有）")
+    buyer_profile: Optional[BuyerProfile] = Field(default=None, description="买家画像摘要（供前端参考信息区展示）")
+    similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例（供前端参考信息区展示）")
+    matched_rules: List[MatchedRule] = Field(
+        default_factory=list,
+        description="本次命中的平台规则（结构化，供前端平台规则依据区）",
+    )

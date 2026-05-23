@@ -511,12 +511,16 @@ def run_with_events(
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
     # 5) 聚合为前端/API 使用的单对象（情绪预警由后续 Agent4 接入）
+    # matched_rules 与 strategy.policy_ref 互补：前者结构化展示，后者为简短条款索引串
     report = AnalysisReport(
         dispute_id=normalized_dispute_id,
         facts=facts,
         strategy=strategy_output,
         scripts=scripts,
         emotion_alert=None,
+        buyer_profile=buyer_profile,
+        similar_cases=similar_cases[:2],
+        matched_rules=matched_rules,
     )
     total_elapsed = _elapsed_ms(total_start)
     logger.info(
@@ -526,8 +530,14 @@ def run_with_events(
         total_elapsed,
     )
     win_rate_text = "None" if report.strategy.estimated_win_rate is None else f"{report.strategy.estimated_win_rate:.3f}"
+    cv_channel = report.strategy.customer_value.channel if report.strategy.customer_value else "N/A"
+    cv_lt_score = report.strategy.customer_value.long_term_score if report.strategy.customer_value else "N/A"
+    cv_order_score = report.strategy.customer_value.order_score if report.strategy.customer_value else "N/A"
+    mal_level = report.strategy.malicious_detection.risk_level if report.strategy.malicious_detection else "N/A"
+    mal_score = report.strategy.malicious_detection.risk_score if report.strategy.malicious_detection else "N/A"
     logger.info(
-        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s",
+        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s "
+        "cv_channel=%s cv_lt=%s cv_order=%s mal_level=%s mal_score=%s",
         ASSISTED_LOG_PREFIX,
         normalized_dispute_id,
         report.strategy.disposition,
@@ -535,6 +545,11 @@ def run_with_events(
         report.strategy.confidence,
         report.facts.evidence_quality,
         len(report.strategy.risk_factors),
+        cv_channel,
+        cv_lt_score,
+        cv_order_score,
+        mal_level,
+        mal_score,
     )
     _emit_event(
         emit_event,

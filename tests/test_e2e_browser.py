@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -15,7 +16,7 @@ import pytest
 playwright_sync_api = pytest.importorskip("playwright.sync_api")
 
 
-# ---------- Mock 报告：模拟 /api/analyze 返回结构 ----------
+# ---------- Mock 报告：模拟 /api/analyze 返回结构（对齐 A2-6/A2-7 新 schema） ----------
 MOCK_ANALYZE_REPORT = {
     "dispute_id": "DISPUTE_DEMO_001",
     "facts": {
@@ -28,18 +29,58 @@ MOCK_ANALYZE_REPORT = {
         "wear_signs": "轻微",
         "logistics_normal": True,
         "missing_evidence": [],
-        "red_flags": [],
+        "red_flags": ["fake_evidence:图片带有非实拍水印"],
         "evidence_quality": "high",
         "confidence": 0.86,
         "uncertainty_note": None,
+        "issue_summary": "买家反馈袖口存在撕裂破洞",
+        "intent_tags": ["质量问题"],
+        "visual_observations": [
+            "袖口可见线性撕裂",
+            "面料为深灰色针织",
+            "吊牌信息清晰可辨",
+            "背景为室内白桌",
+        ],
+        "attributes": {},
+        "evidence_items": [],
     },
     "strategy": {
         "disposition": "defend",
-        "reasoning": "证据充分且风险低，优先抗辩。",
+        "customer_intent_analysis": "主诉为质量问题维权，诉求聚焦袖口破损与退换货。",
+        "strategy_direction_summary": "先固定己方证据链，引导买家按规则补充完整开箱视频，暂不承诺退款。",
+        "strategy_direction_rationale": "现有图文不足以闭环认定划痕责任；规则要求物理损伤须完整开箱视频；补证有利于抗辩并控制损失。",
+        "reasoning": "客户意图：质量问题维权。\n风险点：举证不足。\n建议动作：先固定己方证据链，引导买家按规则补充完整开箱视频，暂不承诺退款。\n推理理由：现有图文不足以闭环认定划痕责任；规则要求物理损伤须完整开箱视频；补证有利于抗辩并控制损失。",
         "estimated_win_rate": 0.78,
         "risk_factors": [],
         "confidence": 0.82,
+        "policy_ref": "R002,R004",
+        "customer_value": {
+            "long_term_score": 65,
+            "order_score": 40,
+            "long_term_breakdown": [],
+            "order_breakdown": [],
+            "long_term_triggered": False,
+            "order_triggered": False,
+            "channel": "none",
+            "compensation_uplift": None,
+            "tone_suggestion": "保持专业克制",
+        },
+        "malicious_detection": {
+            "risk_score": 12,
+            "risk_level": "low",
+            "triggered_signals": [],
+            "hard_rule_summary": "硬规则层未命中异常项。",
+            "malicious_risk_hints": "当前未命中明确恶意行为信号。",
+            "disposition_advice": "",
+        },
     },
+    "matched_rules": [
+        {
+            "rule_id": "R002",
+            "rule_summary": "质量问题需完整开箱视频举证",
+            "condition_result": "买家已上传照片，建议策略:defend",
+        }
+    ],
     "scripts": {
         "defense_version": "您好，订单已核实，基于证据我们建议先走平台复核流程。",
         "negotiate_version": "您好，我们可以先协商部分补偿，请您确认诉求。",
@@ -47,6 +88,33 @@ MOCK_ANALYZE_REPORT = {
         "recommended_version": "defense_version",
     },
     "emotion_alert": None,
+    "buyer_profile": {
+        "buyer_id": "buyer_demo",
+        "purchase_count": 6,
+        "dispute_count": 1,
+        "dispute_rate": 0.16,
+        "avg_order_value": 128.0,
+        "return_rate": 0.08,
+        "malicious_flags": 0,
+        "positive_review_count": 3,
+        "credit_level": "high",
+    },
+    "similar_cases": [
+        {
+            "case_id": "CASE-2025-0042",
+            "similarity": 0.88,
+            "merchant_action": "提交质检照片与出库记录进行抗辩",
+            "outcome": "平台支持商家",
+            "lesson": "高清晰实物照片 + 出库记录可有效对抗无拆封视频的退款申请",
+        },
+        {
+            "case_id": "CASE-2025-0107",
+            "similarity": 0.79,
+            "merchant_action": "提供物流签收截图与买家确认收货聊天记录",
+            "outcome": "协商成功",
+            "lesson": "物流签收截图配合买家确认收货的聊天记录，可作为补充证据提升抗辩成功率",
+        },
+    ],
 }
 
 
@@ -77,11 +145,38 @@ def test_e2e_browser_assisted_flow_should_render_report_and_apply_script(fronten
         expect(page.locator(".chat-column")).to_have_count(1)
         expect(page.locator(".strategy-column")).to_have_count(1)
 
-        # E5：商家点击按钮触发分析并展示三块结果卡片。
+        # E5：商家点击按钮触发分析并展示核心结论区。
         page.get_by_role("button", name="请求 AI 帮助").click()
-        expect(page.get_by_text("事实摘要")).to_be_visible()
         expect(page.get_by_text("策略建议")).to_be_visible()
+        expect(page.get_by_text("核心结论区")).to_be_visible()
+        expect(page.get_by_text("客户意图分析")).to_be_visible()
+        expect(page.get_by_text("主诉为质量问题维权")).to_be_visible()
+        expect(page.get_by_text("策略方向")).to_be_visible()
+        expect(page.get_by_text("推理理由")).to_be_visible()
+        expect(page.get_by_text("预估胜率")).to_be_visible()
+        expect(page.get_by_text("策略置信度")).to_be_visible()
+
+        # E5：关键依据区与事实摘要（视觉描述折叠）。
+        expect(page.get_by_text("关键依据区")).to_be_visible()
+        expect(page.get_by_text("疑点列表")).to_be_visible()
+        expect(page.get_by_text("疑似虚假举证")).to_be_visible()
+        expect(page.get_by_text("平台规则依据")).to_be_visible()
+        # 结构化 matched_rules 与 policy_ref 兜底均可能含 R002
+        expect(page.locator(".strategy-column").get_by_text(re.compile(r"R002"))).to_be_visible()
+        expect(page.get_by_text("恶意风险提示")).to_be_visible()
+        expect(page.get_by_text("聚合说明")).to_be_visible()
+        expect(page.get_by_text("当前未命中明确恶意行为信号")).to_be_visible()
+        expect(page.get_by_text("客户价值提示")).to_be_visible()
+        expect(page.get_by_text("未触发优待通道")).to_be_visible()
+        expect(page.get_by_text("保持专业克制")).to_be_visible()
+        expect(page.locator(".direction-text").filter(has_text="协商与补偿口径")).to_be_visible()
+        expect(page.get_by_text("其余 1 条（点击展开）")).to_be_visible()
+
+        # E5：话术选项卡片可见。
         expect(page.get_by_text("话术选项")).to_be_visible()
+
+        # E5：情绪提醒位于关键依据区之后（不崩溃即可，无内容时为空）。
+        # 此处不强制断言 EmotionAlert 内容，仅确认页面结构完整。
 
         # E6：展开话术折叠项（仅此一处匹配 collapse header，避免与「推荐版本：抗辩版」告警标题冲突）。
         page.locator(".strategy-panel .el-collapse-item__header").filter(has_text="抗辩版").click()

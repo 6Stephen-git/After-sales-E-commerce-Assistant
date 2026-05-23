@@ -7,13 +7,12 @@ Agent 2：策略参谋员。
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List
+from typing import Callable, List
 import json
 import logging
 import os
 
 from schemas import (
-    CustomerValueInput,
     MaliciousDetectionInput,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
@@ -21,173 +20,18 @@ from schemas import (
     StrategyInput,
     StrategyOutput,
 )
-from backend.tools.agent2_tools import detect_malicious_behavior, evaluate_customer_value
+from backend.tools.agent2_tools import detect_malicious_behavior, run_customer_value_analysis
 from backend.tools.llm_client import chat_completion
 
 
 AGENT2_LOG_PREFIX = "[Agent2]"
 logger = logging.getLogger(__name__)
 
-
-# ---------- 多源加权：规则票权、事实、画像、判例、订单金额 ----------
-def _build_customer_value_infer_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
-    """
-    构建客户价值字段推断提示词（规则化判定 + 跨品类 few-shot）。
-
-    设计要点：
-    1. 明确四个字段的判定优先级与边界条件，减少模型随意发挥。
-    2. 使用跨品类示例提升泛化能力，避免退化为单类目经验匹配。
-    3. 强制结构化 JSON 输出，便于后续严格校验。
-    """
-    system_prompt = (
-        "你是电商售后策略分析器。任务是从输入事实中推断 4 个结构化字段，"
-        "用于后续客户价值评估。禁止假设固定品类；必须遵循以下判定规则。\n"
-        "\n"
-        "【字段1：defect_severity】\n"
-        "- severe：核心功能不可用/影响安全/无法正常履约，或损坏程度显著。\n"
-        "- moderate：存在明确问题并影响体验，但不构成完全不可用。\n"
-        "- minor：轻微瑕疵或主观体验差异，基本功能可用。\n"
-        "优先看事实证据（facts）中的问题描述、证据质量、使用影响，不要看品类名。\n"
-        "\n"
-        "【字段2：goods_recoverability】\n"
-        "- unrecoverable：退回后基本无法二次销售，或修复成本显著不经济。\n"
-        "- repairable：可修复后再处理，但存在明确损失。\n"
-        "- resalable：可直接二次销售或轻微处理即可再次流转。\n"
-        "优先看损坏可逆性与再销售可能性，不依赖类目经验。\n"
-        "\n"
-        "【字段3：buyer_cooperation】\n"
-        "- good：愿意配合补充证据、反馈及时、沟通一致。\n"
-        "- neutral：部分配合或信息不完整，但可继续推进。\n"
-        "- poor：明显拒绝配合、前后矛盾、反复施压且缺乏有效信息。\n"
-        "优先看聊天行为和证据配合度。\n"
-        "\n"
-        "【字段4：demand_reasonableness】\n"
-        "- reasonable：诉求与事实证据、平台常规规则基本一致。\n"
-        "- borderline：诉求有部分合理性，但金额或方式偏激进。\n"
-        "- unreasonable：诉求明显超出事实支撑或违背规则边界。\n"
-        "优先看诉求-证据一致性，再看金额与处理方式是否成比例。\n"
-        "\n"
-        "输出要求：\n"
-        "1) 只输出 JSON 对象，不输出解释文本。\n"
-        "2) JSON 严格包含且仅包含 4 个键：\n"
-        '{"defect_severity":"minor|moderate|severe","goods_recoverability":"resalable|repairable|unrecoverable",'
-        '"buyer_cooperation":"good|neutral|poor","demand_reasonableness":"reasonable|borderline|unreasonable"}\n'
-        "3) 不允许返回 null、空字符串或中文枚举。"
-    )
-
-    # 跨品类 few-shot：服饰、3C、家居三个场景，增强泛化。
-    few_shot_user_1 = (
-        "示例输入1："
-        '{"facts":{"defect_type":"污渍","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
-        '"buyer_profile":{"purchase_count":6},"order_amount":159.0,'
-        '"chat_behavior":"买家上传清晰图片并同意补充细节，诉求为部分退款"}'
-    )
-    few_shot_assistant_1 = (
-        '{"defect_severity":"moderate","goods_recoverability":"repairable",'
-        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
-    )
-
-    few_shot_user_2 = (
-        "示例输入2："
-        '{"facts":{"defect_type":"功能故障","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
-        '"buyer_profile":{"purchase_count":2},"order_amount":899.0,'
-        '"chat_behavior":"买家提供故障视频，诉求全额退款"}'
-    )
-    few_shot_assistant_2 = (
-        '{"defect_severity":"severe","goods_recoverability":"unrecoverable",'
-        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
-    )
-
-    few_shot_user_3 = (
-        "示例输入3："
-        '{"facts":{"defect_type":"无瑕疵","evidence_quality":"low","missing_evidence":["清晰照片"],"red_flags":["前后说法不一致"]},'
-        '"buyer_profile":{"purchase_count":1},"order_amount":299.0,'
-        '"chat_behavior":"拒绝补证，坚持仅退款并威胁差评"}'
-    )
-    few_shot_assistant_3 = (
-        '{"defect_severity":"minor","goods_recoverability":"resalable",'
-        '"buyer_cooperation":"poor","demand_reasonableness":"unreasonable"}'
-    )
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": few_shot_user_1},
-        {"role": "assistant", "content": few_shot_assistant_1},
-        {"role": "user", "content": few_shot_user_2},
-        {"role": "assistant", "content": few_shot_assistant_2},
-        {"role": "user", "content": few_shot_user_3},
-        {"role": "assistant", "content": few_shot_assistant_3},
-        {"role": "user", "content": f"请按相同规则输出当前输入的 JSON：{json.dumps(payload, ensure_ascii=False)}"},
-    ]
-
-
-def _strip_markdown_json(raw_text: str) -> str:
-    """
-    去除 LLM 可能返回的 markdown 代码块包裹，便于 JSON 解析。
-    """
-    text = raw_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            text = "\n".join(lines[1:-1]).strip()
-    return text
-
-
-def _require_customer_value_field(value: str, valid_values: set[str], field_name: str) -> str:
-    """
-    校验 LLM 推断字段值；不合法时直接抛错，避免多路径兜底。
-    """
-    normalized = (value or "").strip().lower()
-    if normalized not in valid_values:
-        raise ValueError(f"字段 {field_name} 返回非法值：{value}")
-    return normalized
-
-
-def _llm_infer_customer_value_fields(input_data: StrategyInput) -> Dict[str, str]:
-    """
-    通过 LLM 推断客户价值工具所需字段，保证对全品类场景的普适性。
-    """
-    payload: Dict[str, Any] = {
-        "facts": input_data.facts.model_dump(),
-        "buyer_profile": input_data.buyer_profile.model_dump(),
-        "order_amount": input_data.order_amount,
-    }
-    logger.info("%s 开始调用 LLM 推断客户价值字段", AGENT2_LOG_PREFIX)
-    llm_text = chat_completion(
-        messages=_build_customer_value_infer_messages(payload),
-        model_env_key="AGENT2_LLM_MODEL",
-        temperature=0.0,
-    )
-    if not llm_text:
-        raise RuntimeError("客户价值字段推断失败：LLM 无返回内容")
-
-    try:
-        parsed = json.loads(_strip_markdown_json(llm_text))
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"客户价值字段推断失败：LLM 输出解析异常，原因：{exc}") from exc
-
-    return {
-        "defect_severity": _require_customer_value_field(
-            str(parsed.get("defect_severity", "")),
-            {"minor", "moderate", "severe"},
-            "defect_severity",
-        ),
-        "goods_recoverability": _require_customer_value_field(
-            str(parsed.get("goods_recoverability", "")),
-            {"resalable", "repairable", "unrecoverable"},
-            "goods_recoverability",
-        ),
-        "buyer_cooperation": _require_customer_value_field(
-            str(parsed.get("buyer_cooperation", "")),
-            {"good", "neutral", "poor"},
-            "buyer_cooperation",
-        ),
-        "demand_reasonableness": _require_customer_value_field(
-            str(parsed.get("demand_reasonableness", "")),
-            {"reasonable", "borderline", "unreasonable"},
-            "demand_reasonableness",
-        ),
-    }
+# ---------- 策略参谋核心目标（全链路提示词共用） ----------
+_MERCHANT_INTEREST_GOAL = (
+    "目标：在道德、平台规则与法律边界内，帮助商家分阶段争取最优结果（本单损益 + 客户长期价值 + 口碑与升级风险）。"
+    "售后不是一步结案：先完善举证与事实闭环，再视证据与规则选择协商、善后或合理拒赔；禁止跳过举证直接给退款/换新方案。"
+)
 
 
 def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
@@ -238,27 +82,96 @@ def _apply_customer_value_layer(input_data: StrategyInput) -> tuple:
     """
     第三层：客户价值评估层（双维价值 + 触发通道）。
 
+    完整工具链见 backend.tools.agent2_tools.run_customer_value_analysis，供智能模式复用。
+
     返回 (customer_value, new_risk_factors) 元组，不修改外部 risk_factors，
     保证并发安全。
     """
-    logger.info("%s 开始生成客户价值评估输入字段", AGENT2_LOG_PREFIX)
-    inferred_fields = _llm_infer_customer_value_fields(input_data)
-    customer_value_input = CustomerValueInput(
-        buyer_profile=input_data.buyer_profile,
-        order_amount=input_data.order_amount,
-        defect_severity=inferred_fields["defect_severity"],
-        goods_recoverability=inferred_fields["goods_recoverability"],
-        buyer_cooperation=inferred_fields["buyer_cooperation"],
-        demand_reasonableness=inferred_fields["demand_reasonableness"],
-    )
-    logger.info("%s 客户价值输入字段生成完成：%s", AGENT2_LOG_PREFIX, inferred_fields)
-    customer_value = evaluate_customer_value(customer_value_input)
+    logger.info("%s 开始客户价值完整分析（工具链）", AGENT2_LOG_PREFIX)
+    customer_value = run_customer_value_analysis(input_data)
     layer_risks: List[str] = []
     if customer_value.channel == "long_term":
         layer_risks.append("[客户价值层] 触发长期优待通道，优先协商维护关系")
     elif customer_value.channel == "order":
         layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
     return customer_value, layer_risks
+
+
+def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
+    """
+    判断当前材料是否尚不足以支撑退款/补偿/拒赔等终局决策（全品类，基于事实字段而非品类词表）。
+
+    参数:
+        input_data: 策略输入。
+
+    返回:
+        True 表示应先进入「补证/固定证据」阶段。
+    """
+    facts = input_data.facts
+    if facts.missing_evidence:
+        return True
+
+    doubt_markers = (
+        "待核实",
+        "不足以",
+        "无法确认",
+        "存疑",
+        "暂不可靠",
+        "不清晰",
+        "看不清",
+        "难以辨认",
+        "无法认定",
+        "尚不能",
+        "待补充",
+    )
+    corpus_parts: List[str] = []
+    if facts.uncertainty_note:
+        corpus_parts.append(str(facts.uncertainty_note))
+    for item in facts.red_flags or []:
+        corpus_parts.append(str(item))
+    for item in facts.visual_observations or []:
+        corpus_parts.append(str(item))
+    corpus = " ".join(corpus_parts)
+    if any(marker in corpus for marker in doubt_markers):
+        return True
+
+    summary = (facts.issue_summary or "") + " " + " ".join(str(t) for t in (facts.intent_tags or []))
+    has_settlement_demand = any(keyword in summary for keyword in ("退款", "赔偿", "赔付", "退换", "仅退"))
+    defect_claimed = bool(facts.defect_type and facts.defect_type != "无瑕疵") or any(
+        keyword in summary for keyword in ("质量", "瑕疵", "破损", "划痕", "损坏", "故障")
+    )
+    evidence_quality = (facts.evidence_quality or "").strip().lower()
+    if has_settlement_demand and defect_claimed and evidence_quality != "high":
+        return True
+
+    has_image_evidence = any(
+        isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "image"
+        for item in (facts.evidence_items or [])
+    )
+    if defect_claimed and has_image_evidence and not facts.visual_observations:
+        return True
+    return False
+
+
+def _infer_strategy_stage(
+    input_data: StrategyInput,
+    *,
+    disposition: str,
+    merchant_fault_signal: bool,
+) -> str:
+    """
+    推断当前应处的策略阶段，供 LLM 生成「当下这一步」而非终局方案。
+
+    返回:
+        evidence_first | negotiate_settle | compensate_close | defend_platform
+    """
+    if _is_evidence_insufficient_for_decision(input_data):
+        return "evidence_first"
+    if disposition == DISPOSITION_COMPENSATE and merchant_fault_signal:
+        return "compensate_close"
+    if disposition == DISPOSITION_DEFEND:
+        return "defend_platform"
+    return "negotiate_settle"
 
 
 def _determine_disposition(
@@ -269,7 +182,9 @@ def _determine_disposition(
     rule_stance: str,
 ) -> str:
     """
-    单链路处置决策：默认协商，强信号覆盖。
+    单链路处置方向：高风险恶意→抗辩；规则+高证据明确商责→善后；其余→协商（含举证未闭环）。
+
+    举证未闭环不改变 disposition，由 strategy_stage=evidence_first 约束「当下先补证」。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
     merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
@@ -434,6 +349,148 @@ def _infer_customer_intent(input_data: StrategyInput) -> str:
     return "常规售后沟通"
 
 
+def _extract_customer_intent_from_reasoning(reasoning: str) -> str | None:
+    """
+    从四段式 reasoning 中截取「客户意图：」与「风险点：」之间的正文，供核心结论区单独展示。
+
+    参数:
+        reasoning: Agent2 生成的完整策略说明。
+
+    返回:
+        截取到的意图段落；格式不符合时返回 None。
+    """
+    if not reasoning or "客户意图：" not in reasoning or "风险点：" not in reasoning:
+        return None
+    start = reasoning.index("客户意图：") + len("客户意图：")
+    risk_idx = reasoning.find("风险点：", start)
+    if risk_idx < 0:
+        return None
+    body = reasoning[start:risk_idx].strip().lstrip("。").strip()
+    return body or None
+
+
+def _extract_strategy_direction_from_reasoning(reasoning: str) -> str | None:
+    """
+    从四段式 reasoning 中截取「建议动作：」至「推理理由：」之间的正文，作为核心结论区的策略方向。
+
+    参数:
+        reasoning: 完整策略说明。
+
+    返回:
+        单一路径建议动作；格式不符合时返回 None。
+    """
+    if not reasoning or "建议动作：" not in reasoning:
+        return None
+    start = reasoning.index("建议动作：") + len("建议动作：")
+    rationale_idx = reasoning.find("推理理由：", start)
+    end = rationale_idx if rationale_idx >= 0 else len(reasoning)
+    body = reasoning[start:end].strip().rstrip("。").strip()
+    return body or None
+
+
+def _extract_strategy_rationale_from_reasoning(reasoning: str) -> str | None:
+    """
+    从四段式 reasoning 中截取「推理理由：」起至文末，供核心结论区「推理理由」展示。
+
+    参数:
+        reasoning: 完整策略说明。
+
+    返回:
+        推理理由段落；格式不符合时返回 None。
+    """
+    if not reasoning or "推理理由：" not in reasoning:
+        return None
+    start = reasoning.index("推理理由：") + len("推理理由：")
+    body = reasoning[start:].strip()
+    return body or None
+
+
+def _compose_strategy_direction_summary(*, disposition: str, input_data: StrategyInput) -> str:
+    """
+    当无法从 reasoning 解析建议动作时，按处置方向与事实缺口生成单一路径局部策略（全品类通用）。
+
+    参数:
+        disposition: 处置枚举。
+        input_data: 策略输入（含事实）。
+
+    返回:
+        1～2 句策略方向。
+    """
+    missing = bool(input_data.facts.missing_evidence)
+    weak_evidence = (input_data.facts.evidence_quality or "").lower() in {"low", "medium", "弱", "中"}
+    if disposition == DISPOSITION_DEFEND:
+        if missing or weak_evidence:
+            return "暂不承诺退款或补偿，引导买家按规则补充核心举证，同步固定己方证据链。"
+        return "在规则允许范围内提交抗辩或平台复核，沟通上只陈述事实与举证要求，不做超规则口头承诺。"
+    if disposition == DISPOSITION_COMPENSATE:
+        return "核实责任后给出一条可执行的退换或补偿方案并留痕，同步说明处理时效以收敛纠纷。"
+    if missing or weak_evidence:
+        return "先要求买家补齐关键举证并说明规则依据，在证据到位前不主动给出退款或大额补偿口径。"
+    return "给出一条双方可接受的协商口径（如部分退款或换货），并明确需买家确认或补证后再执行。"
+
+
+
+def _compose_strategy_direction_rationale(
+    *,
+    disposition: str,
+    input_data: StrategyInput,
+    risk_factors: List[str],
+    estimated_win_rate: float | None,
+) -> str:
+    """
+    当无法从 reasoning 解析推理理由时，用事实、规则与风险拼出 2～4 句简述。
+
+    参数:
+        disposition: 处置枚举。
+        input_data: 策略输入。
+        risk_factors: 风险提示列表。
+        estimated_win_rate: 抗辩胜率（可选）。
+
+    返回:
+        面向商家的推理理由文案。
+    """
+    parts: List[str] = []
+    summary = (input_data.facts.issue_summary or "").strip()
+    if summary:
+        parts.append(f"当前诉求：{summary}")
+    missing = input_data.facts.missing_evidence or []
+    if missing:
+        parts.append("关键举证仍不足：" + "；".join(str(item) for item in missing[:2]))
+    elif (input_data.facts.evidence_quality or "").lower() in {"low", "medium", "弱", "中"}:
+        parts.append("现有图文/描述尚不足以闭环认定责任，宜先补证再决策。")
+    if risk_factors:
+        parts.append("主要风险：" + "；".join(risk_factors[:2]))
+    if disposition == DISPOSITION_DEFEND and estimated_win_rate is not None:
+        parts.append(f"抗辩胜率约 {estimated_win_rate:.0%}，优先固定证据与规则口径以控制损失。")
+    elif disposition == DISPOSITION_COMPENSATE:
+        parts.append("责任倾向明确，及时善后可降低升级投诉与体验损失。")
+    elif disposition == DISPOSITION_NEGOTIATE:
+        parts.append("举证已较充分，可在规则边界内通过单点协商争取本单与客户价值的综合最优。")
+    parts.append("分阶段推进：本步只做当下最优动作，待证据或买家反馈后再进入补偿或合理拒赔。")
+    return "。".join(parts[:4]) + ("。" if parts else "综合事实与规则后给出上述单一路径建议。")
+
+
+def _compose_customer_intent_analysis(input_data: StrategyInput) -> str:
+    """
+    当无法从 reasoning 解析意图段时，用规则标签与诉求摘要拼出客户意图分析文案。
+
+    参数:
+        input_data: 策略输入（含事实）。
+
+    返回:
+        面向商家展示的单段中文说明。
+    """
+    label = _infer_customer_intent(input_data)
+    parts: List[str] = [f"主诉意图归类为「{label}」"]
+    summary = (input_data.facts.issue_summary or "").strip()
+    if summary:
+        parts.append(f"诉求摘要：{summary}")
+    tags = [t for t in (input_data.facts.intent_tags or []) if str(t).strip()]
+    if tags:
+        parts.append("诉求标签：" + "、".join(str(t).strip() for t in tags))
+    return "；".join(parts)
+
+
 def _build_fallback_reasoning(
     *,
     disposition: str,
@@ -442,23 +499,38 @@ def _build_fallback_reasoning(
     estimated_win_rate: float | None,
 ) -> str:
     """
-    当 LLM 不可用时，输出结构化三段 reasoning。
+    当 LLM 不可用时，输出结构化四段 reasoning。
     """
     intent = _infer_customer_intent(input_data)
     risk_text = "；".join(risk_factors[:3]) if risk_factors else "当前未识别到高风险项"
-    if disposition == DISPOSITION_DEFEND:
-        action = "先固定证据链并要求买家补证，再按规则提交抗辩材料"
-    elif disposition == DISPOSITION_COMPENSATE:
-        action = "主动体面善后：及时补救并同步方案，把体验与口碑损失压到最低"
-    else:
-        action = "先给可接受协商方案，保留后续平台申诉与补证空间"
-    win_rate_note = ""
-    if estimated_win_rate is not None:
-        win_rate_note = f"；当前抗辩胜率={estimated_win_rate:.3f}"
+    action = _compose_strategy_direction_summary(disposition=disposition, input_data=input_data)
+    rationale = _compose_strategy_direction_rationale(
+        disposition=disposition,
+        input_data=input_data,
+        risk_factors=risk_factors,
+        estimated_win_rate=estimated_win_rate,
+    )
     return (
         f"客户意图：{intent}。\n"
         f"风险点：{risk_text}。\n"
-        f"建议动作：{action}{win_rate_note}。"
+        f"建议动作：{action}\n"
+        f"推理理由：{rationale}"
+    )
+
+
+def _build_strategy_reasoning_system_prompt() -> str:
+    """
+    构造策略说明 LLM 的 system 提示，统一注入商户利益最大化与分阶段决策约束。
+    """
+    return (
+        "你是资深电商客服策略参谋。"
+        f"{_MERCHANT_INTEREST_GOAL}"
+        "输出四段中文，每段分别以“客户意图：”“风险点：”“建议动作：”“推理理由：”开头。"
+        "建议动作：只写「当前这一步」的单一路径（1～2句）。"
+        "若 strategy_stage=evidence_first：只能要求补证、固定己方证据、说明规则依据，禁止先给退款/部分退款/换新/优惠券等终局方案。"
+        "若 strategy_stage=negotiate_settle：可给一条协商口径，须注明以证据与规则为前提。"
+        "禁止罗列多套备选、禁止“例如/或者/可同时”式展开。"
+        "推理理由：2～4句，说明本步如何兼顾本单损益、客户价值与平台规则。避免空话，不要使用AI口吻。"
     )
 
 
@@ -468,6 +540,7 @@ def _llm_generate_reasoning(
     input_data: StrategyInput,
     risk_factors: List[str],
     estimated_win_rate: float | None,
+    strategy_stage: str,
     fast_path: bool = False,
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> str | None:
@@ -476,8 +549,17 @@ def _llm_generate_reasoning(
 
     fast_path=True 时优先小模型，若格式不符合约定则自动回退主模型补调一次。
     """
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    merchant_fault_signal = any(
+        "建议策略:compensate" in f"{rule.rule_summary} {rule.condition_result}".lower()
+        or "支持买家" in f"{rule.rule_summary} {rule.condition_result}"
+        for rule in input_data.matched_rules
+    ) and evidence_quality == "high"
     prompt_payload = {
         "disposition": disposition,
+        "strategy_stage": strategy_stage,
+        "evidence_incomplete": _is_evidence_insufficient_for_decision(input_data),
+        "merchant_fault_clear": merchant_fault_signal,
         "facts": input_data.facts.model_dump(),
         "buyer_profile": input_data.buyer_profile.model_dump(),
         "matched_rules": [item.model_dump() for item in input_data.matched_rules],
@@ -490,14 +572,7 @@ def _llm_generate_reasoning(
     fallback_key = "AGENT2_LLM_MODEL" if fast_path else None
     llm_text = chat_completion(
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是资深电商客服策略参谋。必须在规则和道德边界内，优先保护商户长期利益。"
-                    "输出三段中文，每段分别以“客户意图：”“风险点：”“建议动作：”开头，"
-                    "避免空话，不要使用AI口吻。"
-                ),
-            },
+            {"role": "system", "content": _build_strategy_reasoning_system_prompt()},
             {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
         ],
         model_env_key=model_env_key,
@@ -508,21 +583,19 @@ def _llm_generate_reasoning(
     if not llm_text:
         return None
     normalized = llm_text.strip()
-    if "客户意图：" in normalized and "风险点：" in normalized and "建议动作：" in normalized:
+    if (
+        "客户意图：" in normalized
+        and "风险点：" in normalized
+        and "建议动作：" in normalized
+        and "推理理由：" in normalized
+    ):
         return normalized
 
     # 小模型路径不满足格式时，回退主模型补调一次，优先保证结果质量与可读性。
     if fast_path and os.getenv("AGENT2_LLM_MODEL", "").strip():
         retry_text = chat_completion(
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是资深电商客服策略参谋。必须在规则和道德边界内，优先保护商户长期利益。"
-                        "输出三段中文，每段分别以“客户意图：”“风险点：”“建议动作：”开头，"
-                        "避免空话，不要使用AI口吻。"
-                    ),
-                },
+                {"role": "system", "content": _build_strategy_reasoning_system_prompt()},
                 {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
             ],
             model_env_key="AGENT2_LLM_MODEL",
@@ -532,7 +605,12 @@ def _llm_generate_reasoning(
         if not retry_text:
             return None
         retry_normalized = retry_text.strip()
-        if "客户意图：" in retry_normalized and "风险点：" in retry_normalized and "建议动作：" in retry_normalized:
+        if (
+            "客户意图：" in retry_normalized
+            and "风险点：" in retry_normalized
+            and "建议动作：" in retry_normalized
+            and "推理理由：" in retry_normalized
+        ):
             return retry_normalized
     return None
 
@@ -555,7 +633,8 @@ def recommend(
         reasoning_delta_callback: 推理文本流式回调（用于前端增量展示）。
 
     返回:
-        StrategyOutput，含 disposition、estimated_win_rate、reasoning、risk_factors 等。
+        StrategyOutput，含 disposition、estimated_win_rate、customer_intent_analysis、
+        reasoning、risk_factors 等。
     """
     risk_factors: List[str] = []
 
@@ -574,12 +653,23 @@ def recommend(
     if _has_major_signal_conflict(input_data, malicious_result=malicious_result, rule_stance=rule_stance):
         risk_factors.append("[信号一致性] 恶意风险与商责明确信号同时存在，需说明冲突并按优先级谨慎处理")
 
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
+    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+
     disposition = _determine_disposition(
         input_data,
         malicious_result=malicious_result,
         customer_value=customer_value,
         rule_stance=rule_stance,
     )
+    strategy_stage = _infer_strategy_stage(
+        input_data,
+        disposition=disposition,
+        merchant_fault_signal=merchant_fault_signal,
+    )
+    if strategy_stage == "evidence_first":
+        risk_factors.append("[策略阶段] 举证未闭环：当前建议先补证并固定证据链，再进入协商/善后/拒赔决策")
+
     estimated_win_rate = _estimate_win_rate(
         input_data,
         disposition=disposition,
@@ -599,6 +689,7 @@ def recommend(
         input_data=input_data,
         risk_factors=risk_factors,
         estimated_win_rate=estimated_win_rate,
+        strategy_stage=strategy_stage,
         fast_path=fast_path,
         reasoning_delta_callback=reasoning_delta_callback,
     )
@@ -613,10 +704,29 @@ def recommend(
     policy_ref = ",".join(policy_refs[:3]) if policy_refs else None
     dedup_risks = list(dict.fromkeys(risk_factors))
 
+    intent_extracted = _extract_customer_intent_from_reasoning(reasoning)
+    customer_intent_analysis = intent_extracted or _compose_customer_intent_analysis(input_data)
+
+    direction_extracted = _extract_strategy_direction_from_reasoning(reasoning)
+    strategy_direction_summary = direction_extracted or _compose_strategy_direction_summary(
+        disposition=disposition,
+        input_data=input_data,
+    )
+    rationale_extracted = _extract_strategy_rationale_from_reasoning(reasoning)
+    strategy_direction_rationale = rationale_extracted or _compose_strategy_direction_rationale(
+        disposition=disposition,
+        input_data=input_data,
+        risk_factors=dedup_risks,
+        estimated_win_rate=estimated_win_rate,
+    )
+
     return StrategyOutput(
         disposition=disposition,
         estimated_win_rate=estimated_win_rate,
         policy_ref=policy_ref,
+        customer_intent_analysis=customer_intent_analysis,
+        strategy_direction_summary=strategy_direction_summary,
+        strategy_direction_rationale=strategy_direction_rationale,
         reasoning=reasoning,
         risk_factors=dedup_risks,
         confidence=confidence,

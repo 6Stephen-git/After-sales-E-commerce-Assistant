@@ -11,19 +11,30 @@
 
     <div class="section-block">
       <h4>用户反馈的图片/视频描述</h4>
-      <el-empty v-if="visual_observations.length === 0" description="暂无可用的视觉描述" :image-size="60" />
-      <el-tag v-for="item in visual_observations" :key="item" class="list-tag" type="info">{{ item }}</el-tag>
+      <el-empty v-if="visual_all.length === 0" description="暂无可用的视觉描述" :image-size="60" />
+      <template v-else>
+        <el-tag
+          v-for="item in visual_visible"
+          :key="'vis-' + item"
+          class="list-tag"
+          type="info"
+        >{{ item }}</el-tag>
+        <el-collapse v-if="visual_rest.length > 0" class="visual-more visual-collapse">
+          <el-collapse-item :title="`其余 ${visual_rest.length} 条（点击展开）`" name="more">
+            <el-tag
+              v-for="item in visual_rest"
+              :key="'visr-' + item"
+              class="list-tag"
+              type="info"
+            >{{ item }}</el-tag>
+          </el-collapse-item>
+        </el-collapse>
+      </template>
     </div>
 
     <div class="section-block">
       <h4>物流情况</h4>
       <p class="plain-text">{{ logistics_summary }}</p>
-    </div>
-
-    <div class="section-block">
-      <h4>疑点列表</h4>
-      <el-empty v-if="red_flags.length === 0" description="暂无疑点" :image-size="60" />
-      <el-tag v-for="item in red_flags" :key="item" class="list-tag" type="danger">{{ item }}</el-tag>
     </div>
   </el-card>
 </template>
@@ -48,8 +59,8 @@ const issue_summary = computed(() => {
   return '暂未提取到明确诉求'
 })
 
-// ---------- 派生状态：图片/视频描述，优先取新结构，旧字段仅作为兜底 ----------
-const visual_observations = computed(() => {
+// ---------- 派生状态：图片/视频描述完整列表（去重归一） ----------
+const visual_all = computed(() => {
   const observations = Array.isArray(props.facts?.visual_observations) ? props.facts.visual_observations : []
   const normalized = observations.map((item) => String(item || '').trim()).filter((item) => Boolean(item))
   if (normalized.length > 0) {
@@ -70,6 +81,10 @@ const visual_observations = computed(() => {
   }
   return []
 })
+
+// ---------- 派生状态：默认展示前 3 条，其余放入折叠区 ----------
+const visual_visible = computed(() => visual_all.value.slice(0, 3))
+const visual_rest = computed(() => visual_all.value.slice(3))
 
 // ---------- 派生状态：物流摘要，优先读取 evidence_items 中的物流证据 ----------
 const logistics_summary = computed(() => {
@@ -93,13 +108,6 @@ const logistics_summary = computed(() => {
   }
   return '暂无物流信息'
 })
-
-// ---------- 派生状态：疑点列表，前端统一只展示这一份风险信息 ----------
-const red_flags = computed(() => {
-  const raw_flags = Array.isArray(props.facts?.red_flags) ? props.facts.red_flags : []
-  const normalized = raw_flags.map((item) => String(item || '').trim()).filter((item) => Boolean(item))
-  return [...new Set(normalized)]
-})
 </script>
 
 <style scoped>
@@ -122,5 +130,13 @@ const red_flags = computed(() => {
 
 .list-tag {
   margin: 0 8px 8px 0;
+}
+
+.visual-more {
+  margin-top: 8px;
+}
+
+.visual-collapse {
+  contain: content;
 }
 </style>

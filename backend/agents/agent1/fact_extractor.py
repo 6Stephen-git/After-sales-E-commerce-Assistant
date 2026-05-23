@@ -165,20 +165,25 @@ def _llm_extract_issue(text_context: str, logistics_signed: bool | None) -> dict
     if not text_context:
         return None
     system_prompt = (
-        "你是售后事实提取助手。只抽取客观事实，不做责任归因。"
+        "你是售后事实提取助手。只抽取客观事实，不做责任归因；疑点仅描述「观察到的矛盾或待核实点」，不对买家做道德定性。"
         "请输出 JSON。"
     )
     user_prompt = (
         "根据聊天记录提取核心诉求并返回 JSON，不要输出其他内容。\n"
-        "注意：用户诉求不等于退款/退货。只要用户反馈问题（如“香蕉发霉了”“屏幕花屏了”）就属于有效诉求。\n"
-        "如果聊天里有多个诉求，应该挂所有未解决的诉求。\n"
+        "注意：用户诉求不等于退款/退货。只要用户反馈问题（如商品瑕疵、物流异常、描述不符等）就属于有效诉求。\n"
+        "若聊天中存在多个未解决诉求，应在 intent_tags / issue_summary 中体现主要矛盾。\n"
         "字段要求：\n"
         "- issue_summary: 字符串，一句话总结买家核心诉求\n"
         "- intent_tags: 字符串数组，如 质量问题/物流异常/退款诉求\n"
         "- goods_received: 布尔或null\n"
         "- confidence: 0~1 浮点\n"
-        "- missing_evidence: 字符串数组\n"
-        "- red_flags: 字符串数组\n"
+        "- missing_evidence: 字符串数组，列仍缺的关键举证（如近景视频、开箱连续录像等），跨品类通用\n"
+        "- red_flags: 字符串数组。**每条独立、简短、可展示给商家**；用于「疑点列表」，覆盖但不限于：\n"
+        "  · 图文/陈述与客观材料可能不一致（如声称霉变但图片更像其他状态、时间线对不上）\n"
+        "  · 证据来源或真实性待核实（如第三方水印、非本单背景、关键信息被遮挡）\n"
+        "  · 物流、签收、商品状态等与其他字段或常识存在矛盾\n"
+        "  · 诉求与已提供证据能支撑的结论相比过度或不清\n"
+        "  无则填 []；禁止把整段聊天粘进单条 red_flags；禁止单一条目硬编码某一品类示例句。\n"
         "聊天记录：\n"
         f"{text_context}\n"
         f"物流签收状态：{logistics_signed}\n"
@@ -313,6 +318,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         if visual_description:
             visual_observations.append(visual_description)
         _extend_unique(visual_observations, image_result.get("findings"))
+        _extend_unique(red_flags, image_result.get("visual_red_flags"))
 
         raw_attrs = image_result.get("attributes")
         if isinstance(raw_attrs, dict):

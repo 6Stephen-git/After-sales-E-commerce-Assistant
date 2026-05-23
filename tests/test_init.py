@@ -45,6 +45,9 @@ class TestSchemas:
         from schemas import StrategyOutput, DISPOSITION_DEFEND
         obj = StrategyOutput(disposition=DISPOSITION_DEFEND)
         assert obj.disposition == "defend"
+        assert obj.customer_intent_analysis == ""
+        assert obj.strategy_direction_summary == ""
+        assert obj.strategy_direction_rationale == ""
 
     def test_script_output_instantiation(self):
         """ScriptOutput 可使用默认值实例化"""
@@ -83,6 +86,7 @@ class TestSchemas:
         )
         assert obj.dispute_id == "D202600001"
         assert obj.emotion_alert is None
+        assert obj.matched_rules == []
 
     def test_valid_strategy_enums(self):
         """处置方向枚举值定义正确"""

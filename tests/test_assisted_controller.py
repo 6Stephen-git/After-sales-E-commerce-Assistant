@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
 
 from backend.controllers.assisted_controller import clear_cache, run
 import backend.controllers.assisted_controller as assisted_controller_module
+import backend.tools.agent2_tools as agent2_tools_module
 import backend.agents.agent2.strategist as strategist_module
 from schemas import EVIDENCE_LOW, MatchedRule
 
@@ -32,7 +33,7 @@ def setup_function() -> None:
             condition_result="规则条件全部满足；建议策略:compensate",
         )
     ] if facts.defect_type == "破洞" and facts.evidence_quality == "high" else []
-    strategist_module._llm_infer_customer_value_fields = lambda _input: {
+    agent2_tools_module.infer_customer_value_fields = lambda _input: {
         "defect_severity": "moderate",
         "goods_recoverability": "repairable",
         "buyer_cooperation": "neutral",
