@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -239,47 +240,119 @@ def get_category_doc_id(slug: str) -> str | None:
     return str(doc_id).strip() if doc_id else None
 
 
+def build_category_slug_catalog() -> list[dict[str, str]]:
+    """
+    列出 lexicon 中全部特殊品类 slug 与 doc 名称，供 LLM 结构化分类。
+    """
+    catalog: list[dict[str, str]] = []
+    seen: set[str] = set()
+    cat_map = (load_lexicon().get("lanes") or {}).get("C_category_slug_to_doc_id") or {}
+    for slug, doc_id in cat_map.items():
+        slug_text = str(slug or "").strip()
+        if not slug_text or slug_text in seen:
+            continue
+        seen.add(slug_text)
+        doc = get_doc_by_id(str(doc_id))
+        catalog.append(
+            {
+                "slug": slug_text,
+                "doc_name": str((doc or {}).get("doc_name", "") or doc_id),
+            }
+        )
+    catalog.sort(key=lambda item: item["slug"])
+    return catalog
+
+
+def _parse_category_llm_json(raw_text: str) -> tuple[str | None, float]:
+    """
+    解析品类 LLM JSON：category_slug + confidence。
+    """
+    text = str(raw_text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return None, 0.0
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None, 0.0
+    if not isinstance(payload, dict):
+        return None, 0.0
+    slug = str(payload.get("category_slug", "") or "").strip()
+    if slug.lower() in {"none", "null", "unknown", ""}:
+        return None, 0.0
+    try:
+        confidence = float(payload.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    valid_slugs = {item["slug"] for item in build_category_slug_catalog()}
+    if slug not in valid_slugs:
+        logger.warning("%s LLM 返回未知 category_slug=%s，已忽略", LOG_PREFIX, slug)
+        return None, 0.0
+    return slug, confidence
+
+
+def infer_category_slug_llm(text: str, materials: dict[str, Any] | None = None) -> tuple[str | None, float]:
+    """
+    用 LLM 从聊天/材料推断品类 slug；失败时返回 (None, 0.0)。
+    """
+    from backend.tools.llm_client import chat_completion
+
+    api_slug = str((materials or {}).get("product_category_slug", "") or "").strip()
+    if api_slug and get_category_doc_id(api_slug):
+        return api_slug, 1.0
+
+    blob = str(text or "").strip()
+    if not blob:
+        return None, 0.0
+
+    catalog = build_category_slug_catalog()
+    if not catalog:
+        return None, 0.0
+
+    catalog_lines = "\n".join(f"- slug={item['slug']} doc={item['doc_name']}" for item in catalog)
+    system_prompt = (
+        "你是电商纠纷品类分类助手。根据买家描述，从给定 slug 枚举中选择最匹配的特殊品类；"
+        "无法判断则 category_slug 填 null。\n"
+        "只输出 JSON：{\"category_slug\":\"apparel或null\",\"confidence\":0.0~1.0}\n"
+        "示例1：「衣服袖子破洞」→ apparel, 0.92\n"
+        "示例2：「手机屏幕划痕」→ phone, 0.95\n"
+        "示例3：「香蕉收到就烂了」→ fresh, 0.9"
+    )
+    user_prompt = (
+        f"可选 slug 列表：\n{catalog_lines}\n\n"
+        f"product_category_slug(API)={api_slug or '无'}\n"
+        f"买家描述：\n{blob}"
+    )
+    llm_text = chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model_env_key="AGENT1_LLM_MODEL",
+        temperature=0.0,
+    )
+    if not llm_text:
+        logger.info("%s 品类 LLM 无响应，跳过推断", LOG_PREFIX)
+        return None, 0.0
+    slug, confidence = _parse_category_llm_json(llm_text)
+    if slug:
+        logger.info("%s 品类 LLM 推断 slug=%s confidence=%.2f", LOG_PREFIX, slug, confidence)
+    return slug, confidence
+
+
 def infer_category_slug_from_text(text: str) -> str | None:
     """
-    从聊天/诉求文本推断品类 slug；优先长关键词，避免误触。
-
-    参数:
-        text: 买家描述或聊天记录拼接串。
-
-    返回:
-        命中的 category_slug；无法推断时返回 None。
+    从聊天/诉求文本推断品类 slug（LLM 主路径；LLM 不可用时不做关键词猜测）。
     """
-    blob = str(text or "").strip().lower()
-    if not blob:
-        return None
-
-    hits: list[tuple[int, str]] = []
-    for doc in load_lexicon().get("docs", []) or []:
-        if not isinstance(doc, dict) or doc.get("lane") != "C":
-            continue
-        slug = str(doc.get("category_slug", "") or "").strip()
-        if not slug:
-            continue
-        doc_name = str(doc.get("doc_name", "") or "")
-        keywords: set[str] = set()
-        for token in ("手机", "服饰", "食品", "生鲜", "鞋", "箱包", "家具", "宠物", "虚拟", "汽车",
-                      "大家电", "大件", "定制", "二手", "珠宝", "票务", "盲盒", "鲜花", "电动车",
-                      "家装", "成人", "手表", "服务"):
-            if token in doc_name:
-                keywords.add(token)
-        for extra in CATEGORY_TEXT_EXTRA_HINTS.get(slug, ()):
-            keywords.add(extra.lower())
-        for kw in keywords:
-            if kw and kw.lower() in blob:
-                hits.append((len(kw), slug))
-
-    if any(term in blob for term in FRESH_ISSUE_TERMS) and any(term in blob for term in FRESH_CONTEXT_TERMS):
-        hits.append((6, "fresh"))
-
-    if not hits:
-        return None
-    hits.sort(key=lambda x: (-x[0], x[1]))
-    return hits[0][1]
+    slug, _confidence = infer_category_slug_llm(text=text, materials=None)
+    return slug
 
 
 def collect_lexicon_search_hints(

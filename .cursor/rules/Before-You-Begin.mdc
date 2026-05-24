@@ -1,5 +1,0 @@
----
-alwaysApply: true
----
-
-每次开发新模块前，先读取 docs/agent.md 和 docs/Architecture.md 了解相关文档和项目结构位置，并严格遵循 docs/Global_rules.md 中所有架构约束。

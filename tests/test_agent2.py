@@ -330,7 +330,7 @@ class TestAgent2Recommend:
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
 class TestAgent2Tools:
     def test_match_rules_should_score_articles_from_plan(self, monkeypatch):
-        """规则匹配应基于 rule_match_plan 与 MySQL 爬取正文（篇内双层词）。"""
+        """规则匹配应基于 LLM 在候选条文中结构化选型（失败时回退字面检索）。"""
         base_doc_id = "争议处理基本规则_淘宝平台争议处理规则_1154_99"
         phone_doc_id = "特殊品类争议处理_淘宝平台手机类商品争议处理规范_1155_11003755"
         mock_docs = {
@@ -361,6 +361,19 @@ class TestAgent2Tools:
             "backend.tools.rule_matcher._load_documents",
             lambda doc_ids: {k: v for k, v in mock_docs.items() if k in doc_ids},
         )
+
+        def _fake_llm_match(facts, documents, section_map):
+            from backend.tools.rule_matcher import _filter_articles_by_sections, _score_article
+
+            scored = []
+            for doc_id, doc in documents.items():
+                for article in _filter_articles_by_sections(doc, section_map.get(doc_id)):
+                    rule = _score_article(doc_id, doc, article, facts.rule_match_plan.search_terms)
+                    if rule is not None:
+                        scored.append(rule)
+            return scored
+
+        monkeypatch.setattr("backend.tools.rule_matcher_llm.llm_match_articles", _fake_llm_match)
         from schemas import RuleMatchPlan, RuleSearchTerms, SectionSelection
 
         facts = FactOutput(

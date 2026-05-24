@@ -1,7 +1,7 @@
 """
-平台规则匹配引擎：doc 锁定 → 节过滤 → 篇内双层检索词 → must/should/weak 分级。
+平台规则匹配引擎：doc 锁定 → 节过滤 → LLM 结构化条文选型 → must/should 分级。
 
-单一路径：仅消费 MySQL 爬取正文（taobao_rule::）与 Agent1 rule_match_plan。
+单一路径：MySQL 爬取正文 + Agent1 rule_match_plan；LLM 不可用时可回退字面检索。
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 MATCH_POOL_CAP = 30
 DISPLAY_MIN = 3
 DISPLAY_MAX = 5
+RULE_SUMMARY_MAX_LEN = 480
+RULE_BRIEF_MAX_LEN = 320
 
 GENERIC_ARTICLE_TITLES = frozenset(
     {"商品质量问题", "描述不当问题", "描述不符问题", "物流问题", "举证要求", "处理标准", "买家原因退换货"}
@@ -69,8 +71,8 @@ def _format_merchant_rule_text(article: dict[str, Any]) -> str:
     text = re.sub(r"第[一二三四五六七八九十百千零\d]+条", "", base)
     text = re.sub(r"第[一二三四五六七八九十]+节[^，。；]*", "", text)
     text = re.sub(r"\s+", " ", text).strip(" 。；，,")
-    if len(text) > 220:
-        text = text[:219].rstrip("，、；") + "…"
+    if len(text) > RULE_SUMMARY_MAX_LEN:
+        text = text[: RULE_SUMMARY_MAX_LEN - 1].rstrip("，、；") + "…"
     return text or "相关平台规则要点"
 
 
@@ -95,18 +97,30 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
         return RuleMatchResult()
 
     section_map = {sel.doc_id: sel.section_keys for sel in plan.section_selections}
-    terms = plan.search_terms
-    scored: list[tuple[int, str, MatchedRule]] = []
 
-    for doc_id, doc in documents.items():
-        articles = _filter_articles_by_sections(doc, section_map.get(doc_id))
-        for article in articles:
-            rule = _score_article(doc_id, doc, article, terms)
-            if rule is not None:
-                scored.append((_relevance_rank(rule.relevance), rule.relevance, rule))
+    from backend.tools.rule_matcher_llm import llm_match_articles
 
-    scored.sort(key=lambda x: (x[0], -_count_must_signal(x[2])))
-    pool = _sort_pool_category_first([item[2] for item in scored[:MATCH_POOL_CAP]])
+    llm_pool = llm_match_articles(facts=facts, documents=documents, section_map=section_map)
+    if llm_pool is None:
+        logger.warning("%s LLM 条文匹配失败，回退字面检索", LOG_PREFIX)
+        terms = plan.search_terms
+        scored: list[tuple[int, str, MatchedRule]] = []
+        for doc_id, doc in documents.items():
+            articles = _filter_articles_by_sections(doc, section_map.get(doc_id))
+            for article in articles:
+                rule = _score_article(doc_id, doc, article, terms)
+                if rule is not None:
+                    scored.append((_relevance_rank(rule.relevance), rule.relevance, rule))
+        pool = _sort_pool_category_first([item[2] for item in sorted(scored, key=lambda x: (x[0], -_count_must_signal(x[2])))[:MATCH_POOL_CAP]])
+    else:
+        pool = _sort_pool_category_first(llm_pool[:MATCH_POOL_CAP])
+        if len(pool) < DISPLAY_MIN:
+            pool = _supplement_pool_from_terms(
+                existing=pool,
+                documents=documents,
+                section_map=section_map,
+                terms=plan.search_terms,
+            )
     briefs = _build_briefs(pool)
     display = _pick_display_rules(pool)
     logger.info(
@@ -174,6 +188,34 @@ def _filter_articles_by_sections(doc: dict[str, Any], section_keys: list[str] | 
     if not allowed_nos:
         return articles
     return [a for a in articles if str(a.get("article_no", "")).strip() in allowed_nos]
+
+
+def _supplement_pool_from_terms(
+    *,
+    existing: list[MatchedRule],
+    documents: dict[str, dict[str, Any]],
+    section_map: dict[str, list[str] | None],
+    terms: RuleSearchTerms,
+) -> list[MatchedRule]:
+    """
+    LLM 命中不足 DISPLAY_MIN 时，用检索词对剩余候选条文补量（去重合并）。
+    """
+    seen = {rule.rule_id for rule in existing}
+    scored: list[tuple[int, str, MatchedRule]] = []
+    for doc_id, doc in documents.items():
+        for article in _filter_articles_by_sections(doc, section_map.get(doc_id)):
+            rule = _score_article(doc_id, doc, article, terms)
+            if rule is None or rule.rule_id in seen:
+                continue
+            scored.append((_relevance_rank(rule.relevance), rule.relevance, rule))
+    scored.sort(key=lambda x: (x[0], -_count_must_signal(x[2])))
+    merged = list(existing)
+    for _rank, _rel, rule in scored:
+        if len(merged) >= MATCH_POOL_CAP:
+            break
+        merged.append(rule)
+        seen.add(rule.rule_id)
+    return _sort_pool_category_first(merged)
 
 
 def _score_article(
@@ -336,7 +378,7 @@ def _build_briefs(pool: list[MatchedRule]) -> list[RuleBrief]:
         briefs.append(
             RuleBrief(
                 article_ref=rule.article_no or rule.rule_id,
-                brief=rule.rule_summary[:120],
+                brief=rule.rule_summary[:RULE_BRIEF_MAX_LEN],
                 relevance=rule.relevance,
                 stance_hint=rule.stance_hint,
             )

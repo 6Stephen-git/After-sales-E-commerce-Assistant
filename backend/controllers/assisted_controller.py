@@ -1,7 +1,5 @@
 """
-辅助模式控制器：负责串联 Agent1 -> Agent2 -> Agent3，并维护纠纷上下文缓存。
-
-说明：材料缓存为进程内字典，MVP 阶段足够；多实例部署时需改为 Redis 等共享存储。
+辅助模式控制器：负责串联 Agent1 -> Agent2 -> Agent3，并维护纠纷 Redis 三层缓存。
 """
 
 from __future__ import annotations
@@ -11,23 +9,30 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from typing import Any, Callable
 
 from backend.agents.agent1 import extract
 from backend.agents.agent2 import recommend
 from backend.agents.agent3 import generate
+from backend.cache import (
+    clear_all_cache,
+    clear_dispute_cache,
+    get_cached_facts,
+    get_cached_report,
+    merge_materials,
+    save_facts,
+    save_report,
+)
 from backend.tools.agent2_tools import match_rules_full, query_buyer_profile, search_similar_cases
 from schemas import AnalysisReport, MatchedRule, RuleBrief, ScriptInput, StrategyInput
 
-# ---------- 日志前缀与纠纷材料缓存（按 dispute_id） ----------
+# ---------- 日志前缀 ----------
 ASSISTED_LOG_PREFIX = "[AssistedController]"
 logger = logging.getLogger(__name__)
-_CACHE: dict[str, dict[str, Any]] = {}
 EventEmitter = Callable[[str, dict[str, Any]], None]
 
 
-# ---------- 材料合并：列表规范化与去重追加 ----------
+# ---------- 列表工具：供 dispute_desc 与 Agent2 输入抽取复用 ----------
 def _to_list(value: Any) -> list[Any]:
     """
     将任意值安全转为列表。
@@ -35,46 +40,6 @@ def _to_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     return []
-
-
-def _dedupe_preserve_order(items: list[Any]) -> list[Any]:
-    """
-    对列表按出现顺序去重，支持字典与基础类型混合元素。
-    """
-    deduped: list[Any] = []
-    for item in items:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
-
-
-def _merge_materials(dispute_id: str, new_materials: dict[str, Any]) -> dict[str, Any]:
-    """
-    合并纠纷材料：首次全量写入，后续对 chat_history/image_urls 增量去重追加，其他字段覆盖。
-    """
-    # ---------- 显式重置：当前端声明 reset_context 时，直接覆写历史缓存 ----------
-    if bool(new_materials.get("reset_context")):
-        merged_materials = deepcopy(new_materials)
-        _CACHE[dispute_id] = merged_materials
-        return deepcopy(merged_materials)
-
-    cached_materials = _CACHE.get(dispute_id)
-    if cached_materials is None:
-        merged_materials = deepcopy(new_materials)
-        _CACHE[dispute_id] = merged_materials
-        return deepcopy(merged_materials)
-
-    merged_materials = deepcopy(cached_materials)
-    for key, value in new_materials.items():
-        if key in {"chat_history", "image_urls"}:
-            old_items = _to_list(merged_materials.get(key))
-            new_items = _to_list(value)
-            merged_materials[key] = _dedupe_preserve_order(old_items + new_items)
-        else:
-            merged_materials[key] = deepcopy(value)
-
-    _CACHE[dispute_id] = merged_materials
-    return deepcopy(merged_materials)
 
 
 # ---------- 判例检索输入：从材料中抽取可读纠纷描述 ----------
@@ -246,17 +211,84 @@ def _run_agent2_tools_parallel(
     return rule_result.display_rules, rule_result.rule_briefs, buyer_profile, similar_cases
 
 
+def _log_quality_baseline(normalized_dispute_id: str, report: AnalysisReport) -> None:
+    """
+    记录报告质量基线日志，便于联调对比。
+    """
+    win_rate_text = (
+        "None" if report.strategy.estimated_win_rate is None else f"{report.strategy.estimated_win_rate:.3f}"
+    )
+    cv_channel = report.strategy.customer_value.channel if report.strategy.customer_value else "N/A"
+    cv_lt_score = report.strategy.customer_value.long_term_score if report.strategy.customer_value else "N/A"
+    cv_order_score = report.strategy.customer_value.order_score if report.strategy.customer_value else "N/A"
+    mal_level = report.strategy.malicious_detection.risk_level if report.strategy.malicious_detection else "N/A"
+    mal_score = report.strategy.malicious_detection.risk_score if report.strategy.malicious_detection else "N/A"
+    logger.info(
+        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s "
+        "cv_channel=%s cv_lt=%s cv_order=%s mal_level=%s mal_score=%s",
+        ASSISTED_LOG_PREFIX,
+        normalized_dispute_id,
+        report.strategy.disposition,
+        win_rate_text,
+        report.strategy.confidence,
+        report.facts.evidence_quality,
+        len(report.strategy.risk_factors),
+        cv_channel,
+        cv_lt_score,
+        cv_order_score,
+        mal_level,
+        mal_score,
+    )
+
+
+def _emit_final_report(
+    *,
+    emit_event: EventEmitter | None,
+    normalized_dispute_id: str,
+    report: AnalysisReport,
+    total_start: float,
+    cache_hit: bool = False,
+) -> None:
+    """
+    发送 final_report 与 pipeline_done 事件。
+    """
+    total_elapsed = _elapsed_ms(total_start)
+    logger.info(
+        "%s 报告返回：%s total_elapsed_ms=%s cache_hit=%s",
+        ASSISTED_LOG_PREFIX,
+        normalized_dispute_id,
+        total_elapsed,
+        cache_hit,
+    )
+    _log_quality_baseline(normalized_dispute_id, report)
+    _emit_event(
+        emit_event,
+        "final_report",
+        {
+            "dispute_id": normalized_dispute_id,
+            "elapsed_ms": total_elapsed,
+            "report": report.model_dump(),
+            "cache_hit": cache_hit,
+        },
+    )
+    _emit_event(
+        emit_event,
+        "pipeline_done",
+        {"dispute_id": normalized_dispute_id, "elapsed_ms": total_elapsed, "cache_hit": cache_hit},
+    )
+
+
 def clear_cache(dispute_id: str | None = None) -> None:
     """
     清理辅助模式缓存，用于集成测试或手工重置。
     """
     if dispute_id is None:
-        _CACHE.clear()
+        clear_all_cache()
         return
-    _CACHE.pop(dispute_id, None)
+    clear_dispute_cache(dispute_id)
 
 
-# ---------- 对外主流程：校验 → 合并 → Agent1/2/3 → 组装 AnalysisReport ----------
+# ---------- 对外主流程：校验 → 合并 → 缓存短路 → Agent1/2/3 → 组装 AnalysisReport ----------
 def run_with_events(
     dispute_id: str,
     new_materials: dict[str, Any],
@@ -281,10 +313,13 @@ def run_with_events(
         {"dispute_id": normalized_dispute_id},
     )
 
+    if bool(new_materials.get("reset_context")):
+        clear_dispute_cache(normalized_dispute_id)
+
     # 1) 合并本次传入与历史缓存，得到 Agent1 所需的完整 materials
     merge_start = time.perf_counter()
     try:
-        merged_materials = _merge_materials(normalized_dispute_id, new_materials)
+        merged_materials = merge_materials(normalized_dispute_id, new_materials)
         merge_elapsed = _elapsed_ms(merge_start)
         logger.info(
             "%s 材料合并完成：%s stage=merge elapsed_ms=%s",
@@ -307,6 +342,18 @@ def run_with_events(
         )
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
+    cached_report = get_cached_report(normalized_dispute_id, merged_materials)
+    if cached_report is not None:
+        logger.info("%s C 层短路返回：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
+        _emit_final_report(
+            emit_event=emit_event,
+            normalized_dispute_id=normalized_dispute_id,
+            report=cached_report,
+            total_start=total_start,
+            cache_hit=True,
+        )
+        return cached_report
+
     execution_profile = _build_execution_profile(merged_materials=merged_materials)
     _emit_event(
         emit_event,
@@ -324,21 +371,28 @@ def run_with_events(
         execution_profile.get("text_length"),
     )
 
-    # 2) 事实还原（仅 Tools 层对外部能力封装）
+    # 2) 事实还原（B 层命中则跳过 Agent1）
     _emit_event(
         emit_event,
         "stage_start",
         {"stage": "agent1", "dispute_id": normalized_dispute_id},
     )
     agent1_start = time.perf_counter()
+    facts_from_cache = get_cached_facts(normalized_dispute_id, merged_materials)
     try:
-        facts = extract(materials=merged_materials)
+        if facts_from_cache is not None:
+            facts = facts_from_cache
+            logger.info("%s Agent1 跳过（B 层命中）：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
+        else:
+            facts = extract(materials=merged_materials)
+            save_facts(normalized_dispute_id, merged_materials, facts)
         agent1_elapsed = _elapsed_ms(agent1_start)
         logger.info(
-            "%s Agent1 完成：%s stage=agent1 elapsed_ms=%s",
+            "%s Agent1 完成：%s stage=agent1 elapsed_ms=%s cached=%s",
             ASSISTED_LOG_PREFIX,
             normalized_dispute_id,
             agent1_elapsed,
+            facts_from_cache is not None,
         )
         _emit_event(
             emit_event,
@@ -348,6 +402,7 @@ def run_with_events(
                 "elapsed_ms": agent1_elapsed,
                 "dispute_id": normalized_dispute_id,
                 "partial_report": {"facts": facts.model_dump()},
+                "cache_hit": facts_from_cache is not None,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -422,6 +477,7 @@ def run_with_events(
             chat_history=_extract_chat_history_texts(merged_materials),
             emotion_note=merged_materials.get("emotion_note"),
         )
+
         def emit_reasoning_delta(delta_text: str) -> None:
             """
             将 Agent2 推理增量文本透传给流式事件，供前端实时拼接展示。
@@ -515,7 +571,6 @@ def run_with_events(
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
     # 5) 聚合为前端/API 使用的单对象（情绪预警由后续 Agent4 接入）
-    # matched_rules 与 strategy.policy_ref 互补：前者结构化展示，后者为简短条款索引串
     report = AnalysisReport(
         dispute_id=normalized_dispute_id,
         facts=facts,
@@ -526,48 +581,19 @@ def run_with_events(
         similar_cases=similar_cases[:2],
         matched_rules=matched_rules,
     )
-    total_elapsed = _elapsed_ms(total_start)
+    save_report(normalized_dispute_id, merged_materials, report)
     logger.info(
         "%s 报告组装完成：%s total_elapsed_ms=%s",
         ASSISTED_LOG_PREFIX,
         normalized_dispute_id,
-        total_elapsed,
+        _elapsed_ms(total_start),
     )
-    win_rate_text = "None" if report.strategy.estimated_win_rate is None else f"{report.strategy.estimated_win_rate:.3f}"
-    cv_channel = report.strategy.customer_value.channel if report.strategy.customer_value else "N/A"
-    cv_lt_score = report.strategy.customer_value.long_term_score if report.strategy.customer_value else "N/A"
-    cv_order_score = report.strategy.customer_value.order_score if report.strategy.customer_value else "N/A"
-    mal_level = report.strategy.malicious_detection.risk_level if report.strategy.malicious_detection else "N/A"
-    mal_score = report.strategy.malicious_detection.risk_score if report.strategy.malicious_detection else "N/A"
-    logger.info(
-        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s "
-        "cv_channel=%s cv_lt=%s cv_order=%s mal_level=%s mal_score=%s",
-        ASSISTED_LOG_PREFIX,
-        normalized_dispute_id,
-        report.strategy.disposition,
-        win_rate_text,
-        report.strategy.confidence,
-        report.facts.evidence_quality,
-        len(report.strategy.risk_factors),
-        cv_channel,
-        cv_lt_score,
-        cv_order_score,
-        mal_level,
-        mal_score,
-    )
-    _emit_event(
-        emit_event,
-        "final_report",
-        {
-            "dispute_id": normalized_dispute_id,
-            "elapsed_ms": total_elapsed,
-            "report": report.model_dump(),
-        },
-    )
-    _emit_event(
-        emit_event,
-        "pipeline_done",
-        {"dispute_id": normalized_dispute_id, "elapsed_ms": total_elapsed},
+    _emit_final_report(
+        emit_event=emit_event,
+        normalized_dispute_id=normalized_dispute_id,
+        report=report,
+        total_start=total_start,
+        cache_hit=False,
     )
     return report
 
@@ -577,4 +603,3 @@ def run(dispute_id: str, new_materials: dict[str, Any]) -> AnalysisReport:
     运行辅助模式完整链路并返回 AnalysisReport（非流式入口）。
     """
     return run_with_events(dispute_id=dispute_id, new_materials=new_materials, emit_event=None)
-

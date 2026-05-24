@@ -170,19 +170,9 @@ def _llm_extract_issue(
     """
     if not text_context:
         return None
-    intent_hint: list[str] = []
-    for kw, tag in (
-        ("物流", "物流异常"),
-        ("退款", "退款诉求"),
-        ("质量", "质量问题"),
-        ("瑕疵", "质量问题"),
-        ("破损", "质量问题"),
-    ):
-        if kw in text_context and tag not in intent_hint:
-            intent_hint.append(tag)
     nav_block = build_rule_navigation_prompt_block(
         materials=materials,
-        intent_tags=intent_hint,
+        intent_tags=[],
         text_context=text_context,
     )
     system_prompt = (
@@ -207,6 +197,9 @@ def _llm_extract_issue(
         "  无则填 []；禁止把整段聊天粘进单条 red_flags；禁止单一条目硬编码某一品类示例句。\n"
         "- rule_match_plan: 对象，含 activated_lanes、target_doc_ids、section_selections、search_terms、"
         "category_confidence、service_confidence（规则导航，见下方候选表）\n"
+        "  search_terms 要求：must_terms 必须使用候选节摘录中的规则正文用语，禁止填买家口语；"
+        "将买家说法映射为规则用语（如破洞/撕裂→破损，开线→开线/质量问题）；"
+        "case_terms 可保留买家原话；若可判断商品品类，须激活 C 通道并选中对应品类 doc\n"
         f"{nav_block}\n"
         "聊天记录：\n"
         f"{text_context}\n"

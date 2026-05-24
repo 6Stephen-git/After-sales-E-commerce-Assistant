@@ -13,7 +13,7 @@ from backend.tools.rule_lexicon import (
     expand_doc_ids_by_lanes,
     get_category_doc_id,
     get_doc_by_id,
-    infer_category_slug_from_text,
+    infer_category_slug_llm,
     infer_lanes_from_intent,
     is_category_doc,
     list_section_candidates_for_doc,
@@ -102,7 +102,7 @@ def build_rule_navigation_prompt_block(
 ) -> str:
     """生成写入 Agent1 user prompt 的规则导航说明块。"""
     doc_ids, lanes = resolve_doc_ids_from_materials(materials)
-    inferred_slug = infer_category_slug_from_text(text_context)
+    inferred_slug, _inferred_conf = infer_category_slug_llm(text_context, materials)
     if inferred_slug:
         cat_doc = get_category_doc_id(inferred_slug)
         if cat_doc and cat_doc not in doc_ids:
@@ -216,7 +216,7 @@ def _is_category_lane_locked(
         return True
     if any(is_category_doc(doc_id) for doc_id in plan.target_doc_ids):
         return True
-    if infer_category_slug_from_text(buyer_text):
+    if infer_category_slug_llm(buyer_text, materials)[0]:
         return True
     return False
 
@@ -228,8 +228,10 @@ def _ensure_category_lane(
 ) -> RuleMatchPlan:
     """API 标、LLM 选择或文本推断命中品类时，强制加入 C 通道与品类 doc。"""
     slug = str(materials.get("product_category_slug", "") or "").strip()
+    slug_confidence = 1.0
     if not slug:
-        slug = infer_category_slug_from_text(buyer_text) or ""
+        slug, slug_confidence = infer_category_slug_llm(buyer_text, materials)
+        slug = slug or ""
 
     doc_id = get_category_doc_id(slug) if slug else None
     if not doc_id:
@@ -248,7 +250,7 @@ def _ensure_category_lane(
         plan.activated_lanes.append(LANE_C)
 
     if not str(materials.get("product_category_slug", "") or "").strip():
-        plan.category_confidence = max(plan.category_confidence, CE_CONFIDENCE_THRESHOLD)
+        plan.category_confidence = max(plan.category_confidence, slug_confidence, CE_CONFIDENCE_THRESHOLD)
 
     has_section = any(sel.doc_id == doc_id for sel in plan.section_selections)
     if not has_section:

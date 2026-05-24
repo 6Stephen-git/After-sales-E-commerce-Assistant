@@ -1,11 +1,12 @@
 """
 辅助模式控制器集成测试。
 
-覆盖：全链路、增量缓存、空材料边界、多纠纷缓存隔离；依赖 `clear_cache` 保证用例独立。
+覆盖：全链路、增量缓存、空材料边界、多纠纷缓存隔离、C 层报告缓存命中；依赖 `clear_cache` 保证用例独立。
 """
 
 import os
 import sys
+from unittest.mock import MagicMock, patch
 
 
 # ---------- 与 Agent 单测一致：保证可从仓库根导入 schemas 与 backend ----------
@@ -13,10 +14,13 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+os.environ.setdefault("ENABLE_REDIS_CACHE", "0")
+
 from backend.controllers.assisted_controller import clear_cache, run
 import backend.controllers.assisted_controller as assisted_controller_module
 import backend.tools.agent2_tools as agent2_tools_module
 import backend.agents.agent2.strategist as strategist_module
+from backend.cache.redis_client import reset_redis_client
 from schemas import EVIDENCE_LOW, MatchedRule, RuleBrief, RuleMatchResult, RULE_RELEVANCE_SHOULD
 
 
@@ -26,6 +30,7 @@ def setup_function() -> None:
     每个用例前清空控制器缓存，避免互相污染。
     """
     clear_cache()
+    reset_redis_client()
     def _mock_match_rules_full(facts):
         if facts.defect_type == "破洞" and facts.evidence_quality == "high":
             rule = MatchedRule(
@@ -149,3 +154,51 @@ def test_run_should_isolate_cache_by_dispute_id() -> None:
     assert report_a.facts is not None
     assert report_b.facts is not None
 
+
+# ---------- 场景五：同材料二次调用应命中 C 层，不再调用 Agent1 ----------
+def test_run_should_hit_report_cache_on_same_materials() -> None:
+    """
+    Redis C 层命中时，第二次调用不应再触发 extract。
+    """
+    extract_call_count = {"count": 0}
+    original_extract = assisted_controller_module.extract
+
+    def counting_extract(materials):
+        extract_call_count["count"] += 1
+        return original_extract(materials=materials)
+
+    materials = {
+        "order_id": "ORDER10006",
+        "buyer_id": "buyer_loyal",
+        "order_amount": 129.0,
+        "buyer_text": "有质量问题",
+        "chat_history": [{"role": "buyer", "content": "请处理"}],
+        "image_urls": ["mock://tear-tag"],
+    }
+
+    mock_client = MagicMock()
+    storage: dict[str, str] = {}
+
+    def fake_setex(key: str, _ttl: int, value: str) -> None:
+        storage[key] = value
+
+    def fake_get(key: str) -> str | None:
+        return storage.get(key)
+
+    mock_client.setex.side_effect = fake_setex
+    mock_client.get.side_effect = fake_get
+    mock_client.expire.return_value = True
+    mock_client.ping.return_value = True
+    mock_client.scan_iter.return_value = iter([])
+    mock_client.delete.return_value = 1
+
+    with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            with patch.object(assisted_controller_module, "extract", side_effect=counting_extract):
+                first_report = run(dispute_id="DISPUTE-C-005", new_materials=materials)
+                second_report = run(dispute_id="DISPUTE-C-005", new_materials={})
+
+    assert first_report.dispute_id == "DISPUTE-C-005"
+    assert second_report.dispute_id == "DISPUTE-C-005"
+    assert extract_call_count["count"] == 1
+    assert second_report.strategy.disposition == first_report.strategy.disposition
