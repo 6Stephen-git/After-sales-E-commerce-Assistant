@@ -1,118 +1,157 @@
 """
-Agent 3 工具集：话术模板读取。
+Agent 3 工具集：买家话术 LLM 生成。
 
-约束：模板路径优先环境变量 TEMPLATES_PATH；文件缺失或解析失败时回退内置模板，避免线上空白话术。
+约束：结构化 JSON 输出；禁用词命中时重试；失败返回 None 由上层走 fallback_script。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
-from pathlib import Path
-from typing import Dict
+from typing import Any
 
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from backend.tools.llm_client import chat_completion
 
 
 logger = logging.getLogger(__name__)
 AGENT3_LOG_PREFIX = "[Agent3]"
-DEFAULT_TEMPLATE_PATH = ROOT_DIR / "data" / "script_templates.json"
-VALID_TEMPLATE_KEYS = {"defend", "negotiate", "compensate"}
 
-# ---------- 内置兜底：磁盘不可读或缺键时仍保证三策略模板非空 ----------
-_FALLBACK_TEMPLATES: Dict[str, str] = {
-    "defend": (
-        "您好，订单{{order_id}}我们已经复核。当前事实是：{{fact_summary}}。"
-        "为了避免误判，麻烦您补充更清晰的细节证据，我们会马上继续处理。"
-    ),
-    "negotiate": (
-        "您好，订单{{order_id}}我们看过了，当前信息是：{{fact_summary}}。"
-        "我们理解您的心情，愿意先按{{offer_amount}}元协商，您看这样可以吗？"
-    ),
-    "compensate": (
-        "您好，订单{{order_id}}问题已确认：{{fact_summary}}。"
-        "这次给您添麻烦了，我们愿意按{{offer_amount}}元处理，并尽快完成。"
-    ),
-}
+# ---------- 禁用词：话术生成后轻量校验 ----------
+_FORBIDDEN_PHRASES = (
+    "综上所述",
+    "希望我的回答能帮到您",
+    "感谢您的理解与支持",
+    "不便之处敬请谅解",
+    "给您带来不便深表歉意",
+)
+
+# ---------- 话术生成：system prompt + 跨品类 few-shot ----------
+_SCRIPT_SYSTEM_PROMPT = """你是电商小店的店主本人，不是平台客服。用自然口语写一条可直接发送的买家回复。
+
+## 必须遵守 dialogue_context（由 Agent2 策略 LLM 给出）
+- dialogue_mode=continue：承接 recent_turns，禁止「您好」式重新开场。
+- blocked_evidence_requests 中的项禁止再向买家索要。
+- 仅使用 actionable_evidence_requests 中的举证方向。
+- issue_summary 仅供理解背景，**禁止在话术中描述或评价货损程度**；买家已表达的诉求无需再确认一遍。
+- 举证/补证类：先点证据疑点 + 补证请求即可，不要「问题很明显，但…」式转折铺垫。
+
+## 补偿门禁 compensation_policy
+- forbid：禁止任何退款/补偿/优惠券/换新承诺。
+- negotiate_soft：可商量但不报具体金额。
+- explicit：责任已确认，可给明确方案（参考 order_amount、compensation_uplift）。
+- none：不主动提补偿，聚焦举证或规则。
+
+## 应对思想 response_mode
+- merchant_fault：主动担责，给可执行方案。
+- malicious_risk：礼貌、逻辑清楚，少让步。
+- neutral_negotiate：理解诉求，留协商余地。
+
+## 客户价值（只调语气与补偿弹性，不改变 disposition / response_mode）
+- 读取 payload 中的 `tone_hint`、`customer_value_channel`、`compensation_uplift`（有则参考）。
+- `customer_value_channel=long_term`：老客，语气稍暖、可自然表达重视，禁止刻意讨好或额外让利。
+- `customer_value_channel=order`：高价值本单，体现认真跟进；`negotiate_soft` / `explicit` 时可参考 `compensation_uplift` 微调补偿表述。
+- `customer_value_channel=none` 或未传：保持礼貌即可，不必额外热情。
+- `compensation_policy=forbid` / `none` 或 `response_mode=malicious_risk`：不因客户价值提前让步或承诺补偿。
+
+## 风格
+- 举证/补图类回复：**一句话搞定**，亲切自然，像熟人帮忙，不要客服腔。
+- 禁用：综上所述、希望我的回答能帮到您、感谢您的理解与支持。
+
+## 输出
+只输出 JSON：{"script": "..."}
+
+## Few-shot 1
+dialogue_mode=continue，举证阶段
+{"script": "细节有些看不清，麻烦您对着破洞的地方再拍一段近景视频。"}
+
+## Few-shot 2
+dialogue_mode=cold_start，compensate_close，商责确认
+{"script": "这次确实是我们的问题，给您添麻烦了。我给您安排退货退款，钱原路返回，您把货寄回就行，您看可以吗？"}
+
+## Few-shot 3
+举证阶段，malicious_risk
+{"script": "图片右下好像有网络水印，麻烦拍段近景或开箱连续录像方便核实。"}
+"""
 
 
-# ---------- 模板路径解析、JSON 加载与键校验 ----------
-def _resolve_template_path() -> Path:
+# ---------- JSON 解析：话术正文 ----------
+def _parse_script_json(raw_text: str) -> str | None:
     """
-    解析话术模板 JSON 文件路径。
-
-    优先环境变量 TEMPLATES_PATH；未设置时尝试 SCRIPT_TEMPLATES_PATH（兼容旧名）；
-    均未设置则使用项目内 data/script_templates.json。
-
-    返回:
-        模板文件的 Path（未必存在）。
+    解析话术 LLM 输出的 JSON。
     """
-    env_path = os.getenv("TEMPLATES_PATH") or os.getenv("SCRIPT_TEMPLATES_PATH")
-    if env_path:
-        return Path(env_path)
-    return DEFAULT_TEMPLATE_PATH
-
-
-def _load_templates() -> Dict[str, str]:
-    """
-    读取 JSON 模板文件并校验三键 defend/negotiate/compensate。
-
-    文件不存在或 JSON 非法时回退 _FALLBACK_TEMPLATES；单键缺失时用内置串补全。
-    打 info / error / warning 日志，前缀 [Agent3]。
-
-    返回:
-        键为策略类型、值为模板字符串的字典，恒含三键。
-    """
-    template_path = _resolve_template_path()
-    logger.info("%s 开始读取话术模板，template_path=%s", AGENT3_LOG_PREFIX, template_path)
-
-    if not template_path.is_file():
-        logger.error("%s 模板文件不存在，回退默认模板：%s", AGENT3_LOG_PREFIX, template_path)
-        return _FALLBACK_TEMPLATES.copy()
-
+    normalized = (raw_text or "").strip()
+    if normalized.startswith("```"):
+        normalized = normalized.replace("```json", "").replace("```", "").strip()
     try:
-        with template_path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s 读取模板文件失败：%s，回退默认模板", AGENT3_LOG_PREFIX, exc)
-        return _FALLBACK_TEMPLATES.copy()
-
-    templates: Dict[str, str] = {}
-    for key in VALID_TEMPLATE_KEYS:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            templates[key] = value.strip()
-        else:
-            logger.warning("%s 模板缺失或为空，使用内置模板：%s", AGENT3_LOG_PREFIX, key)
-            templates[key] = _FALLBACK_TEMPLATES[key]
-
-    logger.info("%s 模板读取完成，模板数量=%s", AGENT3_LOG_PREFIX, len(templates))
-    return templates
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        logger.warning("%s 话术 JSON 解析失败", AGENT3_LOG_PREFIX)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    script = payload.get("script")
+    if not isinstance(script, str) or not script.strip():
+        return None
+    return script.strip()
 
 
-# ---------- 对外工具：按策略类型取模板全文（含 {{变量}}） ----------
-def get_script_template(strategy_type: str) -> str:
+# ---------- 禁用词检测 ----------
+def _contains_forbidden_phrase(text: str) -> bool:
     """
-    返回指定策略类型对应的话术模板字符串（含 {{变量}}）。
+    检测话术是否含禁用套话。
+    """
+    normalized = (text or "").strip()
+    if not normalized:
+        return True
+    return any(phrase in normalized for phrase in _FORBIDDEN_PHRASES)
 
-    每次调用会经 _load_templates 刷新磁盘内容；未知 strategy_type 时记录 error 并回退 defend 模板。
+
+# ---------- LLM 调用：话术生成 ----------
+def _call_script_llm(*, payload: dict[str, Any], model_env_key: str) -> str | None:
+    """
+    调用 LLM 生成买家话术。
+    """
+    logger.info("%s 开始 LLM 话术生成 model_env_key=%s", AGENT3_LOG_PREFIX, model_env_key)
+    return chat_completion(
+        messages=[
+            {"role": "system", "content": _SCRIPT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"请生成一条面向买家的话术：\n{json.dumps(payload, ensure_ascii=False)}",
+            },
+        ],
+        model_env_key=model_env_key,
+        temperature=0.55,
+    )
+
+
+# ---------- 对外工具：生成买家话术正文 ----------
+def generate_buyer_script(payload: dict[str, Any]) -> str | None:
+    """
+    在 dialogue_context 约束下调用 LLM 生成单条买家话术。
 
     参数:
-        strategy_type: defend / negotiate / compensate（大小写不敏感）。
+        payload: 含 dialogue_context、response_mode、strategy_stage、compensation_policy 等。
 
     返回:
-        模板全文字符串。
+        话术正文字符串；全部失败时返回 None。
     """
-    normalized_type = (strategy_type or "").strip().lower()
-    templates = _load_templates()
-
-    if normalized_type not in VALID_TEMPLATE_KEYS:
-        logger.error("%s 未知策略类型：%s，回退 defend 模板", AGENT3_LOG_PREFIX, strategy_type)
-        return templates["defend"]
-
-    return templates[normalized_type]
+    raw = _call_script_llm(payload=payload, model_env_key="AGENT3_LLM_MODEL")
+    if not raw:
+        logger.error("%s LLM 话术生成失败", AGENT3_LOG_PREFIX)
+        return None
+    script = _parse_script_json(raw)
+    if not script:
+        logger.error("%s LLM 话术生成失败：JSON 解析失败", AGENT3_LOG_PREFIX)
+        return None
+    if _contains_forbidden_phrase(script):
+        logger.warning("%s 话术含禁用词，重试", AGENT3_LOG_PREFIX)
+        retry_raw = _call_script_llm(payload=payload, model_env_key="AGENT3_LLM_MODEL")
+        if retry_raw:
+            retry_script = _parse_script_json(retry_raw)
+            if retry_script and not _contains_forbidden_phrase(retry_script):
+                logger.info("%s LLM 话术生成成功", AGENT3_LOG_PREFIX)
+                return retry_script
+        return None
+    logger.info("%s LLM 话术生成成功", AGENT3_LOG_PREFIX)
+    return script

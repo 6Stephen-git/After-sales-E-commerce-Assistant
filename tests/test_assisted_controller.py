@@ -52,7 +52,7 @@ def setup_function() -> None:
         "buyer_cooperation": "neutral",
         "demand_reasonableness": "borderline",
     }
-    strategist_module._llm_generate_reasoning = lambda **kwargs: None
+    strategist_module._llm_generate_strategy = lambda **kwargs: None
 
 
 # ---------- 场景一：首次全量材料，三 Agent 串行产出完整报告 ----------
@@ -75,10 +75,11 @@ def test_run_full_chain_should_return_valid_report() -> None:
     assert report.dispute_id == "DISPUTE-C-001"
     assert report.facts is not None
     assert report.strategy.disposition in {"defend", "negotiate", "compensate"}
-    assert report.scripts.recommended_version in {
-        "defense_version",
-        "negotiate_version",
-        "compensate_version",
+    assert report.scripts.script.strip() != ""
+    assert report.scripts.response_mode in {
+        "merchant_fault",
+        "malicious_risk",
+        "neutral_negotiate",
     }
 
 
@@ -121,7 +122,7 @@ def test_run_should_handle_empty_materials_boundary() -> None:
     assert report.dispute_id == "DISPUTE-C-003"
     assert report.facts.evidence_quality == EVIDENCE_LOW
     assert report.strategy.disposition in {"defend", "negotiate", "compensate"}
-    assert report.scripts.defense_version.strip() != ""
+    assert report.scripts.script.strip() != ""
 
 
 # ---------- 场景四：不同 dispute_id 并行缓存互不影响 ----------

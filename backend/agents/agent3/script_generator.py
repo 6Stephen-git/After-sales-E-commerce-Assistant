@@ -1,369 +1,264 @@
 """
 Agent 3：话术生成员。
 
-职责：把 Agent2 策略与 Agent1 事实填入模板生成三版话术；不直连数据库、不发起网络请求。
+职责：在 Agent2 输出的 dialogue_context 约束下生成可嵌入当下聊天的一条店主口吻话术。
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
-import json
-import os
+import logging
+from typing import Any
 
 from schemas import (
+    ChatTurn,
+    DialogueContext,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
-    SCRIPT_COMPENSATE,
-    SCRIPT_DEFENSE,
-    SCRIPT_NEGOTIATE,
+    EVIDENCE_HIGH,
+    RESPONSE_MODE_MALICIOUS_RISK,
+    RESPONSE_MODE_MERCHANT_FAULT,
+    RESPONSE_MODE_NEUTRAL_NEGOTIATE,
+    STRATEGY_STAGE_COMPENSATE_CLOSE,
+    STRATEGY_STAGE_DEFEND_PLATFORM,
+    STRATEGY_STAGE_EVIDENCE_FIRST,
+    STRATEGY_STAGE_NEGOTIATE_SETTLE,
     ScriptInput,
     ScriptOutput,
 )
 
-from backend.tools.agent3_tools import get_script_template
-from backend.tools.llm_client import chat_completion
+from backend.tools.agent3_tools import generate_buyer_script
 
 
+logger = logging.getLogger(__name__)
 AGENT3_LOG_PREFIX = "[Agent3]"
 
 
-# ---------- 展示用字符串：占位兜底、金额格式、面向买家的事实摘要 ----------
-def _normalize_text(value: Optional[str], fallback: str = "待补充") -> str:
+# ---------- 文本规范化 ----------
+def _normalize_text(value: str | None, fallback: str = "") -> str:
     """
     将可选字符串规范为非空展示文案。
-
-    参数:
-        value: 可能为 None 或仅空白的字符串。
-        fallback: value 无效时使用的默认中文占位。
-
-    返回:
-        去掉首尾空白后的字符串；无效时返回 fallback。
     """
     if isinstance(value, str) and value.strip():
         return value.strip()
     return fallback
 
 
+# ---------- 金额格式化 ----------
 def _format_money(amount: float) -> str:
     """
-    将订单金额格式化为两位小数字符串，负数按 0 处理。
-
-    参数:
-        amount: 订单金额。
-
-    返回:
-        如 "99.00" 的字符串，供模板中 {{offer_amount}} 等占位符使用。
+    将订单金额格式化为两位小数字符串。
     """
-    safe_amount = max(0.0, float(amount))
-    return f"{safe_amount:.2f}"
+    return f"{max(0.0, float(amount)):.2f}"
 
 
-def _build_fact_summary(input_data: ScriptInput) -> str:
+# ---------- 应对思想推导：来自 Agent2 枚举信号 ----------
+def _derive_response_mode(input_data: ScriptInput) -> str:
     """
-    从 ScriptInput.facts 拼出一句面向买家的事实摘要（不夸大、不编造字段外信息）。
+    从 Agent2 输出信号推导话术应对思想（三枚举）。
+    """
+    strategy = input_data.strategy_output
+    malicious = strategy.malicious_detection
+    if malicious and (malicious.risk_level or "").strip().lower() == "high":
+        return RESPONSE_MODE_MALICIOUS_RISK
 
-    顺序覆盖：收货感知 → 瑕疵与位置 → 物流是否正常 → 是否存在待核实疑点；
-    若全无有效信息则返回固定兜底句。
+    disposition = (strategy.disposition or "").strip().lower()
+    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
 
-    参数:
-        input_data: 含 facts 的脚本生成输入。
+    if disposition == DISPOSITION_COMPENSATE:
+        return RESPONSE_MODE_MERCHANT_FAULT
+    if disposition == DISPOSITION_NEGOTIATE and evidence_quality == EVIDENCE_HIGH:
+        return RESPONSE_MODE_MERCHANT_FAULT
+    if disposition == DISPOSITION_DEFEND:
+        return RESPONSE_MODE_MALICIOUS_RISK
+    return RESPONSE_MODE_NEUTRAL_NEGOTIATE
 
-    返回:
-        一句中文摘要，用于模板变量 fact_summary。
+
+# ---------- 补偿门禁：来自 strategy_stage 枚举 ----------
+def _derive_compensation_policy(strategy_stage: str) -> str:
+    """
+    将策略阶段映射为补偿门禁枚举。
+    """
+    normalized = (strategy_stage or "").strip().lower()
+    if normalized == STRATEGY_STAGE_EVIDENCE_FIRST:
+        return "forbid"
+    if normalized == STRATEGY_STAGE_COMPENSATE_CLOSE:
+        return "explicit"
+    if normalized == STRATEGY_STAGE_NEGOTIATE_SETTLE:
+        return "negotiate_soft"
+    if normalized == STRATEGY_STAGE_DEFEND_PLATFORM:
+        return "none"
+    return "negotiate_soft"
+
+
+# ---------- 聊天轮次：仅做结构规范化，不做语义判断 ----------
+def _normalize_chat_turns(chat_history: list[ChatTurn]) -> list[dict[str, str]]:
+    """
+    将 ChatTurn 列表转为 role/content dict。
+    """
+    turns: list[dict[str, str]] = []
+    for item in chat_history or []:
+        role = (item.role or "buyer").strip().lower()
+        if role not in {"buyer", "merchant"}:
+            role = "buyer"
+        content = _normalize_text(item.content)
+        if content:
+            turns.append({"role": role, "content": content})
+    return turns
+
+
+# ---------- dialogue_context 兜底：Agent2 未输出时使用最小结构 ----------
+def _minimal_dialogue_context(input_data: ScriptInput) -> DialogueContext:
+    """
+    Agent2 未提供 dialogue_context 时的最小结构（无 blocked 推断）。
+    """
+    turns = _normalize_chat_turns(input_data.chat_history)
+    missing = list(input_data.facts.missing_evidence or [])
+    return DialogueContext(
+        dialogue_mode="continue" if turns else "cold_start",
+        blocked_evidence_requests=[],
+        actionable_evidence_requests=missing,
+        fallback_script="我这边还在核对材料，核实完马上回您。" if turns else "您好，我这边还在核对材料，核实完马上回您。",
+    )
+
+
+def _resolve_dialogue_context(input_data: ScriptInput) -> DialogueContext:
+    """
+    优先读取 Agent2 输出的 dialogue_context，缺失时走最小兜底。
+    """
+    ctx = input_data.strategy_output.dialogue_context
+    if ctx is not None:
+        return ctx
+    logger.warning("%s 策略未含 dialogue_context，使用最小结构兜底", AGENT3_LOG_PREFIX)
+    return _minimal_dialogue_context(input_data)
+
+
+# ---------- 语气与事实边界 ----------
+def _build_tone_hint(input_data: ScriptInput) -> str:
+    """
+    合并情绪与客户价值提示。
+    """
+    parts: list[str] = []
+    emotion = _normalize_text(input_data.emotion_note)
+    if emotion:
+        parts.append(emotion)
+    customer_value = input_data.strategy_output.customer_value
+    if customer_value and customer_value.tone_suggestion:
+        parts.append(str(customer_value.tone_suggestion).strip())
+    if not parts:
+        return "自然、真诚、像店主本人；短句优先"
+    return "；".join(parts) + "；短句优先"
+
+
+def _build_facts_boundary(input_data: ScriptInput) -> dict[str, Any]:
+    """
+    提取关键事实字段作为边界约束。
     """
     facts = input_data.facts
-    parts = []
-
-    if facts.goods_received is True:
-        parts.append("买家反馈已收货")
-    elif facts.goods_received is False:
-        parts.append("买家反馈未收货")
-
+    boundary: dict[str, Any] = {}
+    if facts.goods_received is not None:
+        boundary["goods_received"] = facts.goods_received
     if facts.defect_type:
-        location = _normalize_text(facts.defect_location, fallback="商品局部")
-        parts.append(f"争议点集中在{location}的“{facts.defect_type}”")
-
-    if facts.logistics_normal is True:
-        parts.append("物流状态正常")
-    elif facts.logistics_normal is False:
-        parts.append("物流存在异常记录")
-
+        boundary["defect_type"] = facts.defect_type
+    if facts.defect_location:
+        boundary["defect_location"] = facts.defect_location
+    if facts.logistics_normal is not None:
+        boundary["logistics_normal"] = facts.logistics_normal
+    if facts.evidence_quality:
+        boundary["evidence_quality"] = facts.evidence_quality
     if facts.red_flags:
-        parts.append("目前还有待核实的细节")
-
-    if not parts:
-        return "目前证据还不完整，我们正在继续核对"
-    return "，".join(parts)
+        boundary["red_flags"] = list(facts.red_flags)
+    return boundary
 
 
-# ---------- 模板渲染：占位符替换、推荐版本映射、usage_tip ----------
-def _fill_template(template: str, variables: Dict[str, str]) -> str:
-    """
-    将模板中的 `{{键名}}` 占位符替换为 variables 中对应值。
-
-    参数:
-        template: 来自 get_script_template 的模板字符串。
-        variables: 键为占位符名、值为已格式化的替换串。
-
-    返回:
-        去掉首尾空白后的成稿字符串。
-    """
-    result = template
-    for key, value in variables.items():
-        result = result.replace(f"{{{{{key}}}}}", value)
-    return result.strip()
-
-
-def _disposition_to_recommended_version(disposition: str) -> str:
-    """
-    将 Agent2 输出的处置方向映射为 ScriptOutput.recommended_version。
-
-    参数:
-        disposition: defend / negotiate / compensate。
-
-    返回:
-        defense_version / negotiate_version / compensate_version 三者之一；
-        未知方向时默认 negotiate_version。
-    """
-    normalized = (disposition or "").strip().lower()
-    mapping = {
-        DISPOSITION_DEFEND: SCRIPT_DEFENSE,
-        DISPOSITION_NEGOTIATE: SCRIPT_NEGOTIATE,
-        DISPOSITION_COMPENSATE: SCRIPT_COMPENSATE,
-    }
-    return mapping.get(normalized, SCRIPT_NEGOTIATE)
-
-
-def _build_usage_tip(input_data: ScriptInput, recommended_version: str) -> str:
-    """
-    根据主策略与 Agent2 reasoning 生成简短使用建议（中文）。
-
-    参数:
-        input_data: 含 strategy_output.reasoning。
-        recommended_version: SCRIPT_DEFENSE / SCRIPT_NEGOTIATE / SCRIPT_COMPENSATE。
-
-    返回:
-        单行中文提示，说明优先发送哪一版及截取后的理由摘要。
-    """
-    strategy_output = input_data.strategy_output
-    base_reason = _normalize_text(strategy_output.reasoning, fallback="综合事实和规则后建议先稳妥沟通")
-    short_reason = base_reason[:60]
-
-    if recommended_version == SCRIPT_DEFENSE:
-        return f"建议先用抗辩版，重点是补齐证据链后再提交平台；理由：{short_reason}"
-    if recommended_version == SCRIPT_COMPENSATE:
-        return f"建议优先用善后版：主动把问题收尾得漂亮，稳住体验与口碑；理由：{short_reason}"
-    return f"建议先用协商版，先把分歧控制在可谈区间；理由：{short_reason}"
-
-
-# ---------- 风格感知：根据情绪备注与事实完整度决定长度与语气 ----------
-def _derive_tone_profile(input_data: ScriptInput) -> Dict[str, str]:
-    """
-    生成话术风格画像，指导 LLM 长短与语气。
-    """
-    emotion_note = _normalize_text(input_data.emotion_note, fallback="").lower()
-    short_keywords = ["急", "尽快", "马上", "催", "快点", "快处理"]
-    angry_keywords = ["生气", "投诉", "不满", "气愤", "差评"]
-    missing_evidence = bool(input_data.facts.missing_evidence)
-
-    length_style = "normal"
-    if any(word in emotion_note for word in short_keywords):
-        length_style = "short"
-    elif missing_evidence:
-        length_style = "medium"
-
-    tone_style = "professional"
-    if any(word in emotion_note for word in angry_keywords):
-        tone_style = "calm"
-    elif input_data.strategy_output.disposition == DISPOSITION_COMPENSATE:
-        tone_style = "empathetic"
-
-    return {
-        "length_style": length_style,
-        "tone_style": tone_style,
-        "must_request_evidence": "yes" if missing_evidence else "no",
-    }
-
-
-def _compress_short_sentence(text: str, limit: int = 40) -> str:
-    """
-    在短句模式下裁剪话术长度，避免大段文本。
-    """
-    normalized = _normalize_text(text, fallback="")
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1] + "…"
-
-
-def _sanitize_script_text(text: str) -> str:
-    """
-    去除典型 AI 腔连接词，保持口语客服风格。
-    """
-    cleaned = _normalize_text(text, fallback="")
-    replacements = {
-        "尊敬的": "",
-        "为了更好地为您服务": "",
-        "首先": "先",
-        "其次": "然后",
-        "最后": "后续",
-    }
-    for old, new in replacements.items():
-        cleaned = cleaned.replace(old, new)
-    return cleaned.strip()
-
-
-def _parse_llm_script_json(raw_text: str) -> Dict[str, str] | None:
-    """
-    解析 LLM 输出的 JSON 三版话术。
-    """
-    normalized = raw_text.strip()
-    if normalized.startswith("```"):
-        normalized = normalized.replace("```json", "").replace("```", "").strip()
-    try:
-        payload = json.loads(normalized)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    required_keys = {"defense_version", "negotiate_version", "compensate_version"}
-    if not required_keys.issubset(payload.keys()):
-        return None
-    result: Dict[str, str] = {}
-    for key in required_keys:
-        value = payload.get(key)
-        if not isinstance(value, str) or not value.strip():
-            return None
-        result[key] = value.strip()
-    return result
-
-
-def _llm_generate_scripts(
+# ---------- 话术生成 payload ----------
+def _build_script_payload(
     input_data: ScriptInput,
-    variables: Dict[str, str],
-    tone_profile: Dict[str, str],
-    fast_path: bool = False,
-) -> Dict[str, str] | None:
+    *,
+    response_mode: str,
+    compensation_policy: str,
+    dialogue_context: DialogueContext,
+) -> dict[str, Any]:
     """
-    通过 LLM 生成三版真人客服话术。
-
-    fast_path=True 时优先小模型，若输出结构不合规则自动回退主模型补调一次。
+    组装传入 generate_buyer_script 的 payload。
     """
-    payload = {
-        "disposition": input_data.strategy_output.disposition,
-        "reasoning": input_data.strategy_output.reasoning,
-        "fact_summary": variables["fact_summary"],
-        "order_id": variables["order_id"],
-        "order_amount": variables["order_amount"],
-        "tone_profile": tone_profile,
-    }
-    model_env_key = "AGENT3_LLM_MODEL_FAST" if fast_path else "AGENT3_LLM_MODEL"
-    fallback_key = "AGENT3_LLM_MODEL" if fast_path else None
-    llm_text = chat_completion(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是资深电商客服。请输出JSON，包含 defense_version/negotiate_version/compensate_version 三个字段。"
-                    "要求自然口语、像真人客服，避免模板腔和AI味。"
-                    "若 tone_profile.length_style=short，每条尽量控制在40字内。"
-                    "若 must_request_evidence=yes，话术要先提出补证请求。"
-                ),
-            },
-            {"role": "user", "content": f"请生成三版话术：\n{json.dumps(payload, ensure_ascii=False)}"},
-        ],
-        model_env_key=model_env_key,
-        fallback_model_env_key=fallback_key,
-        temperature=0.5,
-    )
-    parsed = _parse_llm_script_json(llm_text) if llm_text else None
-    if parsed:
-        return parsed
-
-    # 小模型路径未产出合规 JSON 时，回退主模型补调一次，保证三版话术可用性。
-    if fast_path and os.getenv("AGENT3_LLM_MODEL", "").strip():
-        retry_text = chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是资深电商客服。请输出JSON，包含 defense_version/negotiate_version/compensate_version 三个字段。"
-                        "要求自然口语、像真人客服，避免模板腔和AI味。"
-                        "若 tone_profile.length_style=short，每条尽量控制在40字内。"
-                        "若 must_request_evidence=yes，话术要先提出补证请求。"
-                    ),
-                },
-                {"role": "user", "content": f"请生成三版话术：\n{json.dumps(payload, ensure_ascii=False)}"},
-            ],
-            model_env_key="AGENT3_LLM_MODEL",
-            temperature=0.5,
-        )
-        return _parse_llm_script_json(retry_text) if retry_text else None
-    return None
-
-
-# ---------- 主入口：拉三策略模板并组装 ScriptOutput ----------
-def generate(input_data: ScriptInput, fast_path: bool = False) -> ScriptOutput:
-    """
-    拉取三策略模板、填入变量，生成抗辩/协商/善后三版话术及推荐标识。
-
-    纯函数：内部通过 get_script_template 读文件，不在本函数内直接 open 网络；
-    模板读取副作用封装在工具层。
-
-    参数:
-        input_data: 含 strategy_output、facts、order_id、order_amount、可选 emotion_note。
-        fast_path: 是否启用轻量模型优先路径（失败会自动回退主模型）。
-
-    返回:
-        ScriptOutput，三版话术字段均非空字符串。
-    """
-    fact_summary = _build_fact_summary(input_data=input_data)
-    order_id = _normalize_text(input_data.order_id, fallback="未知订单")
-    offer_amount = _format_money(input_data.order_amount)
-
-    variables = {
-        "order_id": order_id,
+    strategy = input_data.strategy_output
+    customer_value = strategy.customer_value
+    payload: dict[str, Any] = {
+        "response_mode": response_mode,
+        "strategy_stage": strategy.strategy_stage,
+        "compensation_policy": compensation_policy,
+        "disposition": strategy.disposition,
+        "dialogue_context": dialogue_context.model_dump(),
+        "recent_turns": _normalize_chat_turns(input_data.chat_history),
+        "issue_summary": _normalize_text(
+            input_data.facts.issue_summary,
+            fallback="买家反馈了售后问题，细节仍在核对",
+        ),
+        "facts_boundary": _build_facts_boundary(input_data),
+        "order_id": _normalize_text(input_data.order_id, fallback="本单"),
         "order_amount": _format_money(input_data.order_amount),
-        "offer_amount": offer_amount,
-        "fact_summary": fact_summary,
-        "emotion_note": _normalize_text(input_data.emotion_note, fallback=""),
+        "tone_hint": _build_tone_hint(input_data),
+        "strategy_direction_summary": _normalize_text(strategy.strategy_direction_summary),
     }
-    tone_profile = _derive_tone_profile(input_data=input_data)
+    if customer_value:
+        payload["customer_value_channel"] = customer_value.channel
+        if customer_value.compensation_uplift:
+            payload["compensation_uplift"] = customer_value.compensation_uplift
+    if strategy.malicious_detection and strategy.malicious_detection.risk_level:
+        payload["malicious_risk_level"] = strategy.malicious_detection.risk_level
+    return payload
 
-    defense_template = get_script_template(DISPOSITION_DEFEND)
-    negotiate_template = get_script_template(DISPOSITION_NEGOTIATE)
-    compensate_template = get_script_template(DISPOSITION_COMPENSATE)
 
-    defense_version = _fill_template(defense_template, variables)
-    negotiate_version = _fill_template(negotiate_template, variables)
-    compensate_version = _fill_template(compensate_template, variables)
+# ---------- 使用提示 ----------
+def _build_usage_tip(*, response_mode: str, strategy_stage: str) -> str:
+    """
+    根据应对思想与策略阶段生成简短使用说明。
+    """
+    stage = (strategy_stage or "").strip().lower()
+    if stage == STRATEGY_STAGE_EVIDENCE_FIRST:
+        return "当前处于举证阶段：话术由 dialogue_context 约束，勿提前承诺补偿。"
+    if response_mode == RESPONSE_MODE_MERCHANT_FAULT:
+        return "商责已基本明确：此话术主动担责并给出处理方向，可直接发送。"
+    if response_mode == RESPONSE_MODE_MALICIOUS_RISK:
+        return "建议保留对话记录：此话术侧重规则与举证，不轻易让步。"
+    return "协商推进：此话术留有余地，可根据买家回复再微调方案。"
 
-    llm_scripts = _llm_generate_scripts(
-        input_data=input_data,
-        variables=variables,
-        tone_profile=tone_profile,
-        fast_path=fast_path,
+
+# ---------- 主入口 ----------
+def generate(input_data: ScriptInput) -> ScriptOutput:
+    """
+    在 Agent2 dialogue_context 约束下生成单条买家话术；LLM 失败走 fallback_script。
+    """
+    strategy_stage = input_data.strategy_output.strategy_stage
+    response_mode = _derive_response_mode(input_data)
+    compensation_policy = _derive_compensation_policy(strategy_stage)
+    dialogue_context = _resolve_dialogue_context(input_data)
+
+    logger.info(
+        "%s 话术生成 dialogue_mode=%s blocked=%s actionable=%s",
+        AGENT3_LOG_PREFIX,
+        dialogue_context.dialogue_mode,
+        dialogue_context.blocked_evidence_requests,
+        dialogue_context.actionable_evidence_requests,
     )
-    if llm_scripts:
-        defense_version = llm_scripts["defense_version"]
-        negotiate_version = llm_scripts["negotiate_version"]
-        compensate_version = llm_scripts["compensate_version"]
 
-    defense_version = _sanitize_script_text(defense_version)
-    negotiate_version = _sanitize_script_text(negotiate_version)
-    compensate_version = _sanitize_script_text(compensate_version)
-    if tone_profile["length_style"] == "short":
-        defense_version = _compress_short_sentence(defense_version)
-        negotiate_version = _compress_short_sentence(negotiate_version)
-        compensate_version = _compress_short_sentence(compensate_version)
+    script_payload = _build_script_payload(
+        input_data,
+        response_mode=response_mode,
+        compensation_policy=compensation_policy,
+        dialogue_context=dialogue_context,
+    )
+    script = generate_buyer_script(script_payload)
+    if not script:
+        logger.warning("%s 话术 LLM 不可用，使用 fallback_script", AGENT3_LOG_PREFIX)
+        script = str(dialogue_context.fallback_script or "").strip()
+    if not script:
+        script = "我这边还在跟进，核实清楚后马上回复您。"
 
-    recommended_version = _disposition_to_recommended_version(input_data.strategy_output.disposition)
-    usage_tip = _build_usage_tip(input_data=input_data, recommended_version=recommended_version)
-
+    usage_tip = _build_usage_tip(response_mode=response_mode, strategy_stage=strategy_stage)
     return ScriptOutput(
-        defense_version=defense_version,
-        negotiate_version=negotiate_version,
-        compensate_version=compensate_version,
-        recommended_version=recommended_version,
+        script=script.strip(),
+        response_mode=response_mode,
         usage_tip=usage_tip,
     )

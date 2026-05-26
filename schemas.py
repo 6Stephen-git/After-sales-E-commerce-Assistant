@@ -25,10 +25,27 @@ EVIDENCE_MEDIUM = "medium"
 EVIDENCE_LOW = "low"
 VALID_EVIDENCE_QUALITY = [EVIDENCE_HIGH, EVIDENCE_MEDIUM, EVIDENCE_LOW]
 
-# 话术版本标识
-SCRIPT_DEFENSE = "defense_version"
-SCRIPT_NEGOTIATE = "negotiate_version"
-SCRIPT_COMPENSATE = "compensate_version"
+# 话术应对思想（Agent 3 输出）
+RESPONSE_MODE_MERCHANT_FAULT = "merchant_fault"
+RESPONSE_MODE_MALICIOUS_RISK = "malicious_risk"
+RESPONSE_MODE_NEUTRAL_NEGOTIATE = "neutral_negotiate"
+VALID_RESPONSE_MODES = [
+    RESPONSE_MODE_MERCHANT_FAULT,
+    RESPONSE_MODE_MALICIOUS_RISK,
+    RESPONSE_MODE_NEUTRAL_NEGOTIATE,
+]
+
+# 策略阶段（Agent 2 输出，Agent 3 用于补偿门禁）
+STRATEGY_STAGE_EVIDENCE_FIRST = "evidence_first"
+STRATEGY_STAGE_NEGOTIATE_SETTLE = "negotiate_settle"
+STRATEGY_STAGE_COMPENSATE_CLOSE = "compensate_close"
+STRATEGY_STAGE_DEFEND_PLATFORM = "defend_platform"
+VALID_STRATEGY_STAGES = [
+    STRATEGY_STAGE_EVIDENCE_FIRST,
+    STRATEGY_STAGE_NEGOTIATE_SETTLE,
+    STRATEGY_STAGE_COMPENSATE_CLOSE,
+    STRATEGY_STAGE_DEFEND_PLATFORM,
+]
 
 
 # ============================================================
@@ -159,6 +176,26 @@ class SimilarCase(BaseModel):
     lesson: str = Field(..., description="提炼的经验")
 
 
+class ChatTurn(BaseModel):
+    """单条聊天轮次 — 供策略/话术续写"""
+    role: str = Field(..., description="buyer 或 merchant")
+    content: str = Field(default="", description="消息正文")
+
+
+class DialogueContext(BaseModel):
+    """对话语境 — 由 Agent2 策略 LLM 输出，供 Agent3 话术续写"""
+    dialogue_mode: str = Field(default="cold_start", description="continue 或 cold_start")
+    blocked_evidence_requests: List[str] = Field(
+        default_factory=list,
+        description="买家已明确无法/不愿提供的举证，后续禁止再提",
+    )
+    actionable_evidence_requests: List[str] = Field(
+        default_factory=list,
+        description="仍可向买家请求的替代举证方向",
+    )
+    fallback_script: str = Field(default="", description="话术 LLM 失败时的备用话术")
+
+
 class StrategyInput(BaseModel):
     """Agent 2 输入"""
     facts: FactOutput = Field(..., description="Agent 1 的输出")
@@ -168,7 +205,16 @@ class StrategyInput(BaseModel):
     similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例")
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
     chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表（用于语义分析）")
+    chat_turns: List[ChatTurn] = Field(default_factory=list, description="带角色的近期对话")
     emotion_note: Optional[str] = Field(default=None, description="Agent 4 情绪摘要（可选）")
+    precomputed_customer_value: Optional["CustomerValueOutput"] = Field(
+        default=None,
+        description="Controller 预计算的客户价值结果（可选，传入则跳过 Agent2 内重复调用）",
+    )
+    precomputed_malicious_detection: Optional["MaliciousDetectionOutput"] = Field(
+        default=None,
+        description="Controller 预计算的恶意检测结果（可选，传入则跳过 Agent2 内重复调用）",
+    )
 
 
 class CustomerValueInput(BaseModel):
@@ -269,8 +315,16 @@ class StrategyOutput(BaseModel):
     reasoning: str = Field(default="", description="完整策略说明（含客户意图/风险点/建议动作/推理理由四段，供流式与话术引用）")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="策略置信度")
+    strategy_stage: str = Field(
+        default=STRATEGY_STAGE_NEGOTIATE_SETTLE,
+        description=f"策略阶段：{'/'.join(VALID_STRATEGY_STAGES)}",
+    )
     customer_value: Optional[CustomerValueOutput] = Field(default=None, description="客户价值评估结果")
     malicious_detection: Optional[MaliciousDetectionOutput] = Field(default=None, description="恶意行为检测结果")
+    dialogue_context: Optional[DialogueContext] = Field(
+        default=None,
+        description="对话语境（blocked/actionable 举证与 fallback 话术，供 Agent3 消费）",
+    )
 
 
 # ============================================================
@@ -284,13 +338,15 @@ class ScriptInput(BaseModel):
     order_id: str = Field(..., description="订单号")
     order_amount: float = Field(default=0.0, description="订单金额")
     emotion_note: Optional[str] = Field(default=None, description="来自 Agent 4 的细腻情绪描述，用于优化话术语气")
+    chat_history: List[ChatTurn] = Field(default_factory=list, description="近期对话轮次，供话术嵌入当下语境")
 
 class ScriptOutput(BaseModel):
-    """Agent 3 输出：多版本话术"""
-    defense_version: str = Field(default="", description="抗辩版话术")
-    negotiate_version: str = Field(default="", description="协商版话术")
-    compensate_version: str = Field(default="", description="善后版话术（主动体面收尾）")
-    recommended_version: str = Field(default="", description="推荐版本标识")
+    """Agent 3 输出：单一推荐话术"""
+    script: str = Field(default="", description="面向买家的推荐话术正文")
+    response_mode: str = Field(
+        default=RESPONSE_MODE_NEUTRAL_NEGOTIATE,
+        description=f"应对思想：{'/'.join(VALID_RESPONSE_MODES)}",
+    )
     usage_tip: Optional[str] = Field(default=None, description="话术使用提示")
 
 

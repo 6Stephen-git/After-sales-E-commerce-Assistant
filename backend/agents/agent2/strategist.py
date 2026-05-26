@@ -6,15 +6,16 @@ Agent 2：策略参谋员。
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, List
+from typing import Any, Callable, List
 import json
 import logging
-import os
 import re
 
 from schemas import (
+    DialogueContext,
     MaliciousDetectionInput,
+    MaliciousDetectionOutput,
+    CustomerValueOutput,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
@@ -47,21 +48,15 @@ def _polish_merchant_facing_text(text: str) -> str:
 
 
 def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
-    """从 rule_briefs（品类优先）提取面向商家的规则要点列表。"""
+    """从 matched_rules（前端代表条）提取与本案相关的规则要点，最多 3 条。"""
     lines: List[str] = []
     seen: set[str] = set()
-    for brief in input_data.rule_briefs or []:
-        text = _polish_merchant_facing_text(str(getattr(brief, "brief", "") or ""))
+    for rule in input_data.matched_rules or []:
+        text = _polish_merchant_facing_text(str(getattr(rule, "rule_summary", "") or ""))
         if text and text not in seen:
             seen.add(text)
             lines.append(text)
-    if not lines:
-        for rule in input_data.matched_rules or []:
-            text = _polish_merchant_facing_text(str(getattr(rule, "rule_summary", "") or ""))
-            if text and text not in seen:
-                seen.add(text)
-                lines.append(text)
-    return lines[:5]
+    return lines[:3]
 
 
 def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
@@ -98,6 +93,30 @@ def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int
     if buyer_support > merchant_support:
         return policy_refs, "buyer", hit_count
     return policy_refs, "neutral", hit_count
+
+
+def _malicious_risks_from_result(malicious_result: MaliciousDetectionOutput) -> List[str]:
+    """
+    根据恶意检测结果生成策略层风险提示条目。
+    """
+    layer_risks: List[str] = []
+    if malicious_result.risk_level == "high":
+        layer_risks.append("[恶意层] 高风险恶意：优先抗辩并准备平台介入，先固定证据链后再沟通")
+    elif malicious_result.risk_level == "medium":
+        layer_risks.append("[恶意层] 中风险恶意：谨慎协商；若证据质量 low，则先走抗辩补证路径")
+    return layer_risks
+
+
+def _value_risks_from_result(customer_value: CustomerValueOutput) -> List[str]:
+    """
+    根据客户价值通道生成策略层风险提示条目。
+    """
+    layer_risks: List[str] = []
+    if customer_value.channel == "long_term":
+        layer_risks.append("[客户价值层] 触发长期优待通道，优先协商维护关系")
+    elif customer_value.channel == "order":
+        layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
+    return layer_risks
 
 
 def _apply_malicious_layer(input_data: StrategyInput) -> tuple:
@@ -569,38 +588,111 @@ def _build_fallback_reasoning(
     )
 
 
-def _build_strategy_reasoning_system_prompt() -> str:
+def _build_strategy_json_system_prompt() -> str:
     """
-    构造策略说明 LLM 的 system 提示，统一注入商户利益最大化与分阶段决策约束。
+    构造策略 JSON LLM 的 system 提示，统一注入商户利益最大化与分阶段决策约束。
     """
     return (
         "你是资深电商客服策略参谋。"
         f"{_MERCHANT_INTEREST_GOAL}"
-        "输出四段中文，每段分别以“客户意图：”“风险点：”“建议动作：”“推理理由：”开头。"
-        "建议动作：只写「当前这一步」的单一路径（1～2句）。"
-        "若 strategy_stage=evidence_first：只能要求补证、固定己方证据、说明规则依据，禁止先给退款/部分退款/换新/优惠券等终局方案。"
-        "若 strategy_stage=negotiate_settle：可给一条协商口径，须注明以证据与规则为前提。"
-        "禁止罗列多套备选、禁止“例如/或者/可同时”式展开。"
-        "推理理由：2～4句，用商家能直接看懂的口语向店长解释「为什么建议这一步」；"
-        "可说「买家这边」「您这边」「平台一般会」；禁止写第几条、第几章、条号、法规腔和 AI 套话；"
-        "可概括平台规则倾向，但不要逐条引用条文编号。"
+        "请输出单个 JSON 对象，字段如下：\n"
+        "{\n"
+        '  "customer_intent_analysis": "面向商家的客户意图分析",\n'
+        '  "strategy_direction_summary": "当前这一步的单一路径动作（1～2句）",\n'
+        '  "strategy_direction_rationale": "2～4句推理理由，口语化",\n'
+        '  "platform_rule_basis": ["规则要点1", "规则要点2"],\n'
+        '  "risk_factors": ["风险点1"],\n'
+        '  "dialogue_context": {\n'
+        '    "dialogue_mode": "continue|cold_start",\n'
+        '    "blocked_evidence_requests": ["买家已拒举证项"],\n'
+        '    "actionable_evidence_requests": ["仍可请求的替代举证"],\n'
+        '    "fallback_script": "话术 LLM 失败时的 1~3 句备用话术"\n'
+        "  }\n"
+        "}\n"
+        "若 strategy_stage=evidence_first：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
+        "若 dialogue_context.blocked_evidence_requests 非空：不得再要求其中任何一项。"
+        "若 recent_turns 非空：须承接对话，禁止重复商家已提且买家已拒的举证要求。"
+        "禁止罗列多套备选方案；platform_rule_basis 禁止条号/章节编号。"
+        "dialogue_context.fallback_script 须遵守 compensation_policy 与 strategy_stage，嵌入对话语境。"
     )
 
 
-def _llm_generate_reasoning(
+def _parse_strategy_json(raw_text: str) -> dict[str, Any] | None:
+    """
+    解析策略 LLM 输出的 JSON 对象。
+    """
+    normalized = (raw_text or "").strip()
+    if normalized.startswith("```"):
+        normalized = normalized.replace("```json", "").replace("```", "").strip()
+    try:
+        payload = json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_dialogue_context(raw: Any, input_data: StrategyInput) -> DialogueContext:
+    """
+    校验并规范化 dialogue_context；缺字段时用事实字段兜底。
+    """
+    data = raw if isinstance(raw, dict) else {}
+    mode = str(data.get("dialogue_mode") or "").strip()
+    if mode not in {"continue", "cold_start"}:
+        mode = "continue" if (input_data.chat_turns or []) else "cold_start"
+
+    def _as_list(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    blocked = _as_list(data.get("blocked_evidence_requests"))
+    actionable = _as_list(data.get("actionable_evidence_requests"))
+    if not actionable:
+        actionable = list(input_data.facts.missing_evidence or [])
+
+    fallback = str(data.get("fallback_script") or "").strip()
+    if not fallback:
+        turns = input_data.chat_turns or []
+        fallback = "我这边还在核对材料，核实完马上回您。" if turns else "您好，我这边还在核对材料，核实完马上回您。"
+
+    return DialogueContext(
+        dialogue_mode=mode,
+        blocked_evidence_requests=blocked,
+        actionable_evidence_requests=actionable,
+        fallback_script=fallback,
+    )
+
+
+def _compose_reasoning_from_fields(
+    *,
+    customer_intent_analysis: str,
+    risk_factors: List[str],
+    strategy_direction_summary: str,
+    strategy_direction_rationale: str,
+) -> str:
+    """
+    将 JSON 字段拼接为 reasoning 文本，供流式展示与日志兼容。
+    """
+    risk_text = "；".join(risk_factors[:3]) if risk_factors else "当前未识别到高风险项"
+    return (
+        f"客户意图：{customer_intent_analysis}。\n"
+        f"风险点：{risk_text}。\n"
+        f"建议动作：{strategy_direction_summary}\n"
+        f"推理理由：{strategy_direction_rationale}"
+    )
+
+
+def _llm_generate_strategy(
     *,
     disposition: str,
     input_data: StrategyInput,
     risk_factors: List[str],
     estimated_win_rate: float | None,
     strategy_stage: str,
-    fast_path: bool = False,
     reasoning_delta_callback: Callable[[str], None] | None = None,
-) -> str | None:
+) -> dict[str, Any] | None:
     """
-    用 LLM 生成更自然的策略说明，强调合规前提下商户利益最大化。
-
-    fast_path=True 时优先小模型，若格式不符合约定则自动回退主模型补调一次。
+    用 Pro 模型一次输出结构化策略 JSON（含 dialogue_context）。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
     briefs_for_fault = input_data.rule_briefs or []
@@ -608,9 +700,11 @@ def _llm_generate_reasoning(
         getattr(b, "stance_hint", "") == "buyer" or "支持买家" in b.brief
         for b in briefs_for_fault
     ) and evidence_quality == "high"
+    compensation_policy = "forbid" if (input_data.facts.missing_evidence or []) else "negotiate_soft"
     prompt_payload = {
         "disposition": disposition,
         "strategy_stage": strategy_stage,
+        "compensation_policy": compensation_policy,
         "evidence_incomplete": _is_evidence_insufficient_for_decision(input_data),
         "merchant_fault_clear": merchant_fault_signal,
         "facts": input_data.facts.model_dump(),
@@ -621,58 +715,26 @@ def _llm_generate_reasoning(
         "risk_factors": risk_factors,
         "order_amount": input_data.order_amount,
         "estimated_win_rate": estimated_win_rate,
+        "recent_turns": [t.model_dump() for t in (input_data.chat_turns or [])],
     }
-    model_env_key = "AGENT2_LLM_MODEL_FAST" if fast_path else "AGENT2_LLM_MODEL"
-    fallback_key = "AGENT2_LLM_MODEL" if fast_path else None
     llm_text = chat_completion(
         messages=[
-            {"role": "system", "content": _build_strategy_reasoning_system_prompt()},
-            {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
+            {"role": "system", "content": _build_strategy_json_system_prompt()},
+            {"role": "user", "content": f"请基于以下输入生成策略 JSON：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
         ],
-        model_env_key=model_env_key,
-        fallback_model_env_key=fallback_key,
+        model_env_key="AGENT2_LLM_MODEL_STRATEGY",
+        fallback_model_env_key="AGENT2_LLM_MODEL",
         temperature=0.3,
         stream_delta_callback=reasoning_delta_callback,
     )
     if not llm_text:
         return None
-    normalized = llm_text.strip()
-    if (
-        "客户意图：" in normalized
-        and "风险点：" in normalized
-        and "建议动作：" in normalized
-        and "推理理由：" in normalized
-    ):
-        return normalized
-
-    # 小模型路径不满足格式时，回退主模型补调一次，优先保证结果质量与可读性。
-    if fast_path and os.getenv("AGENT2_LLM_MODEL", "").strip():
-        retry_text = chat_completion(
-            messages=[
-                {"role": "system", "content": _build_strategy_reasoning_system_prompt()},
-                {"role": "user", "content": f"请基于以下输入生成策略说明：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
-            ],
-            model_env_key="AGENT2_LLM_MODEL",
-            temperature=0.3,
-            stream_delta_callback=reasoning_delta_callback,
-        )
-        if not retry_text:
-            return None
-        retry_normalized = retry_text.strip()
-        if (
-            "客户意图：" in retry_normalized
-            and "风险点：" in retry_normalized
-            and "建议动作：" in retry_normalized
-            and "推理理由：" in retry_normalized
-        ):
-            return retry_normalized
-    return None
+    return _parse_strategy_json(llm_text)
 
 
 # ---------- 主入口：汇总得分并生成 StrategyOutput ----------
 def recommend(
     input_data: StrategyInput,
-    fast_path: bool = False,
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> StrategyOutput:
     """
@@ -683,24 +745,30 @@ def recommend(
 
     参数:
         input_data: 含 facts、buyer_profile、matched_rules、similar_cases、order_amount。
-        fast_path: 是否启用轻量模型优先路径（失败会自动回退主模型）。
-        reasoning_delta_callback: 推理文本流式回调（用于前端增量展示）。
+        reasoning_delta_callback: 策略 JSON 流式回调（用于前端增量展示）。
 
     返回:
         StrategyOutput，含 disposition、estimated_win_rate、customer_intent_analysis、
-        reasoning、risk_factors 等。
+        reasoning、risk_factors、dialogue_context 等。
     """
     risk_factors: List[str] = []
 
     # 第一层：规则层（纯计算，无外部依赖）
     policy_refs, rule_stance, rule_count = _analyze_rule_stance(input_data)
 
-    # 第二层 + 第三层：恶意检测与客户价值评估并发执行
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_malicious = executor.submit(_apply_malicious_layer, input_data)
-        future_value = executor.submit(_apply_customer_value_layer, input_data)
-        malicious_result, malicious_risks = future_malicious.result()
-        customer_value, value_risks = future_value.result()
+    # 第二层 + 第三层：优先使用 Controller 预计算结果
+    if input_data.precomputed_malicious_detection is not None:
+        malicious_result = input_data.precomputed_malicious_detection
+        malicious_risks = _malicious_risks_from_result(malicious_result)
+    else:
+        malicious_result, malicious_risks = _apply_malicious_layer(input_data)
+
+    if input_data.precomputed_customer_value is not None:
+        customer_value = input_data.precomputed_customer_value
+        value_risks = _value_risks_from_result(customer_value)
+    else:
+        customer_value, value_risks = _apply_customer_value_layer(input_data)
+
     risk_factors.extend(malicious_risks)
     risk_factors.extend(value_risks)
 
@@ -738,44 +806,75 @@ def recommend(
         rule_count=rule_count,
     )
 
-    reasoning = _llm_generate_reasoning(
+    strategy_json = _llm_generate_strategy(
         disposition=disposition,
         input_data=input_data,
         risk_factors=risk_factors,
         estimated_win_rate=estimated_win_rate,
         strategy_stage=strategy_stage,
-        fast_path=fast_path,
         reasoning_delta_callback=reasoning_delta_callback,
     )
-    if not reasoning:
+
+    if strategy_json:
+        customer_intent_analysis = _polish_merchant_facing_text(
+            str(strategy_json.get("customer_intent_analysis") or "").strip()
+        ) or _compose_customer_intent_analysis(input_data)
+        strategy_direction_summary = _polish_merchant_facing_text(
+            str(strategy_json.get("strategy_direction_summary") or "").strip()
+        ) or _compose_strategy_direction_summary(disposition=disposition, input_data=input_data)
+        strategy_direction_rationale = _polish_merchant_facing_text(
+            str(strategy_json.get("strategy_direction_rationale") or "").strip()
+        ) or _compose_strategy_direction_rationale(
+            disposition=disposition,
+            input_data=input_data,
+            risk_factors=risk_factors,
+            estimated_win_rate=estimated_win_rate,
+        )
+        llm_risks = strategy_json.get("risk_factors")
+        if isinstance(llm_risks, list):
+            for item in llm_risks:
+                text = str(item or "").strip()
+                if text:
+                    risk_factors.append(text)
+        basis_raw = strategy_json.get("platform_rule_basis")
+        platform_rule_basis: List[str] = []
+        if isinstance(basis_raw, list):
+            for item in basis_raw:
+                text = _polish_merchant_facing_text(str(item or "").strip())
+                if text:
+                    platform_rule_basis.append(text)
+        if not platform_rule_basis:
+            platform_rule_basis = _build_platform_rule_basis(input_data)
+        dialogue_context = _normalize_dialogue_context(strategy_json.get("dialogue_context"), input_data)
+        reasoning = _compose_reasoning_from_fields(
+            customer_intent_analysis=customer_intent_analysis,
+            risk_factors=list(dict.fromkeys(risk_factors)),
+            strategy_direction_summary=strategy_direction_summary,
+            strategy_direction_rationale=strategy_direction_rationale,
+        )
+    else:
         reasoning = _build_fallback_reasoning(
             disposition=disposition,
             input_data=input_data,
             risk_factors=risk_factors,
             estimated_win_rate=estimated_win_rate,
         )
+        customer_intent_analysis = _compose_customer_intent_analysis(input_data)
+        strategy_direction_summary = _compose_strategy_direction_summary(
+            disposition=disposition,
+            input_data=input_data,
+        )
+        strategy_direction_rationale = _compose_strategy_direction_rationale(
+            disposition=disposition,
+            input_data=input_data,
+            risk_factors=risk_factors,
+            estimated_win_rate=estimated_win_rate,
+        )
+        platform_rule_basis = _build_platform_rule_basis(input_data)
+        dialogue_context = _normalize_dialogue_context({}, input_data)
 
     policy_ref = ",".join(policy_refs[:3]) if policy_refs else None
     dedup_risks = list(dict.fromkeys(risk_factors))
-
-    intent_extracted = _extract_customer_intent_from_reasoning(reasoning)
-    customer_intent_analysis = intent_extracted or _compose_customer_intent_analysis(input_data)
-
-    direction_extracted = _extract_strategy_direction_from_reasoning(reasoning)
-    strategy_direction_summary = direction_extracted or _compose_strategy_direction_summary(
-        disposition=disposition,
-        input_data=input_data,
-    )
-    rationale_extracted = _extract_strategy_rationale_from_reasoning(reasoning)
-    strategy_direction_rationale = _polish_merchant_facing_text(
-        rationale_extracted
-        or _compose_strategy_direction_rationale(
-            disposition=disposition,
-            input_data=input_data,
-            risk_factors=dedup_risks,
-            estimated_win_rate=estimated_win_rate,
-        )
-    )
 
     return StrategyOutput(
         disposition=disposition,
@@ -784,10 +883,12 @@ def recommend(
         customer_intent_analysis=customer_intent_analysis,
         strategy_direction_summary=strategy_direction_summary,
         strategy_direction_rationale=strategy_direction_rationale,
-        platform_rule_basis=_build_platform_rule_basis(input_data),
+        platform_rule_basis=platform_rule_basis,
         reasoning=reasoning,
         risk_factors=dedup_risks,
         confidence=confidence,
+        strategy_stage=strategy_stage,
         customer_value=customer_value,
         malicious_detection=malicious_result,
+        dialogue_context=dialogue_context,
     )

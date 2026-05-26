@@ -11,14 +11,17 @@ from backend.tools.rule_lexicon import (
     CE_CONFIDENCE_THRESHOLD,
     collect_lexicon_search_hints,
     expand_doc_ids_by_lanes,
+    format_category_slug_catalog_lines,
     get_category_doc_id,
     get_doc_by_id,
     infer_category_slug_llm,
     infer_lanes_from_intent,
     is_category_doc,
     list_section_candidates_for_doc,
+    resolve_doc_id_reference,
     resolve_doc_ids_from_materials,
     resolve_hint_section_keys,
+    validate_category_slug,
     validate_section_keys,
 )
 from schemas import RuleMatchPlan, RuleSearchTerms, SectionSelection
@@ -42,6 +45,7 @@ def merge_llm_rule_plan(
     logistics_normal: bool | None,
     text_context: str = "",
     issue_summary: str | None = None,
+    category_slugs: list[str] | None = None,
 ) -> RuleMatchPlan:
     """
     将 LLM 输出的 rule_match_plan 与 materials API 标合并，并执行门控校验。
@@ -49,6 +53,21 @@ def merge_llm_rule_plan(
     plan = _parse_raw_plan(raw_plan)
     buyer_text = _merge_buyer_text(text_context, issue_summary, materials)
     api_doc_ids, api_lanes = resolve_doc_ids_from_materials(materials)
+    normalized_slugs = _normalize_category_slugs(category_slugs, materials, raw_plan)
+
+    if not normalized_slugs and not str(materials.get("product_category_slug", "") or "").strip():
+        inferred_slug, inferred_conf = infer_category_slug_llm(buyer_text, materials)
+        if inferred_slug:
+            normalized_slugs.append(inferred_slug)
+            plan.category_confidence = max(plan.category_confidence, inferred_conf)
+            logger.info(
+                "%s 上游未提供 category_slug，品类 LLM 兜底 slug=%s confidence=%.2f",
+                LOG_PREFIX,
+                inferred_slug,
+                inferred_conf,
+            )
+
+    plan = _sanitize_target_doc_ids(plan)
 
     if api_doc_ids:
         plan.target_doc_ids = list(dict.fromkeys(api_doc_ids + plan.target_doc_ids))
@@ -65,8 +84,8 @@ def merge_llm_rule_plan(
             dict.fromkeys(plan.target_doc_ids + expand_doc_ids_by_lanes(inferred))
         )
 
-    plan = _ensure_category_lane(plan, materials, buyer_text)
-    plan = _apply_ce_confidence_gate(plan, materials, buyer_text)
+    plan = _ensure_category_lane(plan, materials, buyer_text, normalized_slugs)
+    plan = _apply_ce_confidence_gate(plan, materials, buyer_text, normalized_slugs)
     plan = _sanitize_sections(plan)
     plan = _ensure_base_doc(plan)
     plan = _ensure_doc_default_sections(plan, intent_tags)
@@ -102,15 +121,16 @@ def build_rule_navigation_prompt_block(
 ) -> str:
     """生成写入 Agent1 user prompt 的规则导航说明块。"""
     doc_ids, lanes = resolve_doc_ids_from_materials(materials)
-    inferred_slug, _inferred_conf = infer_category_slug_llm(text_context, materials)
-    if inferred_slug:
-        cat_doc = get_category_doc_id(inferred_slug)
+    api_slug = str(materials.get("product_category_slug", "") or "").strip()
+    if api_slug:
+        cat_doc = get_category_doc_id(api_slug)
         if cat_doc and cat_doc not in doc_ids:
             doc_ids.append(cat_doc)
         if "C" not in lanes:
             lanes.append("C")
 
     buyer_text = _merge_buyer_text(text_context, None, materials)
+    slug_catalog = format_category_slug_catalog_lines()
 
     lines = [
         "rule_match_plan 字段要求（与事实同次 JSON 输出）：",
@@ -123,6 +143,10 @@ def build_rule_navigation_prompt_block(
         f"- category_confidence / service_confidence: 无 API 品类/服务标时填推断置信度；"
         f"一旦激活 C 通道或选中品类 doc，后续必检索该品类规范（勿因置信度低自行放弃 C）",
         f"- 服务保障 E 通道：无 API 服务标且 service_confidence 低于 {CE_CONFIDENCE_THRESHOLD} 时可不选 E doc",
+        "- category_slug: 字符串或 null，从下列 slug 枚举中选择最匹配特殊品类（无图场景必填；有图时可与视觉 slug 一致）",
+        "",
+        "可选 slug 列表：",
+        slug_catalog,
         "",
         "候选 doc 与节（仅可从中勾选 section_keys；★=与当前诉求 facet 更相关）：",
     ]
@@ -134,10 +158,10 @@ def build_rule_navigation_prompt_block(
         for sec in list_section_candidates_for_doc(doc_id, buyer_text=buyer_text, intent_tags=intent_tags)[:10]:
             prefix = "★ " if sec.get("facet_match") else "  "
             lines.append(f"{prefix}- {_format_section_prompt_line(sec)}")
-    if inferred_slug:
-        lines.append(f"文本推断品类 slug={inferred_slug}（应激活 C 并勾选对应品类 doc）")
+    if api_slug:
+        lines.append(f"API 品类 slug={api_slug}（应激活 C 并勾选对应品类 doc）")
     elif not doc_ids:
-        lines.append("（暂无 API 品类/服务标；若聊天可判断品类请激活 C 并选对应 doc）")
+        lines.append("（暂无 API 品类/服务标；若聊天可判断品类请填 category_slug 并激活 C）")
     lines.append(f"当前 intent_tags={intent_tags}")
     return "\n".join(lines)
 
@@ -179,6 +203,7 @@ def _apply_ce_confidence_gate(
     plan: RuleMatchPlan,
     materials: dict[str, Any],
     buyer_text: str,
+    category_slugs: list[str],
 ) -> RuleMatchPlan:
     """
     E 通道：推断置信度 < 0.75 时移除专项 doc。
@@ -191,7 +216,7 @@ def _apply_ce_confidence_gate(
     lanes = list(plan.activated_lanes)
     selections = list(plan.section_selections)
 
-    category_locked = _is_category_lane_locked(plan, materials, buyer_text)
+    category_locked = _is_category_lane_locked(plan, materials, category_slugs)
     if not has_api_category and not category_locked and plan.category_confidence < CE_CONFIDENCE_THRESHOLD:
         doc_ids, lanes, selections = _strip_lane_docs(doc_ids, lanes, selections, LANE_C)
 
@@ -207,7 +232,7 @@ def _apply_ce_confidence_gate(
 def _is_category_lane_locked(
     plan: RuleMatchPlan,
     materials: dict[str, Any],
-    buyer_text: str,
+    category_slugs: list[str],
 ) -> bool:
     """判定特殊品类 C 通道是否已触发（触发后不得剔除品类 doc）。"""
     if str(materials.get("product_category_slug", "") or "").strip():
@@ -216,33 +241,88 @@ def _is_category_lane_locked(
         return True
     if any(is_category_doc(doc_id) for doc_id in plan.target_doc_ids):
         return True
-    if infer_category_slug_llm(buyer_text, materials)[0]:
+    if category_slugs:
         return True
     return False
+
+
+def _normalize_category_slugs(
+    category_slugs: list[str] | None,
+    materials: dict[str, Any],
+    raw_plan: dict[str, Any] | None = None,
+) -> list[str]:
+    """合并 API slug、上游 LLM/视觉 slug 与 rule_match_plan 内嵌 slug，去重保序。"""
+    slugs: list[str] = []
+    api_slug = validate_category_slug(str(materials.get("product_category_slug", "") or "").strip() or None)
+    if api_slug:
+        slugs.append(api_slug)
+    for item in category_slugs or []:
+        validated = validate_category_slug(item)
+        if validated and validated not in slugs:
+            slugs.append(validated)
+    if isinstance(raw_plan, dict):
+        nested_slug = validate_category_slug(raw_plan.get("category_slug"))
+        if nested_slug and nested_slug not in slugs:
+            slugs.append(nested_slug)
+    return slugs
+
+
+def _sanitize_target_doc_ids(plan: RuleMatchPlan) -> RuleMatchPlan:
+    """将 target_doc_ids 中的 doc_name/非法引用解析为 canonical doc_id，丢弃无法解析项。"""
+    resolved: list[str] = []
+    for ref in plan.target_doc_ids:
+        doc_id = resolve_doc_id_reference(ref)
+        if doc_id and doc_id not in resolved:
+            resolved.append(doc_id)
+    if len(resolved) != len(plan.target_doc_ids):
+        logger.info(
+            "%s target_doc_ids 已规范化：%s -> %s",
+            LOG_PREFIX,
+            plan.target_doc_ids,
+            resolved,
+        )
+    plan.target_doc_ids = resolved
+    return plan
 
 
 def _ensure_category_lane(
     plan: RuleMatchPlan,
     materials: dict[str, Any],
     buyer_text: str,
+    category_slugs: list[str],
 ) -> RuleMatchPlan:
-    """API 标、LLM 选择或文本推断命中品类时，强制加入 C 通道与品类 doc。"""
-    slug = str(materials.get("product_category_slug", "") or "").strip()
-    slug_confidence = 1.0
-    if not slug:
-        slug, slug_confidence = infer_category_slug_llm(buyer_text, materials)
-        slug = slug or ""
-
-    doc_id = get_category_doc_id(slug) if slug else None
-    if not doc_id:
-        if _is_category_lane_locked(plan, materials, buyer_text):
+    """API 标、LLM 选择或上游 slug 命中品类时，强制加入 C 通道与品类 doc。"""
+    slugs = _normalize_category_slugs(category_slugs, materials)
+    if not slugs:
+        if _is_category_lane_locked(plan, materials, slugs):
             for existing in plan.target_doc_ids:
                 if is_category_doc(existing):
                     doc_id = existing
-                    break
-        if not doc_id:
-            return plan
+                    slug = ""
+                    slug_confidence = max(plan.category_confidence, CE_CONFIDENCE_THRESHOLD)
+                    return _append_category_doc(plan, doc_id, slug, slug_confidence, materials)
+        return plan
 
+    for slug in slugs:
+        doc_id = get_category_doc_id(slug)
+        if not doc_id:
+            continue
+        slug_confidence = 1.0 if str(materials.get("product_category_slug", "") or "").strip() == slug else max(
+            plan.category_confidence,
+            CE_CONFIDENCE_THRESHOLD,
+        )
+        plan = _append_category_doc(plan, doc_id, slug, slug_confidence, materials)
+    return plan
+
+
+def _append_category_doc(
+    plan: RuleMatchPlan,
+    doc_id: str,
+    slug: str,
+    slug_confidence: float,
+    materials: dict[str, Any],
+) -> RuleMatchPlan:
+    """将单个品类 doc 写入 plan 并补默认节。"""
     if doc_id not in plan.target_doc_ids:
         plan.target_doc_ids.append(doc_id)
         logger.info("%s 强制加入品类规范 doc_id=%s slug=%s", LOG_PREFIX, doc_id, slug or "-")
@@ -371,16 +451,19 @@ def _strip_lane_docs(
 
 
 def _sanitize_sections(plan: RuleMatchPlan) -> RuleMatchPlan:
-    """校验 section_keys 属于 lexicon。"""
+    """校验 section_keys 属于 lexicon；section 的 doc_id 同步规范化。"""
     cleaned: list[SectionSelection] = []
     for sel in plan.section_selections:
         if not sel.doc_id:
             continue
-        keys = validate_section_keys(sel.doc_id, sel.section_keys)
+        doc_id = resolve_doc_id_reference(sel.doc_id)
+        if not doc_id:
+            continue
+        keys = validate_section_keys(doc_id, sel.section_keys)
         if keys:
             cleaned.append(
                 SectionSelection(
-                    doc_id=sel.doc_id,
+                    doc_id=doc_id,
                     section_keys=keys,
                     confidence=sel.confidence,
                     reason=sel.reason,

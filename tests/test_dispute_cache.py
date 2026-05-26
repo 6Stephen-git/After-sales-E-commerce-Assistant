@@ -99,11 +99,36 @@ def test_merge_materials_should_append_incrementally() -> None:
         {
             "chat_history": [{"role": "buyer", "content": "第二条"}],
             "image_urls": ["mock://b"],
+            "materials_snapshot": False,
         },
     )
     assert len(first["chat_history"]) == 1
     assert len(second["chat_history"]) == 2
     assert len(second["image_urls"]) == 2
+
+
+def test_merge_materials_snapshot_should_replace_not_append() -> None:
+    """
+    snapshot 模式下二次请求应覆盖旧 chat/image，不保留历史会话。
+    """
+    merge_materials(
+        "D-snap",
+        {
+            "chat_history": [{"role": "buyer", "content": "手机有划痕"}],
+            "image_urls": ["mock://phone"],
+        },
+    )
+    merged = merge_materials(
+        "D-snap",
+        {
+            "chat_history": [{"role": "buyer", "content": "香蕉坏了"}],
+            "image_urls": ["mock://banana"],
+            "materials_snapshot": True,
+        },
+    )
+    assert len(merged["chat_history"]) == 1
+    assert merged["chat_history"][0]["content"] == "香蕉坏了"
+    assert merged["image_urls"] == ["mock://banana"]
 
 
 # ---------- B/C 层：mock Redis 下 hit/miss ----------
@@ -134,10 +159,8 @@ def test_result_cache_should_hit_after_save() -> None:
             confidence=0.5,
         ),
         scripts=ScriptOutput(
-            defense_version="话术",
-            negotiate_version="话术",
-            compensate_version="话术",
-            recommended_version="defense_version",
+            script="您好，这单我在跟进，核实清楚后马上回复您。",
+            response_mode="neutral_negotiate",
         ),
     )
 

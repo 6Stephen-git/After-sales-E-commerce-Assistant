@@ -1,29 +1,36 @@
 # Agent 3 — 话术生成员
 
 ## 职责
-根据策略建议和纠纷事实，生成面向买家的多版本回复话术。根据不同策略方向（抗辩/协商/体面善后）产出对应风格的话术，确保语气专业、有据可依，帮助商家以最合适的方式与买家沟通。
+根据 Agent2 策略阶段与应对思想，生成单条面向买家的店主口吻话术。语气随情绪与客户价值动态调整，事实描述与 Agent1 输出一致。
+
+## 输入
+`ScriptInput`（来自 `schemas.py`），核心信号：
+- `strategy_output.strategy_stage`：补偿门禁（举证期禁止承诺补偿）
+- `strategy_output.customer_value`：`channel` / `tone_suggestion` / `compensation_uplift` 注入话术 LLM，仅调节语气与补偿弹性
+- `facts.issue_summary`：话术主锚点
+- `facts.*`：结构化事实边界
+- `emotion_note`：语气调节
+- `chat_history`：近期对话（`ChatTurn` 列表），用于续写、避免重复索要已拒绝的举证
 
 ## 输出
-`ScriptOutput`（来自 `schemas.py`）
+`ScriptOutput`：`script` + `response_mode` + `usage_tip`
 
 ## 可用工具
-- `get_script_template(strategy_type) → str`：获取对应策略的话术模板，模板中包含 `{{变量}}` 占位符
+- `generate_buyer_script(payload) → str | None`：在 Agent2 输出的 `dialogue_context` 约束下生成单条话术
 
 ## 硬约束
 - 纯函数：`def generate(input: ScriptInput) -> ScriptOutput`
-- 不读写数据库，通过工具获取模板
-- 三个版本话术均需生成，不可留空
-- 话术中的事实描述必须与 Agent 1 输出一致，禁止夸大或捏造
-- `recommended_version` 需明确指向一个版本，并可在 `usage_tip` 中简短说明推荐理由
-- **真人感要求**：话术必须像真人商家在说话，而非 AI 客服模板。具体约束：
-  - 用商家的口吻讲出规则依据，而非直接引用“根据《平台争议处理规则》第X条”
-  - 带入真实商家的情绪和处境表达（如“我们小本经营，每件衣服发货前都仔细检查过”）
-  - 避免AI高频句式（如“综上所述”、“希望我的回答能帮到您”）
-  - 句式长短交错，允许适当口语化（如“您看这样可以吗？”“咱们商量着来”）
-  - 即使严肃表达诉求，也保持对话感和诚意，而非机械生硬
+- 不读写数据库；LLM 调用封装在 tool 层
+- 单一推荐话术，禁止三版并列
+- `compensation_policy` 由 `strategy_stage` 决定，举证期禁止提补偿
+- 事实以 `issue_summary` 理解背景；举证期话术不评价货损程度，只围绕举证疑点与补证请求
+- 店主本人口吻，禁用 AI 客服套话
 
 ## 内嵌测试用例
-1. **抗辩策略场景**：输入策略为 `defend`，验证推荐版本为 `defense_version` 且三版话术均非空。
-2. **协商策略场景**：输入策略为 `negotiate`，验证推荐版本为 `negotiate_version`，话术包含金额与协商口吻。
-3. **善后策略场景**：输入策略为 `compensate`，验证推荐版本为 `compensate_version`，话术包含事实与金额。
-4. **边界场景**：事实与文案字段缺失时，仍需生成三版可用话术并返回 `usage_tip`。
+1. **抗辩场景**：disposition=defend，验证 `response_mode=malicious_risk` 且 script 非空。
+2. **善后场景**：strategy_stage=compensate_close，验证 `response_mode=merchant_fault`。
+3. **协商场景**：disposition=negotiate 且无商责/高恶意，验证 `response_mode=neutral_negotiate`。
+4. **举证阶段**：strategy_stage=evidence_first 且 LLM 不可用，验证兜底话术不含补偿承诺。
+5. **边界场景**：字段缺失时 script 仍非空。
+6. **对话续写**：买家已拒绝开箱视频时，话术不以「您好」开头、不再索要开箱。
+7. **客户价值**：`customer_value.channel=long_term` 时，验证 `tone_hint` / `customer_value_channel` 注入话术 LLM payload。

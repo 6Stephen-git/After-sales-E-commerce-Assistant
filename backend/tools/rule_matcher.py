@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import select
@@ -44,6 +45,11 @@ RULE_BRIEF_MAX_LEN = 320
 GENERIC_ARTICLE_TITLES = frozenset(
     {"商品质量问题", "描述不当问题", "描述不符问题", "物流问题", "举证要求", "处理标准", "买家原因退换货"}
 )
+# 仅 case 命中且全部为下列泛化词时，字面降级路径判为 weak 并丢弃
+GENERIC_WEAK_ONLY_TERMS = frozenset(
+    {"举证", "初步凭证", "商品质量问题", "表面不一致", "签收", "确认收货", "处理标准", "举证要求"}
+)
+DISPLAY_FILTER_MAX = 3
 
 
 def _format_merchant_rule_text(article: dict[str, Any]) -> str:
@@ -98,10 +104,11 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
 
     section_map = {sel.doc_id: sel.section_keys for sel in plan.section_selections}
 
-    from backend.tools.rule_matcher_llm import llm_match_articles
+    from backend.tools.rule_matcher_llm import llm_filter_event_display_rules, llm_match_articles
 
-    llm_pool = llm_match_articles(facts=facts, documents=documents, section_map=section_map)
-    if llm_pool is None:
+    llm_display_ids: list[str] | None = None
+    llm_result = llm_match_articles(facts=facts, documents=documents, section_map=section_map)
+    if llm_result is None:
         logger.warning("%s LLM 条文匹配失败，回退字面检索", LOG_PREFIX)
         terms = plan.search_terms
         scored: list[tuple[int, str, MatchedRule]] = []
@@ -113,7 +120,8 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
                     scored.append((_relevance_rank(rule.relevance), rule.relevance, rule))
         pool = _sort_pool_category_first([item[2] for item in sorted(scored, key=lambda x: (x[0], -_count_must_signal(x[2])))[:MATCH_POOL_CAP]])
     else:
-        pool = _sort_pool_category_first(llm_pool[:MATCH_POOL_CAP])
+        llm_display_ids = llm_result.display_rule_ids
+        pool = _sort_pool_category_first(llm_result.matched_rules[:MATCH_POOL_CAP])
         if len(pool) < DISPLAY_MIN:
             pool = _supplement_pool_from_terms(
                 existing=pool,
@@ -122,7 +130,12 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
                 terms=plan.search_terms,
             )
     briefs = _build_briefs(pool)
-    display = _pick_display_rules(pool)
+    display = _resolve_display_rules(
+        pool,
+        facts=facts,
+        llm_display_ids=llm_display_ids,
+        max_count=DISPLAY_FILTER_MAX,
+    )
     logger.info(
         "%s 匹配完成 pool=%s briefs=%s display=%s",
         LOG_PREFIX,
@@ -134,31 +147,49 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
 
 
 def _load_documents(doc_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """按 doc_id 从 MySQL 加载爬取规则 JSON。"""
-    engine = get_engine()
-    prefix = "taobao_rule::"
-    keys = [f"{prefix}{doc_id}" for doc_id in doc_ids]
+    """按 doc_id 从 MySQL 加载爬取规则 JSON（单 doc LRU 缓存）。"""
     loaded: dict[str, dict[str, Any]] = {}
-    try:
-        with Session(bind=engine) as session:
-            rows = session.execute(
-                select(PlatformRule).where(PlatformRule.rule_key.in_(keys))
-            ).scalars().all()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s MySQL 加载规则失败：%s", LOG_PREFIX, exc)
-        raise RuntimeError(f"平台规则加载失败：{exc}") from exc
-
-    for row in rows:
-        try:
-            payload = json.loads(row.rule_content or "{}")
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        doc_id = str(payload.get("doc_id", "")).strip()
-        if doc_id and doc_id in doc_ids:
+    for doc_id in doc_ids:
+        payload = _load_document_cached(doc_id)
+        if payload:
             loaded[doc_id] = payload
     return loaded
+
+
+@lru_cache(maxsize=64)
+def _load_document_cached(doc_id: str) -> dict[str, Any] | None:
+    """
+    从 MySQL 加载单份规则文档并缓存；规则正文变更需重启进程或调 clear_rule_document_cache。
+    """
+    engine = get_engine()
+    rule_key = f"taobao_rule::{doc_id}"
+    try:
+        with Session(bind=engine) as session:
+            row = session.execute(
+                select(PlatformRule).where(PlatformRule.rule_key == rule_key)
+            ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s MySQL 加载规则 doc_id=%s 失败：%s", LOG_PREFIX, doc_id, exc)
+        raise RuntimeError(f"平台规则加载失败：{exc}") from exc
+
+    if row is None:
+        logger.warning("%s MySQL 未找到规则 doc_id=%s", LOG_PREFIX, doc_id)
+        return None
+    try:
+        payload = json.loads(row.rule_content or "{}")
+    except json.JSONDecodeError:
+        logger.warning("%s 规则 JSON 解析失败 doc_id=%s", LOG_PREFIX, doc_id)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    normalized_id = str(payload.get("doc_id", "")).strip() or doc_id
+    payload["doc_id"] = normalized_id
+    return payload
+
+
+def clear_rule_document_cache() -> None:
+    """清空规则文档 LRU 缓存（规则库更新后联调可调用）。"""
+    _load_document_cached.cache_clear()
 
 
 def _filter_articles_by_sections(doc: dict[str, Any], section_keys: list[str] | None) -> list[dict[str, Any]]:
@@ -384,6 +415,34 @@ def _build_briefs(pool: list[MatchedRule]) -> list[RuleBrief]:
             )
         )
     return briefs
+
+
+def _resolve_display_rules(
+    pool: list[MatchedRule],
+    *,
+    facts: FactOutput,
+    llm_display_ids: list[str] | None,
+    max_count: int = DISPLAY_FILTER_MAX,
+) -> list[MatchedRule]:
+    """
+    解析前端展示条：优先用条文匹配 LLM 同批返回的 display_rule_ids；否则启发式选取，仅在过多时再调展示筛选 LLM。
+    """
+    from backend.tools.rule_matcher_llm import llm_filter_event_display_rules
+
+    if llm_display_ids:
+        id_order = {rid: index for index, rid in enumerate(llm_display_ids)}
+        picked = [rule for rule in pool if rule.rule_id in id_order]
+        picked.sort(key=lambda rule: id_order.get(rule.rule_id, 999))
+        if picked:
+            logger.info("%s 展示规则使用条文匹配 LLM 同批 display_rule_ids", LOG_PREFIX)
+            return picked[:max_count]
+
+    picked = _pick_display_rules(pool)
+    if len(picked) <= max_count:
+        return picked[:max_count]
+
+    filtered = llm_filter_event_display_rules(facts, picked, max_count=max_count)
+    return filtered if filtered else picked[:max_count]
 
 
 def _pick_display_rules(pool: list[MatchedRule]) -> list[MatchedRule]:

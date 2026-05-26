@@ -52,10 +52,10 @@ class TestSchemas:
 
     def test_script_output_instantiation(self):
         """ScriptOutput 可使用默认值实例化"""
-        from schemas import ScriptOutput
+        from schemas import ScriptOutput, RESPONSE_MODE_NEUTRAL_NEGOTIATE
         obj = ScriptOutput()
-        assert obj.defense_version == ""
-        assert obj.negotiate_version == ""
+        assert obj.script == ""
+        assert obj.response_mode == RESPONSE_MODE_NEUTRAL_NEGOTIATE
 
     def test_emotion_output_instantiation(self):
         """EmotionOutput 可使用默认值实例化"""

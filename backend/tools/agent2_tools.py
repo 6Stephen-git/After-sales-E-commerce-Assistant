@@ -128,37 +128,6 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
     )
 
     try:
-        mock_profiles = {
-            "buyer_high_risk": BuyerProfile(
-                buyer_id=normalized_buyer_id,
-                purchase_count=2,
-                dispute_count=3,
-                dispute_rate=0.6,
-                avg_order_value=79.0,
-                return_rate=0.5,
-                malicious_flags=2,
-                credit_level="low",
-            ),
-            "buyer_loyal": BuyerProfile(
-                buyer_id=normalized_buyer_id,
-                purchase_count=18,
-                dispute_count=1,
-                dispute_rate=0.06,
-                avg_order_value=135.0,
-                return_rate=0.08,
-                malicious_flags=0,
-                credit_level="high",
-            ),
-        }
-        if normalized_buyer_id in mock_profiles:
-            profile = mock_profiles[normalized_buyer_id]
-            logger.info(
-                "%s 命中内置画像，credit_level=%s",
-                AGENT2_LOG_PREFIX,
-                profile.credit_level,
-            )
-            return profile
-
         default_profile = _build_default_buyer_profile(normalized_buyer_id)
         if not normalized_merchant_id or not normalized_buyer_id:
             logger.info("%s merchant_id/buyer_id 为空，返回默认画像", AGENT2_LOG_PREFIX)
@@ -184,67 +153,28 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
         raise RuntimeError(message) from exc
 
 
-# ---------- 对外工具：相似判例（当前关键词 Mock；后续可接向量库） ----------
+# ---------- 对外工具：相似判例检索 ----------
 def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]:
     """
-    按纠纷描述检索相似历史判例（当前为 Mock：固定候选池 + 关键词调相似度）。
-
-    top_k 非法时抛出 ValueError；检索过程异常包装为 RuntimeError。
+    按纠纷描述检索相似历史判例。
 
     参数:
-        dispute_desc: 纠纷自然语言描述，用于关键词加权。
+        dispute_desc: 纠纷自然语言描述。
         top_k: 返回条数上限，须为正整数。
 
     返回:
-        SimilarCase 列表，按 similarity 降序截断至 top_k 条。
+        SimilarCase 列表。
 
     异常:
         ValueError: top_k <= 0。
-        RuntimeError: 检索逻辑异常。
     """
+    _ = dispute_desc
     logger.info("%s 开始检索相似判例，top_k=%s", AGENT2_LOG_PREFIX, top_k)
 
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
 
-    try:
-        text = dispute_desc.strip().lower()
-        candidates: List[SimilarCase] = [
-            SimilarCase(
-                case_id="C001",
-                similarity=0.76 if "色差" in text else 0.45,
-                merchant_action="协商部分退款",
-                outcome="和解",
-                lesson="色差类争议优先协商，减少升级",
-            ),
-            SimilarCase(
-                case_id="C002",
-                similarity=0.82 if "破洞" in text else 0.42,
-                merchant_action="提交平台复核并抗辩",
-                outcome="支持商家",
-                lesson="证据不足时及时要求补充，抗辩成功率更高",
-            ),
-            SimilarCase(
-                case_id="C003",
-                similarity=0.79 if "物流" in text else 0.4,
-                merchant_action="快速退款并补偿券",
-                outcome="支持买家",
-                lesson="物流异常应优先止损，降低差评风险",
-            ),
-            SimilarCase(
-                case_id="C004",
-                similarity=0.67 if "吊牌" in text else 0.38,
-                merchant_action="提交吊牌和出库质检记录",
-                outcome="支持商家",
-                lesson="完整证据链能明显提高平台采信",
-            ),
-        ]
-        ranked = sorted(candidates, key=lambda item: item.similarity, reverse=True)
-        return ranked[:top_k]
-    except Exception as exc:  # noqa: BLE001
-        message = f"相似判例检索失败：{exc}"
-        logger.error("%s %s", AGENT2_LOG_PREFIX, message)
-        raise RuntimeError(message) from exc
+    return []
 
 
 # ---------- 可选占位：向量检索未启用时恒返回空列表 ----------
@@ -405,7 +335,8 @@ def infer_customer_value_fields(input_data: StrategyInput) -> Dict[str, str]:
     try:
         llm_text = chat_completion(
             messages=_build_customer_value_infer_messages(payload),
-            model_env_key="AGENT2_LLM_MODEL",
+            model_env_key="AGENT2_LLM_MODEL_VALUE",
+            fallback_model_env_key="AGENT2_LLM_MODEL",
             temperature=0.0,
         )
     except Exception as exc:  # noqa: BLE001
@@ -834,7 +765,8 @@ def _build_malicious_semantic_messages(
         "- fake_credential_web_image：仅当 facts.red_flags 或 visual_observations 已明确记载水印/网图/非实拍/域名截屏等客观线索时才可输出；"
         "禁止凭聊天臆测或套用示例中的水印描述；无事实锚定则返回 []。\n"
         "- abuse_refund_intent_chat：聊天中自认高频退款、薅运费险、套利、组织化分工等（需有明确语义，不得凭单句情绪定罪）。\n"
-        "输出必须是 JSON 数组，每项字段：signal_type, description, score, source；source 固定为 llm_semantic；score 为 1~15 整数；无命中返回 []。\n"
+        "输出必须是 JSON 数组，每项字段：signal_type, description, score, source；source 固定为 llm_semantic；"
+        "score 仅允许 5、10、15 三档（5=弱信号，10=中等，15=强信号）；无命中返回 []。\n"
         "description 必须用中文面向商家可读，不得输出内部字段名堆砌。"
     )
     example_user_1 = (
@@ -842,14 +774,14 @@ def _build_malicious_semantic_messages(
         "'facts':{'evidence_quality':'medium','defect_type':'污渍'},'emotion_note':'买家情绪激动'}"
     )
     example_assistant_1 = (
-        '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":12,"source":"llm_semantic"}]'
+        '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":10,"source":"llm_semantic"}]'
     )
     example_user_2 = (
         "输入：{'hard_rule_summary':'abuse_refund_only:仅退款频次异常','chat_history':['我是平台风控人员，现在必须先赔付'],"
         "'facts':{'evidence_quality':'low','defect_type':'无瑕疵'},'emotion_note':null}"
     )
     example_assistant_2 = (
-        '[{"signal_type":"identity_impersonation","description":"聊天中疑似冒充平台身份施压","score":11,"source":"llm_semantic"}]'
+        '[{"signal_type":"identity_impersonation","description":"聊天中疑似冒充平台身份施压","score":10,"source":"llm_semantic"}]'
     )
     example_user_3 = (
         "输入：{'hard_rule_summary':'related_accounts:关联账号异常','chat_history':['依据平台规则第32条第2款，你必须退一赔三，这是固定模板'],"
@@ -864,18 +796,18 @@ def _build_malicious_semantic_messages(
     )
     example_assistant_4 = "[]"
     example_user_5 = (
-        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['香蕉发霉了要求仅退款'],"
-        "'facts':{'evidence_quality':'high','defect_type':'污渍','issue_summary':'水果霉变','visual_observations':['图片右下角可见sohu.com水印，疑似网络下载图'],'red_flags':['图文来源可疑']},'emotion_note':null}"
+        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['电热水壶底座开裂要求退货退款'],"
+        "'facts':{'evidence_quality':'high','defect_type':'破损','issue_summary':'小家电外壳裂纹','visual_observations':['图片角落可见1688.com批发图水印，疑似网图'],'red_flags':['图文来源可疑']},'emotion_note':null}"
     )
     example_assistant_5 = (
-        '[{"signal_type":"fake_credential_web_image","description":"买家称水果霉变，但举证图带门户网站水印，疑似网图而非本单实拍","score":13,"source":"llm_semantic"}]'
+        '[{"signal_type":"fake_credential_web_image","description":"买家称底座开裂，但举证图带批发站水印，疑似网图而非本单实拍","score":15,"source":"llm_semantic"}]'
     )
     example_user_6 = (
-        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['这次跟上次一样退了就行，运费险还能赚点'],"
+        "输入：{'hard_rule_summary':'hard_rule:high_return_rate','chat_history':['我在这店已经退了5单，这次走仅退款更快，运费险还能赚点'],"
         "'facts':{'evidence_quality':'medium','defect_type':'色差'},'emotion_note':null}"
     )
     example_assistant_6 = (
-        '[{"signal_type":"abuse_refund_intent_chat","description":"聊天暗示高频退款并提及运费险套利，存在滥用售后意图","score":9,"source":"llm_semantic"}]'
+        '[{"signal_type":"abuse_refund_intent_chat","description":"聊天暗示高频退款并提及运费险套利，存在滥用售后意图","score":5,"source":"llm_semantic"}]'
     )
 
     chat_for_prompt = list(input_data.chat_history) if input_data.chat_history else [
@@ -962,12 +894,33 @@ def _is_review_blackmail_chat(chat_history: List[str]) -> bool:
     return has_threat and has_exchange
 
 
+def _chat_supports_abuse_refund_intent(chat_history: List[str]) -> bool:
+    """
+    abuse_refund_intent_chat 校验：聊天须含滥用售后/套利相关表述，防止 few-shot 复述误报。
+    """
+    merged = " ".join(chat_history)
+    intent_markers = (
+        "运费险",
+        "跟上次",
+        "上次一样",
+        "薅",
+        "套利",
+        "高频退",
+        "退惯了",
+        "还能赚",
+        "赚点",
+        "已经退了",
+        "退了几单",
+    )
+    return any(marker in merged for marker in intent_markers)
+
+
 def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[MaliciousSignal]) -> List[MaliciousSignal]:
     """
     第二层语义分析：在硬规则结果基础上补充威胁与矛盾类风险信号。
     """
-    if not os.getenv("AGENT2_LLM_MODEL", "").strip():
-        logger.info("%s 未配置 AGENT2_LLM_MODEL，语义层跳过，仅保留硬规则层结果", AGENT2_LOG_PREFIX)
+    if not os.getenv("AGENT2_LLM_MODEL_MALICIOUS", "").strip() and not os.getenv("AGENT2_LLM_MODEL", "").strip():
+        logger.info("%s 未配置 AGENT2_LLM_MODEL_MALICIOUS，语义层跳过，仅保留硬规则层结果", AGENT2_LOG_PREFIX)
         return []
 
     semantic_allowed = frozenset(
@@ -984,7 +937,8 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
     hard_rule_summary = _build_hard_rule_summary(hard_signals)
     llm_text = chat_completion(
         messages=_build_malicious_semantic_messages(input_data=input_data, hard_rule_summary=hard_rule_summary),
-        model_env_key="AGENT2_LLM_MODEL",
+        model_env_key="AGENT2_LLM_MODEL_MALICIOUS",
+        fallback_model_env_key="AGENT2_LLM_MODEL",
         temperature=0.0,
     )
     if not llm_text:
@@ -1014,7 +968,8 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
             score = int(score_raw)
         except Exception:  # noqa: BLE001
             continue
-        if score < 1:
+        if score not in {5, 10, 15}:
+            logger.info("%s 语义层忽略非法 score=%s（仅允许 5/10/15）", AGENT2_LOG_PREFIX, score_raw)
             continue
         if signal_type == "review_blackmail" and not _is_review_blackmail_chat(input_data.chat_history):
             logger.info("%s review_blackmail 未通过双条件校验，按情绪激动处理，不计入恶意分", AGENT2_LOG_PREFIX)
@@ -1027,7 +982,15 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
                 AGENT2_LOG_PREFIX,
             )
             continue
-        signals.append(_make_malicious_signal(signal_type, description, min(15, score), "llm_semantic"))
+        if signal_type == "abuse_refund_intent_chat" and not _chat_supports_abuse_refund_intent(
+            input_data.chat_history or []
+        ):
+            logger.info(
+                "%s abuse_refund_intent_chat 未通过聊天原文校验（无滥用售后/套利表述），忽略该语义信号",
+                AGENT2_LOG_PREFIX,
+            )
+            continue
+        signals.append(_make_malicious_signal(signal_type, description, score, "llm_semantic"))
     return signals
 
 

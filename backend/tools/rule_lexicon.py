@@ -81,6 +81,30 @@ def get_doc_by_id(doc_id: str) -> dict[str, Any] | None:
     return None
 
 
+def resolve_doc_id_reference(ref: str) -> str | None:
+    """
+    将 LLM 可能输出的 doc_id / doc_name / 部分路径解析为 lexicon  canonical doc_id。
+    """
+    text = str(ref or "").strip()
+    if not text:
+        return None
+    if get_doc_by_id(text):
+        return text
+    for doc in load_lexicon().get("docs", []):
+        if not isinstance(doc, dict):
+            continue
+        canonical = str(doc.get("doc_id", "") or "").strip()
+        doc_name = str(doc.get("doc_name", "") or "").strip()
+        if not canonical:
+            continue
+        if doc_name and doc_name == text:
+            return canonical
+        if text in canonical:
+            return canonical
+    logger.warning("%s 无法解析规则 doc 引用=%s", LOG_PREFIX, text)
+    return None
+
+
 def infer_facets_from_intent(intent_tags: list[str]) -> list[str]:
     """从诉求标签推断 lexicon facet_tags。"""
     facets: list[str] = []
@@ -261,6 +285,30 @@ def build_category_slug_catalog() -> list[dict[str, str]]:
         )
     catalog.sort(key=lambda item: item["slug"])
     return catalog
+
+
+def validate_category_slug(slug: str | None) -> str | None:
+    """
+    校验 slug 是否属于 lexicon 品类枚举；合法则返回规范化 slug，否则 None。
+    """
+    text = str(slug or "").strip()
+    if not text or text.lower() in {"none", "null", "unknown"}:
+        return None
+    valid_slugs = {item["slug"] for item in build_category_slug_catalog()}
+    if text not in valid_slugs:
+        logger.warning("%s 未知 category_slug=%s，已忽略", LOG_PREFIX, text)
+        return None
+    return text
+
+
+def format_category_slug_catalog_lines() -> str:
+    """
+    生成写入 LLM prompt 的可选 slug 列表文本。
+    """
+    catalog = build_category_slug_catalog()
+    if not catalog:
+        return "（无特殊品类 slug 枚举）"
+    return "\n".join(f"- slug={item['slug']} doc={item['doc_name']}" for item in catalog)
 
 
 def _parse_category_llm_json(raw_text: str) -> tuple[str | None, float]:

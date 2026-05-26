@@ -109,20 +109,20 @@ export async function analyzeDisputeStream(payload, handlers = {}) {
   }
 }
 
-// ---------- 配置查询：获取商家模式和自动化阈值 ----------
-export async function fetchMerchantConfig(merchantId) {
+// ---------- 配置查询：获取默认商家模式和自动化阈值 ----------
+export async function fetchMerchantConfig() {
   try {
-    const response = await httpClient.get(`/merchants/${merchantId}/config`)
+    const response = await httpClient.get('/merchants/config')
     return response.data
   } catch (error) {
     throw new Error(`读取商家配置失败：${error.message}`)
   }
 }
 
-// ---------- 配置更新：设置商家模式和自动化阈值 ----------
-export async function updateMerchantConfig(merchantId, payload) {
+// ---------- 配置更新：设置默认商家模式和自动化阈值 ----------
+export async function updateMerchantConfig(payload) {
   try {
-    const response = await httpClient.put(`/merchants/${merchantId}/config`, payload)
+    const response = await httpClient.put('/merchants/config', payload)
     return response.data
   } catch (error) {
     throw new Error(`更新商家配置失败：${error.message}`)

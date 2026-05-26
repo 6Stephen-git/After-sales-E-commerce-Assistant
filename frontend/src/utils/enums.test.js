@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   getDispositionLabel,
   getEvidenceQualityLabel,
-  getScriptVersionLabel,
+  getResponseModeLabel,
   getSentimentLabel
 } from './enums'
 
@@ -37,11 +37,11 @@ describe('getSentimentLabel', () => {
   })
 })
 
-// ---------- 话术版本标识：合法值映射 ----------
-describe('getScriptVersionLabel', () => {
-  it('将话术版本键映射为中文名称', () => {
-    expect(getScriptVersionLabel('defense_version')).toBe('抗辩版')
-    expect(getScriptVersionLabel('negotiate_version')).toBe('协商版')
-    expect(getScriptVersionLabel('compensate_version')).toBe('善后版')
+// ---------- 应对思想枚举：合法值映射 ----------
+describe('getResponseModeLabel', () => {
+  it('将应对思想键映射为中文名称', () => {
+    expect(getResponseModeLabel('merchant_fault')).toBe('主动担责')
+    expect(getResponseModeLabel('malicious_risk')).toBe('依据应对')
+    expect(getResponseModeLabel('neutral_negotiate')).toBe('协商沟通')
   })
 })

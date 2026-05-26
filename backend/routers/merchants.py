@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.db.connection import get_db_session
 from backend.db.models import MerchantConfig
+from backend.defaults import default_merchant_id
 
 
 API_LOG_PREFIX = "[API]"
@@ -41,6 +42,26 @@ class MerchantConfigUpdateRequest(BaseModel):
 
     mode: str = Field(..., description="模式：assisted/intelligent")
     auto_threshold: float = Field(0.8, ge=0.0, le=1.0, description="自动化阈值 0~1")
+
+
+# ---------- 默认商家配置：前端无需传 merchant_id ----------
+@router.get("/config")
+def get_default_merchant_config(session: Session = Depends(get_db_session)) -> MerchantConfigResponse:
+    """
+    读取默认商家配置（DEFAULT_MERCHANT_ID）。
+    """
+    return get_merchant_config(default_merchant_id(), session)
+
+
+@router.put("/config")
+def update_default_merchant_config(
+    request: MerchantConfigUpdateRequest,
+    session: Session = Depends(get_db_session),
+) -> MerchantConfigResponse:
+    """
+    更新默认商家配置（DEFAULT_MERCHANT_ID）。
+    """
+    return update_merchant_config(default_merchant_id(), request, session)
 
 
 # ---------- 读取流程：若不存在则初始化默认配置 ----------

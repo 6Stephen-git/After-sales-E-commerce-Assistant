@@ -14,20 +14,15 @@
 ## 枚举值
 
 - 策略类型（内部）：`"defend"` / `"negotiate"` / `"compensate"`
+- 策略阶段（内部）：`"evidence_first"` / `"negotiate_settle"` / `"compensate_close"` / `"defend_platform"`
 - 证据质量（内部）：`"high"` / `"medium"` / `"low"`
-- 话术版本（内部）：`"defense_version"` / `"negotiate_version"` / `"compensate_version"`
+- 话术应对思想（内部）：`"merchant_fault"` / `"malicious_risk"` / `"neutral_negotiate"`
 - 所有内部传输枚举值统一使用英文小写。
-- 前端展示时映射为中文（如 `"defend"` → `"抗辩"`），映射表由前端维护。
+- 前端展示时映射为中文（如 `"defend"` → `"抗辩"`、`"merchant_fault"` → `"主动担责"`），映射表由前端维护。
 
 ## 日志前缀
 
 - Agent x：`[Agentx]`
-
-## 话术模板变量
-
-- 使用双花括号包裹：`{{变量名}}`。
-- 变量名优先使用英文，且与 `schemas.py` 字段对应。
-- 示例：`{{order_id}}`、`{{amount}}`、`{{defect_type}}`。
 
 ## 文件名
 

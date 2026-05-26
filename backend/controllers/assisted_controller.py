@@ -6,7 +6,6 @@ from __future__ import annotations
 
 # ---------- 标准库与类型 ----------
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
@@ -23,8 +22,22 @@ from backend.cache import (
     save_facts,
     save_report,
 )
-from backend.tools.agent2_tools import match_rules_full, query_buyer_profile, search_similar_cases
-from schemas import AnalysisReport, MatchedRule, RuleBrief, ScriptInput, StrategyInput
+from backend.tools.agent2_tools import (
+    detect_malicious_behavior,
+    match_rules_full,
+    query_buyer_profile,
+    run_customer_value_analysis,
+    search_similar_cases,
+)
+from schemas import (
+    AnalysisReport,
+    ChatTurn,
+    MaliciousDetectionInput,
+    MatchedRule,
+    RuleBrief,
+    ScriptInput,
+    StrategyInput,
+)
 
 # ---------- 日志前缀 ----------
 ASSISTED_LOG_PREFIX = "[AssistedController]"
@@ -67,15 +80,25 @@ def _extract_chat_history_texts(merged_materials: dict[str, Any]) -> list[str]:
     """
     提取聊天文本列表，供 Agent2 语义分析使用。
     """
-    lines: list[str] = []
+    return [turn.content for turn in _extract_chat_turns(merged_materials)]
+
+
+def _extract_chat_turns(merged_materials: dict[str, Any]) -> list[ChatTurn]:
+    """
+    提取带角色的聊天轮次，供 Agent3 话术续写。
+    """
+    turns: list[ChatTurn] = []
     for message in _to_list(merged_materials.get("chat_history")):
         if isinstance(message, dict):
+            role = str(message.get("role") or "buyer").strip().lower()
+            if role not in {"buyer", "merchant"}:
+                role = "buyer"
             content = message.get("content")
             if isinstance(content, str) and content.strip():
-                lines.append(content.strip())
+                turns.append(ChatTurn(role=role, content=content.strip()))
         elif isinstance(message, str) and message.strip():
-            lines.append(message.strip())
-    return lines
+            turns.append(ChatTurn(role="buyer", content=message.strip()))
+    return turns
 
 
 # ---------- 金额等标量：容错转换，避免策略/话术链路因脏数据中断 ----------
@@ -87,16 +110,6 @@ def _safe_order_amount(raw_value: Any) -> float:
         return max(0.0, float(raw_value))
     except (TypeError, ValueError):
         return 0.0
-
-
-def _is_enabled(flag_name: str, default: bool = False) -> bool:
-    """
-    读取布尔开关环境变量。
-    """
-    raw = os.getenv(flag_name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on", "y"}
 
 
 def _emit_event(emit_event: EventEmitter | None, event_type: str, payload: dict[str, Any]) -> None:
@@ -115,56 +128,6 @@ def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
 
 
-def _contains_risk_keyword(text: str) -> bool:
-    """
-    识别高争议关键词，用于简单任务判定。
-    """
-    keywords = (
-        "投诉",
-        "举报",
-        "平台介入",
-        "工商",
-        "起诉",
-        "假货",
-        "退一赔三",
-        "恶意",
-        "欺诈",
-    )
-    return any(word in text for word in keywords)
-
-
-def _build_execution_profile(merged_materials: dict[str, Any]) -> dict[str, Any]:
-    """
-    生成执行画像：是否走 fast_path 以及判定依据。
-    """
-    enable_fast_path = _is_enabled("ENABLE_FAST_PATH", default=False)
-    if not enable_fast_path:
-        return {"fast_path": False, "reason": "fast_path_disabled"}
-
-    dispute_text = _build_dispute_desc(merged_materials)
-    text_length = len(dispute_text)
-    message_count = len(_to_list(merged_materials.get("chat_history")))
-    image_count = len(_to_list(merged_materials.get("image_urls")))
-    order_amount = _safe_order_amount(merged_materials.get("order_amount", 0.0))
-
-    is_simple = (
-        image_count == 0
-        and message_count <= 4
-        and text_length <= 160
-        and order_amount <= 200
-        and not _contains_risk_keyword(dispute_text)
-    )
-    reason = "simple_case" if is_simple else "complex_case"
-    return {
-        "fast_path": is_simple,
-        "reason": reason,
-        "message_count": message_count,
-        "image_count": image_count,
-        "text_length": text_length,
-        "order_amount": order_amount,
-    }
-
-
 def _collect_agent2_tool_inputs(merged_materials: dict[str, Any]) -> tuple[str, str, str]:
     """
     从合并材料中抽取 Agent2 工具调用输入。
@@ -173,42 +136,6 @@ def _collect_agent2_tool_inputs(merged_materials: dict[str, Any]) -> tuple[str, 
     merchant_id = str(merged_materials.get("merchant_id", "") or "")
     dispute_desc = _build_dispute_desc(merged_materials)
     return buyer_id, merchant_id, dispute_desc
-
-
-def _run_agent2_tools_sequential(
-    *,
-    facts: Any,
-    buyer_id: str,
-    merchant_id: str,
-    dispute_desc: str,
-) -> tuple[list[MatchedRule], list[RuleBrief], Any, Any]:
-    """
-    串行执行 Agent2 工具调用（兼容路径）。
-    """
-    rule_result = match_rules_full(facts=facts)
-    buyer_profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id)
-    similar_cases = search_similar_cases(dispute_desc=dispute_desc, top_k=3)
-    return rule_result.display_rules, rule_result.rule_briefs, buyer_profile, similar_cases
-
-
-def _run_agent2_tools_parallel(
-    *,
-    facts: Any,
-    buyer_id: str,
-    merchant_id: str,
-    dispute_desc: str,
-) -> tuple[list[MatchedRule], list[RuleBrief], Any, Any]:
-    """
-    并行执行 Agent2 工具调用，降低规则/画像/判例的等待时间。
-    """
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        future_rules = executor.submit(match_rules_full, facts=facts)
-        future_profile = executor.submit(query_buyer_profile, buyer_id=buyer_id, merchant_id=merchant_id)
-        future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
-        rule_result = future_rules.result()
-        buyer_profile = future_profile.result()
-        similar_cases = future_cases.result()
-    return rule_result.display_rules, rule_result.rule_briefs, buyer_profile, similar_cases
 
 
 def _log_quality_baseline(normalized_dispute_id: str, report: AnalysisReport) -> None:
@@ -354,24 +281,13 @@ def run_with_events(
         )
         return cached_report
 
-    execution_profile = _build_execution_profile(merged_materials=merged_materials)
-    _emit_event(
-        emit_event,
-        "execution_profile",
-        {"dispute_id": normalized_dispute_id, **execution_profile},
-    )
-    logger.info(
-        "%s 执行画像：%s fast_path=%s reason=%s message_count=%s image_count=%s text_length=%s",
-        ASSISTED_LOG_PREFIX,
-        normalized_dispute_id,
-        execution_profile.get("fast_path"),
-        execution_profile.get("reason"),
-        execution_profile.get("message_count"),
-        execution_profile.get("image_count"),
-        execution_profile.get("text_length"),
-    )
+    buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(merged_materials=merged_materials)
+    order_amount = _safe_order_amount(merged_materials.get("order_amount", 0.0))
+    chat_turns = _extract_chat_turns(merged_materials)
+    chat_history_texts = _extract_chat_history_texts(merged_materials)
+    emotion_note = merged_materials.get("emotion_note")
 
-    # 2) 事实还原（B 层命中则跳过 Agent1）
+    # 2) Batch0：Agent1 与画像/判例并行（B 层命中则跳过 Agent1）
     _emit_event(
         emit_event,
         "stage_start",
@@ -379,13 +295,35 @@ def run_with_events(
     )
     agent1_start = time.perf_counter()
     facts_from_cache = get_cached_facts(normalized_dispute_id, merged_materials)
+    buyer_profile = None
+    similar_cases = None
     try:
         if facts_from_cache is not None:
             facts = facts_from_cache
             logger.info("%s Agent1 跳过（B 层命中）：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_profile = executor.submit(
+                    query_buyer_profile,
+                    buyer_id=buyer_id,
+                    merchant_id=merchant_id,
+                )
+                future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
+                buyer_profile = future_profile.result()
+                similar_cases = future_cases.result()
         else:
-            facts = extract(materials=merged_materials)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                future_facts = executor.submit(extract, materials=merged_materials)
+                future_profile = executor.submit(
+                    query_buyer_profile,
+                    buyer_id=buyer_id,
+                    merchant_id=merchant_id,
+                )
+                future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
+                facts = future_facts.result()
+                buyer_profile = future_profile.result()
+                similar_cases = future_cases.result()
             save_facts(normalized_dispute_id, merged_materials, facts)
+
         agent1_elapsed = _elapsed_ms(agent1_start)
         logger.info(
             "%s Agent1 完成：%s stage=agent1 elapsed_ms=%s cached=%s",
@@ -415,30 +353,43 @@ def run_with_events(
         )
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
-    # 3) 策略参谋：工具层拉规则/画像/判例，再调用无状态 recommend
+    # 3) Batch1：规则匹配 + 客户价值 + 恶意检测并行，再策略 LLM
     _emit_event(
         emit_event,
         "stage_start",
         {"stage": "agent2_tools", "dispute_id": normalized_dispute_id},
     )
-    tools_parallel_enabled = _is_enabled("ENABLE_AGENT2_PARALLEL_TOOLS", default=False)
     tools_start = time.perf_counter()
     try:
-        buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(merged_materials=merged_materials)
-        if tools_parallel_enabled:
-            matched_rules, rule_briefs, buyer_profile, similar_cases = _run_agent2_tools_parallel(
-                facts=facts,
-                buyer_id=buyer_id,
-                merchant_id=merchant_id,
-                dispute_desc=dispute_desc,
-            )
-        else:
-            matched_rules, rule_briefs, buyer_profile, similar_cases = _run_agent2_tools_sequential(
-                facts=facts,
-                buyer_id=buyer_id,
-                merchant_id=merchant_id,
-                dispute_desc=dispute_desc,
-            )
+        partial_strategy_input = StrategyInput(
+            facts=facts,
+            buyer_profile=buyer_profile,
+            matched_rules=[],
+            rule_briefs=[],
+            similar_cases=similar_cases,
+            order_amount=order_amount,
+            chat_history=chat_history_texts,
+            chat_turns=chat_turns,
+            emotion_note=emotion_note,
+        )
+        malicious_input = MaliciousDetectionInput(
+            buyer_profile=buyer_profile,
+            facts=facts,
+            order_amount=order_amount,
+            chat_history=chat_history_texts,
+            emotion_note=emotion_note,
+        )
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_rules = executor.submit(match_rules_full, facts=facts)
+            future_value = executor.submit(run_customer_value_analysis, partial_strategy_input)
+            future_malicious = executor.submit(detect_malicious_behavior, malicious_input)
+            rule_result = future_rules.result()
+            customer_value = future_value.result()
+            malicious_detection = future_malicious.result()
+
+        matched_rules = rule_result.display_rules
+        rule_briefs = rule_result.rule_briefs
         tools_elapsed = _elapsed_ms(tools_start)
         _emit_event(
             emit_event,
@@ -447,18 +398,17 @@ def run_with_events(
                 "stage": "agent2_tools",
                 "elapsed_ms": tools_elapsed,
                 "dispute_id": normalized_dispute_id,
-                "parallel": tools_parallel_enabled,
+                "parallel": True,
                 "partial_report": {
                     "matched_rules": [item.model_dump() for item in matched_rules],
                 },
             },
         )
         logger.info(
-            "%s Agent2工具完成：%s stage=agent2_tools elapsed_ms=%s parallel=%s",
+            "%s Agent2工具完成：%s stage=agent2_tools elapsed_ms=%s parallel=True",
             ASSISTED_LOG_PREFIX,
             normalized_dispute_id,
             tools_elapsed,
-            tools_parallel_enabled,
         )
 
         _emit_event(
@@ -473,14 +423,17 @@ def run_with_events(
             matched_rules=matched_rules,
             rule_briefs=rule_briefs,
             similar_cases=similar_cases,
-            order_amount=_safe_order_amount(merged_materials.get("order_amount", 0.0)),
-            chat_history=_extract_chat_history_texts(merged_materials),
-            emotion_note=merged_materials.get("emotion_note"),
+            order_amount=order_amount,
+            chat_history=chat_history_texts,
+            chat_turns=chat_turns,
+            emotion_note=emotion_note,
+            precomputed_customer_value=customer_value,
+            precomputed_malicious_detection=malicious_detection,
         )
 
         def emit_reasoning_delta(delta_text: str) -> None:
             """
-            将 Agent2 推理增量文本透传给流式事件，供前端实时拼接展示。
+            将 Agent2 策略增量文本透传给流式事件，供前端实时拼接展示。
             """
             if not delta_text:
                 return
@@ -497,7 +450,6 @@ def run_with_events(
 
         strategy_output = recommend(
             input_data=strategy_input,
-            fast_path=bool(execution_profile.get("fast_path")),
             reasoning_delta_callback=emit_reasoning_delta if emit_event is not None else None,
         )
         agent2_elapsed = _elapsed_ms(agent2_start)
@@ -539,10 +491,11 @@ def run_with_events(
             strategy_output=strategy_output,
             facts=facts,
             order_id=str(merged_materials.get("order_id", "") or ""),
-            order_amount=_safe_order_amount(merged_materials.get("order_amount", 0.0)),
-            emotion_note=merged_materials.get("emotion_note"),
+            order_amount=order_amount,
+            emotion_note=emotion_note,
+            chat_history=chat_turns,
         )
-        scripts = generate(input_data=script_input, fast_path=bool(execution_profile.get("fast_path")))
+        scripts = generate(input_data=script_input)
         agent3_elapsed = _elapsed_ms(agent3_start)
         logger.info(
             "%s Agent3 完成：%s stage=agent3 elapsed_ms=%s",

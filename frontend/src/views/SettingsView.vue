@@ -14,10 +14,6 @@
     />
 
     <el-form label-width="120px">
-      <el-form-item label="商家编号">
-        <el-input v-model="merchant_id" disabled />
-      </el-form-item>
-
       <el-form-item label="运行模式">
         <el-select v-model="mode" placeholder="请选择模式">
           <el-option label="辅助模式（assisted）" value="assisted" />
@@ -32,7 +28,6 @@
 
     <div class="action-row">
       <el-button :loading="loading" @click="load_config">刷新配置</el-button>
-      <!-- 保存操作：success 为绿色主按钮，区分默认灰的「刷新配置」 -->
       <el-button type="success" :loading="loading" @click="save_config">保存配置</el-button>
     </div>
   </el-card>
@@ -42,19 +37,16 @@
 import { onMounted, ref } from 'vue'
 import { fetchMerchantConfig, updateMerchantConfig } from '../api'
 
-// ---------- 页面状态：商家配置编辑与接口加载状态 ----------
-const merchant_id = ref('MERCHANT_DEMO_001')
 const mode = ref('assisted')
 const auto_threshold = ref(0.8)
 const loading = ref(false)
 const error_message = ref('')
 
-// ---------- 配置读取：加载后端存储的商家模式 ----------
 async function load_config() {
   loading.value = true
   error_message.value = ''
   try {
-    const response = await fetchMerchantConfig(merchant_id.value)
+    const response = await fetchMerchantConfig()
     mode.value = response.mode
     auto_threshold.value = Number(response.auto_threshold)
   } catch (error) {
@@ -64,7 +56,6 @@ async function load_config() {
   }
 }
 
-// ---------- 配置保存：更新商家模式与阈值 ----------
 async function save_config() {
   loading.value = true
   error_message.value = ''
@@ -73,7 +64,7 @@ async function save_config() {
       mode: mode.value,
       auto_threshold: Number(auto_threshold.value)
     }
-    const response = await updateMerchantConfig(merchant_id.value, payload)
+    const response = await updateMerchantConfig(payload)
     mode.value = response.mode
     auto_threshold.value = Number(response.auto_threshold)
   } catch (error) {
@@ -83,7 +74,6 @@ async function save_config() {
   }
 }
 
-// ---------- 生命周期：页面加载后自动拉取一次配置 ----------
 onMounted(() => {
   load_config()
 })

@@ -76,10 +76,11 @@ def test_e2e_first_analysis_should_return_valid_report(backend_server: str) -> N
     assert report["dispute_id"] == "E2E-001"
     assert report["facts"]["defect_type"] == "破洞"
     assert report["strategy"]["disposition"] in VALID_DISPOSITIONS
-    assert report["scripts"]["recommended_version"] in {
-        "defense_version",
-        "negotiate_version",
-        "compensate_version",
+    assert report["scripts"]["script"].strip() != ""
+    assert report["scripts"]["response_mode"] in {
+        "merchant_fault",
+        "malicious_risk",
+        "neutral_negotiate",
     }
 
 

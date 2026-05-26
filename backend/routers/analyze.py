@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from backend.controllers.assisted_controller import run as assisted_run
 from backend.controllers.assisted_controller import run_with_events as assisted_run_with_events
+from backend.defaults import default_dispute_id, default_merchant_id
 
 
 API_LOG_PREFIX = "[API]"
@@ -33,14 +34,18 @@ class AnalyzeRequest(BaseModel):
     /analyze 请求参数。
     """
 
-    dispute_id: str = Field(..., description="纠纷编号")
-    merchant_id: str = Field(..., description="商家编号")
+    dispute_id: str = Field(default="", description="纠纷编号，空则使用 DEFAULT_DISPUTE_ID")
+    merchant_id: str = Field(default="", description="商家编号，空则使用 DEFAULT_MERCHANT_ID")
     messages: list[dict[str, Any]] = Field(default_factory=list, description="纠纷消息列表")
     order_id: str = Field(default="", description="订单号")
     order_amount: float = Field(default=0.0, description="订单金额")
     buyer_id: str = Field(default="", description="买家脱敏标识")
     image_urls: list[str] = Field(default_factory=list, description="举证图片 URL")
     reset_context: bool = Field(default=False, description="是否重置该纠纷缓存并以本次材料为准")
+    materials_snapshot: bool = Field(
+        default=True,
+        description="True 时 chat_history/image_urls 以本次请求为准覆盖缓存；False 时增量追加",
+    )
     product_category_slug: str = Field(
         default="",
         description="平台商品品类 slug（API 接入后填入；有则直接激活对应品类规范）",
@@ -79,7 +84,7 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
     统一构建控制器所需材料，供普通与流式接口复用。
     """
     return {
-        "merchant_id": request.merchant_id.strip(),
+        "merchant_id": _resolve_merchant_id(request.merchant_id),
         "order_id": request.order_id.strip(),
         "order_amount": request.order_amount,
         "buyer_id": request.buyer_id.strip(),
@@ -87,11 +92,29 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
         "chat_history": request.messages,
         "image_urls": request.image_urls,
         "reset_context": request.reset_context,
+        "materials_snapshot": request.materials_snapshot,
         "product_category_slug": request.product_category_slug.strip(),
         "platform_service_tags": [
             str(tag).strip() for tag in request.platform_service_tags if str(tag).strip()
         ],
     }
+
+
+# ---------- 标识占位：前端未传时使用环境变量默认值 ----------
+def _resolve_merchant_id(raw_merchant_id: str) -> str:
+    """
+    解析商家编号，空值回退到 DEFAULT_MERCHANT_ID。
+    """
+    normalized = str(raw_merchant_id or "").strip()
+    return normalized or default_merchant_id()
+
+
+def _resolve_dispute_id(raw_dispute_id: str) -> str:
+    """
+    解析纠纷编号，空值回退到 DEFAULT_DISPUTE_ID。
+    """
+    normalized = str(raw_dispute_id or "").strip()
+    return normalized or default_dispute_id()
 
 
 def _sse_pack(event_type: str, payload: dict[str, Any]) -> str:
@@ -107,13 +130,8 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     """
     执行辅助模式分析并返回结构化报告。
     """
-    if not request.dispute_id.strip():
-        raise HTTPException(status_code=400, detail="dispute_id 不能为空")
-    if not request.merchant_id.strip():
-        raise HTTPException(status_code=400, detail="merchant_id 不能为空")
-
     request_start = time.perf_counter()
-    normalized_dispute_id = request.dispute_id.strip()
+    normalized_dispute_id = _resolve_dispute_id(request.dispute_id)
     logger.info("%s 开始处理 /analyze 请求，dispute_id=%s", API_LOG_PREFIX, normalized_dispute_id)
     try:
         materials = _build_materials(request=request)
@@ -141,12 +159,8 @@ def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
     """
     if not _is_enabled("ENABLE_ANALYZE_STREAM", default=False):
         raise HTTPException(status_code=404, detail="流式分析未启用")
-    if not request.dispute_id.strip():
-        raise HTTPException(status_code=400, detail="dispute_id 不能为空")
-    if not request.merchant_id.strip():
-        raise HTTPException(status_code=400, detail="merchant_id 不能为空")
 
-    normalized_dispute_id = request.dispute_id.strip()
+    normalized_dispute_id = _resolve_dispute_id(request.dispute_id)
     materials = _build_materials(request=request)
     logger.info("%s 开始处理 /analyze/stream 请求，dispute_id=%s", API_LOG_PREFIX, normalized_dispute_id)
 

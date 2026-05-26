@@ -76,6 +76,7 @@ def backend_server() -> str:
     env = os.environ.copy()
     env["DB_URL"] = f"sqlite+pysqlite:///{TEST_DB_PATH.as_posix()}"
     env.setdefault("PYTHONUTF8", "1")
+    env["ENABLE_TEST_STUBS"] = "1"
 
     process = subprocess.Popen(
         [

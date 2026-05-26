@@ -32,6 +32,17 @@
 | **A3-4** | **客户价值标记接入话术细化**          | 老客与高价值单在协商路径下调整语气与补偿建议，不改变 disposition 主结论            | A3-1, A2-6 |
 
 
+### Agent 3 完成状态（2026-05-24）
+
+| 模块 | 状态 | 验收要点 |
+| ---- | ---- | -------- |
+| A3-1 | ✅ 已完成 | `ScriptInput` 由 `disposition` / `strategy_stage` / `malicious_detection` 驱动，无三策略分数 |
+| A3-2 | ✅ 已完成 | 内部 `response_mode` 三类应对思想；对外 `ScriptOutput.script` 单条；前端 `ScriptCard` 已对齐 |
+| A3-3 | ✅ 已完成 | 禁用词、店主人设、`compensation_policy` 门禁、对话续写（`dialogue_plan`）、举证期不复述货损 |
+| A3-4 | ✅ 已完成 | `tone_hint` / `customer_value_channel` / `compensation_uplift` 注入 LLM payload；prompt 含老客/高价值语气指引与 few-shot |
+
+**超出本表但已落地的增强：** Controller 预计算 `dialogue_plan`；两步 LLM（语境分析 + 话术生成）；已移除 `script_templates` 读取链路。
+
 ## 推荐执行顺序
 
 A2-1 → A2-2 → A2-3 → A2-4 → A2-5 → A2-6 → A2-7 → A3-1 → A3-2 → A3-3 → A3-4
@@ -45,4 +56,13 @@ A2-1 → A2-2 → A2-3 → A2-4 → A2-5 → A2-6 → A2-7 → A3-1 → A3-2 →
 3. Agent2 最终仅输出 `disposition` 主结论，且“默认协商”在无强覆盖条件时稳定生效。
 4. 胜率与置信度解释文本必须能对应到规则站位与证据情况。
 5. Agent2/Controller/前端关键测试通过，旧三策略用例完成迁移或删除。
+6. Agent3 输出单一推荐话术；`response_mode` 仅作内部应对思想；客户价值只调节语气与补偿弹性，不改变 disposition。
 
+## LLM 链路优化（2026-05）
+
+- 删除 `fast_path` / `ENABLE_FAST_PATH` / `*_FAST` 模型分支；固定「全链路 mimo-v2.5 + 策略 JSON 唯一 Pro」。
+- Agent1 品类 slug 由事实 LLM / 视觉 LLM 同批输出，merge 消费去重 slug；移除 `infer_category_slug_llm` 重复调用。
+- 删除独立 `dialogue_plan` LLM；`dialogue_context` 并入 Agent2 策略 JSON（4 键）。
+- Agent2 策略 LLM 直出 JSON 展示字段；恶意语义分仅允许 5/10/15。
+- 并发：Batch0 画像/判例与 Agent1 重叠；Batch1 规则+价值+恶意并行后再策略+话术。
+- env：`AGENT2_LLM_MODEL_VALUE` / `AGENT2_LLM_MODEL_MALICIOUS` / `AGENT2_LLM_MODEL_STRATEGY`。

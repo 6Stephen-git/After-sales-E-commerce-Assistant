@@ -82,10 +82,9 @@ MOCK_ANALYZE_REPORT = {
         }
     ],
     "scripts": {
-        "defense_version": "您好，订单已核实，基于证据我们建议先走平台复核流程。",
-        "negotiate_version": "您好，我们可以先协商部分补偿，请您确认诉求。",
-        "compensate_version": "您好，问题已确认，我们可按流程为您办理补偿。",
-        "recommended_version": "defense_version",
+        "script": "您好，这单我仔细看了，还需要您补充一下关键凭证，收到后我马上继续处理。",
+        "response_mode": "malicious_risk",
+        "usage_tip": "建议保留对话记录：此话术侧重规则与举证，不轻易让步。",
     },
     "emotion_alert": None,
     "buyer_profile": {

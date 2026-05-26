@@ -12,6 +12,16 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+TEST_DB_PATH = os.path.join(ROOT_DIR, "tests", "tmp_agent2.sqlite3")
+if os.path.exists(TEST_DB_PATH):
+    os.remove(TEST_DB_PATH)
+os.environ["DB_URL"] = f"sqlite+pysqlite:///{TEST_DB_PATH.replace(os.sep, '/')}"
+os.environ.setdefault("ENABLE_TEST_STUBS", "1")
+
+from backend.db import init_db
+
+init_db()
+
 
 from backend.agents.agent2.strategist import recommend
 import backend.agents.agent2.strategist as strategist_module
@@ -53,7 +63,7 @@ class TestAgent2Recommend:
                 "demand_reasonableness": "borderline",
             },
         )
-        monkeypatch.setattr(strategist_module, "_llm_generate_reasoning", lambda **kwargs: None)
+        monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **kwargs: None)
 
     def test_recommend_compensate_when_high_quality_defect(self, monkeypatch):
         """高质量瑕疵证据，倾向善后策略。"""
@@ -245,7 +255,7 @@ class TestAgent2Recommend:
     def test_recommend_should_use_fallback_reasoning_when_llm_unavailable(self, monkeypatch):
         """LLM不可用时，reasoning 仍应保持三段结构。"""
         self._mock_customer_value_fields(monkeypatch)
-        monkeypatch.setattr(strategist_module, "_llm_generate_reasoning", lambda **kwargs: None)
+        monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **kwargs: None)
         facts = FactOutput(evidence_quality="medium", missing_evidence=["缺少清晰图片"])
         profile = BuyerProfile(buyer_id="buyer_fallback")
         input_data = StrategyInput(
@@ -269,13 +279,20 @@ class TestAgent2Recommend:
         self._mock_customer_value_fields(monkeypatch)
         monkeypatch.setattr(
             strategist_module,
-            "_llm_generate_reasoning",
-            lambda **kwargs: (
-                "客户意图：质量问题维权。\n"
-                "风险点：证据链仍需补强。\n"
-                "建议动作：先要求买家补充完整开箱视频，暂不承诺退款。\n"
-                "推理理由：现有举证不足以认定责任；补证有利于按规则抗辩并控制损失。"
-            ),
+            "_llm_generate_strategy",
+            lambda **kwargs: {
+                "customer_intent_analysis": "质量问题维权。",
+                "strategy_direction_summary": "先要求买家补充完整开箱视频，暂不承诺退款。",
+                "strategy_direction_rationale": "现有举证不足以认定责任；补证有利于按规则抗辩并控制损失。",
+                "platform_rule_basis": ["买家应提供初步凭证"],
+                "risk_factors": ["证据链仍需补强"],
+                "dialogue_context": {
+                    "dialogue_mode": "cold_start",
+                    "blocked_evidence_requests": [],
+                    "actionable_evidence_requests": ["开箱视频"],
+                    "fallback_script": "麻烦补一下开箱视频，我核对后马上处理。",
+                },
+            },
         )
         facts = FactOutput(evidence_quality="high", defect_type="破洞")
         profile = BuyerProfile(buyer_id="buyer_llm")
@@ -290,7 +307,8 @@ class TestAgent2Recommend:
         assert output.reasoning.startswith("客户意图：")
         assert "质量问题维权" in output.customer_intent_analysis
         assert "开箱视频" in output.strategy_direction_summary
-        assert "举证不足" in output.strategy_direction_rationale or "不足以认定" in output.strategy_direction_rationale
+        assert output.dialogue_context is not None
+        assert "开箱视频" in output.dialogue_context.actionable_evidence_requests
 
     def test_recommend_should_expose_malicious_layer_result(self, monkeypatch):
         """A2-4 分层编排后，应透传恶意检测层输出并写入风险提示。"""
@@ -364,6 +382,7 @@ class TestAgent2Tools:
 
         def _fake_llm_match(facts, documents, section_map):
             from backend.tools.rule_matcher import _filter_articles_by_sections, _score_article
+            from backend.tools.rule_matcher_llm import RuleMatchLLMResult
 
             scored = []
             for doc_id, doc in documents.items():
@@ -371,7 +390,7 @@ class TestAgent2Tools:
                     rule = _score_article(doc_id, doc, article, facts.rule_match_plan.search_terms)
                     if rule is not None:
                         scored.append(rule)
-            return scored
+            return RuleMatchLLMResult(matched_rules=scored, display_rule_ids=None)
 
         monkeypatch.setattr("backend.tools.rule_matcher_llm.llm_match_articles", _fake_llm_match)
         from schemas import RuleMatchPlan, RuleSearchTerms, SectionSelection
@@ -492,6 +511,58 @@ class TestAgent2Tools:
         facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
         assert match_rules(facts) == []
 
+    def test_classify_relevance_should_drop_generic_case_only_hits(self):
+        """字面降级：仅命中泛化 case 词时应判 weak 并丢弃。"""
+        from backend.tools.rule_matcher import _classify_relevance, RULE_RELEVANCE_WEAK
+
+        relevance = _classify_relevance(
+            must_hits=0,
+            should_hits=0,
+            case_hits=1,
+            title="某条",
+            hit_terms=["case:举证"],
+        )
+        assert relevance == RULE_RELEVANCE_WEAK
+
+    def test_resolve_display_should_use_llm_display_ids_without_second_call(self, monkeypatch):
+        """条文匹配同批返回 display_rule_ids 时，不再调用展示筛选 LLM。"""
+        from backend.tools.rule_matcher import _resolve_display_rules
+        from schemas import MatchedRule, RULE_RELEVANCE_MUST
+
+        pool = [
+            MatchedRule(
+                rule_id="base::第六十五条",
+                rule_summary="初步凭证要点",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id="base",
+            ),
+            MatchedRule(
+                rule_id="fresh::第七条",
+                rule_summary="生鲜48小时举证",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id="fresh",
+            ),
+        ]
+
+        def _should_not_call(*_args, **_kwargs):
+            raise AssertionError("不应再调用展示筛选 LLM")
+
+        monkeypatch.setattr(
+            "backend.tools.rule_matcher_llm.llm_filter_event_display_rules",
+            _should_not_call,
+        )
+        facts = FactOutput(issue_summary="香蕉腐烂")
+        display = _resolve_display_rules(
+            pool,
+            facts=facts,
+            llm_display_ids=["fresh::第七条"],
+            max_count=3,
+        )
+        assert len(display) == 1
+        assert display[0].rule_id == "fresh::第七条"
+
     def test_query_buyer_profile_should_return_default_when_unknown(self):
         """未知买家 ID 返回默认画像。"""
         profile = query_buyer_profile("unknown_buyer")
@@ -579,12 +650,12 @@ class TestAgent2Tools:
 
     def test_detect_malicious_behavior_should_merge_semantic_signals(self, monkeypatch):
         """语义层返回结构化信号时应参与综合评分。"""
-        monkeypatch.setenv("AGENT2_LLM_MODEL", "mock-model")
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
         monkeypatch.setattr(
             agent2_tools_module,
             "chat_completion",
             lambda **kwargs: (
-                '[{"signal_type":"review_blackmail","description":"出现差评勒索语义","score":12,"source":"llm_semantic"}]'
+                '[{"signal_type":"review_blackmail","description":"出现差评勒索语义","score":10,"source":"llm_semantic"}]'
             ),
         )
         input_data = MaliciousDetectionInput(
@@ -594,18 +665,18 @@ class TestAgent2Tools:
             chat_history=["不给赔偿我就差评并投诉你们店"],
         )
         result = detect_malicious_behavior(input_data)
-        assert result.risk_score >= 12
+        assert result.risk_score >= 10
         assert any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
 
     def test_detect_malicious_behavior_should_reject_fake_credential_without_fact_anchor(self, monkeypatch):
         """语义层输出网图信号但 facts 无锚定时，应丢弃以防幻觉渗入。"""
-        monkeypatch.setenv("AGENT2_LLM_MODEL", "mock-model")
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
         monkeypatch.setattr(
             agent2_tools_module,
             "chat_completion",
             lambda **kwargs: (
                 '[{"signal_type":"fake_credential_web_image",'
-                '"description":"举证图带门户网站水印，疑似网图","score":12,"source":"llm_semantic"}]'
+                '"description":"举证图带门户网站水印，疑似网图","score":10,"source":"llm_semantic"}]'
             ),
         )
         input_data = MaliciousDetectionInput(
@@ -623,14 +694,35 @@ class TestAgent2Tools:
         assert result.risk_score == 0
         assert not any(item.signal_type == "fake_credential_web_image" for item in result.triggered_signals)
 
-    def test_detect_malicious_behavior_should_not_mark_emotional_complaint_as_blackmail(self, monkeypatch):
-        """仅情绪激动+提及投诉但无条件交换，不应计为勒索恶意分。"""
-        monkeypatch.setenv("AGENT2_LLM_MODEL", "mock-model")
+    def test_detect_malicious_behavior_should_reject_abuse_refund_without_chat_markers(self, monkeypatch):
+        """语义层复述 few-shot 套利话术但聊天无对应表述时，应丢弃以防误报。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
         monkeypatch.setattr(
             agent2_tools_module,
             "chat_completion",
             lambda **kwargs: (
-                '[{"signal_type":"review_blackmail","description":"出现投诉表述","score":12,"source":"llm_semantic"}]'
+                '[{"signal_type":"abuse_refund_intent_chat",'
+                '"description":"聊天暗示高频退款并提及运费险套利，存在滥用售后意图","score":5,"source":"llm_semantic"}]'
+            ),
+        )
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_banana", return_rate=0.05),
+            facts=FactOutput(evidence_quality="high", issue_summary="香蕉腐烂", defect_type="变质"),
+            order_amount=29.9,
+            chat_history=["收到的香蕉都烂了，要求退款"],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert result.risk_score == 0
+        assert not any(item.signal_type == "abuse_refund_intent_chat" for item in result.triggered_signals)
+
+    def test_detect_malicious_behavior_should_not_mark_emotional_complaint_as_blackmail(self, monkeypatch):
+        """仅情绪激动+提及投诉但无条件交换，不应计为勒索恶意分。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
+        monkeypatch.setattr(
+            agent2_tools_module,
+            "chat_completion",
+            lambda **kwargs: (
+                '[{"signal_type":"review_blackmail","description":"出现投诉表述","score":10,"source":"llm_semantic"}]'
             ),
         )
         input_data = MaliciousDetectionInput(

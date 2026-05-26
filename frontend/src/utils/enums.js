@@ -17,10 +17,10 @@ const SENTIMENT_LABEL_MAP = {
   positive: '正面'
 }
 
-const SCRIPT_VERSION_LABEL_MAP = {
-  defense_version: '抗辩版',
-  negotiate_version: '协商版',
-  compensate_version: '善后版'
+const RESPONSE_MODE_LABEL_MAP = {
+  merchant_fault: '主动担责',
+  malicious_risk: '依据应对',
+  neutral_negotiate: '协商沟通'
 }
 
 // ---------- 映射函数：处置方向 ----------
@@ -38,7 +38,7 @@ export function getSentimentLabel(value) {
   return SENTIMENT_LABEL_MAP[value] || '未知情绪'
 }
 
-// ---------- 映射函数：话术版本 ----------
-export function getScriptVersionLabel(value) {
-  return SCRIPT_VERSION_LABEL_MAP[value] || '未知版本'
+// ---------- 映射函数：话术应对思想 ----------
+export function getResponseModeLabel(value) {
+  return RESPONSE_MODE_LABEL_MAP[value] || '未知应对模式'
 }

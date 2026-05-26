@@ -7,6 +7,8 @@ Agent 1：事实还原员。
 from __future__ import annotations
 
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput, RuleMatchPlan
@@ -16,8 +18,10 @@ from backend.agents.agent1.rule_plan import build_rule_navigation_prompt_block, 
 from backend.tools.agent1_tools import analyze_image
 from backend.tools.llm_client import chat_completion
 from backend.tools.platform_api import query_logistics
+from backend.tools.rule_lexicon import validate_category_slug
 
 LOG_PREFIX = "[Agent1]"
+logger = logging.getLogger(__name__)
 
 
 # ---------- 纠纷材料解析：图片 URL 与可检索文本上下文 ----------
@@ -197,6 +201,7 @@ def _llm_extract_issue(
         "  无则填 []；禁止把整段聊天粘进单条 red_flags；禁止单一条目硬编码某一品类示例句。\n"
         "- rule_match_plan: 对象，含 activated_lanes、target_doc_ids、section_selections、search_terms、"
         "category_confidence、service_confidence（规则导航，见下方候选表）\n"
+        "- category_slug: 字符串或 null，从候选 slug 枚举选择最匹配特殊品类（无图时尽量填写）\n"
         "  search_terms 要求：must_terms 必须使用候选节摘录中的规则正文用语，禁止填买家口语；"
         "将买家说法映射为规则用语（如破洞/撕裂→破损，开线→开线/质量问题）；"
         "case_terms 可保留买家原话；若可判断商品品类，须激活 C 通道并选中对应品类 doc\n"
@@ -232,6 +237,39 @@ def _fallback_infer_goods_received(text_context: str) -> bool | None:
     if any(keyword in text_context for keyword in ["收到了", "已收到", "签收了", "拿到了"]):
         return True
     return None
+
+
+def _collect_category_slugs(
+    issue_result: dict[str, Any] | None,
+    vision_results: list[dict[str, Any]],
+) -> list[str]:
+    """
+    合并事实 LLM 与各图视觉分析输出的 category_slug，去重保序。
+    """
+    slugs: list[str] = []
+    if isinstance(issue_result, dict):
+        text_slug = validate_category_slug(issue_result.get("category_slug"))
+        if text_slug:
+            slugs.append(text_slug)
+        raw_plan = issue_result.get("rule_match_plan")
+        if isinstance(raw_plan, dict):
+            nested_slug = validate_category_slug(raw_plan.get("category_slug"))
+            if nested_slug and nested_slug not in slugs:
+                slugs.append(nested_slug)
+    for image_result in vision_results:
+        if not isinstance(image_result, dict) or image_result.get("error"):
+            continue
+        vision_slug = validate_category_slug(image_result.get("category_slug"))
+        if vision_slug and vision_slug not in slugs:
+            slugs.append(vision_slug)
+    return slugs
+
+
+def _analyze_single_image(image_url: str, guidance: str) -> dict[str, Any]:
+    """
+    包装单图视觉分析，供线程池并发调用。
+    """
+    return analyze_image(image_url=image_url, guidance=guidance)
 
 
 # ---------- 主入口：物流 + 多模态 + 规则化疑点，输出 FactOutput ----------
@@ -272,11 +310,34 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     logistics_info = query_logistics(order_id=order_id) if order_id else None
     logistics_normal = None if logistics_info is None else (not logistics_info.is_abnormal)
-    issue_result = _llm_extract_issue(
-        text_context=text_context,
-        logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
-        materials=materials,
-    )
+    vision_guidance = buyer_text or ""
+
+    issue_result: dict[str, Any] | None = None
+    vision_results: list[dict[str, Any]] = []
+    if text_context or image_urls:
+        max_workers = max(1, min(4, 1 + len(image_urls[:3])))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_issue = (
+                executor.submit(
+                    _llm_extract_issue,
+                    text_context=text_context,
+                    logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
+                    materials=materials,
+                )
+                if text_context
+                else None
+            )
+            image_futures = [
+                executor.submit(_analyze_single_image, image_url=url, guidance=vision_guidance)
+                for url in image_urls[:3]
+            ]
+            if future_issue is not None:
+                issue_result = future_issue.result()
+            vision_results = [future.result() for future in image_futures]
+    else:
+        issue_result = None
+        vision_results = []
+
     issue_summary = None
     intent_tags: list[str] = []
     goods_received = None
@@ -325,8 +386,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
             }
         )
 
-    for image_url in image_urls[:3]:
-        image_result = analyze_image(image_url=image_url, guidance=issue_summary)
+    for image_url, image_result in zip(image_urls[:3], vision_results):
         evidence_items.append({"type": "image", "url": image_url})
         if image_result.get("error"):
             error_text = str(image_result["error"])
@@ -397,6 +457,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     uncertainty_note = "；".join(dict.fromkeys(uncertainty_reasons)) if uncertainty_reasons else None
 
+    category_slugs = _collect_category_slugs(issue_result, vision_results)
     raw_plan = issue_result.get("rule_match_plan") if isinstance(issue_result, dict) else None
     rule_match_plan = merge_llm_rule_plan(
         raw_plan=raw_plan if isinstance(raw_plan, dict) else None,
@@ -405,7 +466,21 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         logistics_normal=logistics_normal,
         text_context=text_context,
         issue_summary=issue_summary,
+        category_slugs=category_slugs,
     )
+    if not rule_match_plan.target_doc_ids:
+        from backend.tools.rule_matcher import build_fallback_plan_from_materials
+
+        rule_match_plan = build_fallback_plan_from_materials(
+            materials,
+            FactOutput(
+                issue_summary=issue_summary,
+                intent_tags=intent_tags,
+                logistics_normal=logistics_normal,
+                defect_type=defect_type,
+            ),
+        )
+        logger.warning("%s rule_match_plan 为空，已启用 materials 兜底导航", LOG_PREFIX)
 
     return FactOutput(
         issue_summary=issue_summary,

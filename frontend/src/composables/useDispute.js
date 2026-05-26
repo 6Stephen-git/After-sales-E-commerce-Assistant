@@ -1,14 +1,6 @@
 import { computed, ref } from 'vue'
 import { analyzeDispute, analyzeDisputeStream } from '../api'
 
-// ---------- 默认商家与纠纷上下文：用于辅助模式页面演示 ----------
-const default_context = {
-  dispute_id: 'DISPUTE_DEMO_001',
-  merchant_id: 'MERCHANT_DEMO_001',
-  order_id: 'ORDER_DEMO_001',
-  order_amount: 199.0,
-  buyer_id: 'BUYER_HASH_DEMO_001'
-}
 const ENABLE_ANALYZE_STREAM = String(import.meta.env.VITE_ENABLE_ANALYZE_STREAM || '0') === '1'
 
 // ---------- 模块级状态：跨路由切换保留对话和分析结果 ----------
@@ -95,22 +87,15 @@ export function use_dispute() {
   async function request_ai_help() {
     loading.value = true
     error_message.value = ''
-    // ---------- 清理旧报告：避免新分析与上次结果混杂 ----------
     report.value = null
     progress_message.value = '正在提交分析请求...'
     try {
       const payload = {
-        dispute_id: default_context.dispute_id,
-        merchant_id: default_context.merchant_id,
         messages: messages.value.map((item) => ({
           role: item.role,
           content: item.content
         })),
-        order_id: default_context.order_id,
-        order_amount: default_context.order_amount,
-        buyer_id: default_context.buyer_id,
-        // ---------- 每次请求都使用前端当前材料，避免后端缓存混入历史无关图片 ----------
-        reset_context: true,
+        reset_context: false,
         image_urls: messages.value
           .map((item) => String(item.image_url || '').trim())
           .filter((url) => Boolean(url))
@@ -120,7 +105,7 @@ export function use_dispute() {
         agent1: '正在提取事实...',
         agent2_tools: '正在检索规则、画像与判例...',
         agent2: '正在生成策略建议...',
-        agent3: '正在生成话术版本...'
+        agent3: '正在生成推荐话术...'
       }
       const merge_partial_report = (partial) => {
         report.value = {
@@ -152,12 +137,6 @@ export function use_dispute() {
             if (event_type === 'stage_start') {
               const stage_key = String(event_data?.stage || '')
               progress_message.value = stage_messages[stage_key] || '分析进行中...'
-              return
-            }
-            if (event_type === 'execution_profile') {
-              if (event_data?.fast_path === true) {
-                progress_message.value = '已识别为简单任务，启用快速路径...'
-              }
               return
             }
             if (event_type === 'stage_done' && event_data?.partial_report) {

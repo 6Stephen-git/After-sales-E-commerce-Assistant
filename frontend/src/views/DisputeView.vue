@@ -41,7 +41,6 @@ import ChatPanel from '../components/chat/ChatPanel.vue'
 import StrategyPanel from '../components/strategy/StrategyPanel.vue'
 import { use_dispute } from '../composables/useDispute'
 
-// ---------- 组合式状态：管理纠纷对话与分析请求 ----------
 const {
   messages,
   report,
@@ -56,12 +55,10 @@ const {
   request_ai_help
 } = use_dispute()
 
-// ---------- 输入同步：承接 ChatPanel 的双向绑定事件 ----------
 function update_input_text(value) {
   input_text.value = value
 }
 
-// ---------- 发送身份同步：商家 / 买家切换由子组件回写 ----------
 function update_sender_role(value) {
   sender_role.value = value
 }

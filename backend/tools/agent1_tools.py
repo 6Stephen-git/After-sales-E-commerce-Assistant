@@ -15,63 +15,10 @@ from typing import Any
 
 import httpx
 
+from backend.tools.rule_lexicon import format_category_slug_catalog_lines, validate_category_slug
+
 LOG_PREFIX = "[Agent1工具]"
 logger = logging.getLogger(__name__)
-
-
-# ---------- 测试/联调：mock:// 前缀走本地固定返回，不落网 ----------
-def _mock_analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
-    """
-    离线模拟多模态返回结构，仅用于测试或本地联调。
-
-    URL 须以 `mock://` 开头，其后标识决定返回哪套视觉字段；未识别标识时返回 error 字典。
-
-    参数:
-        image_url: 形如 mock://tear-tag 的测试地址。
-
-    返回:
-        与真实接口对齐的字段 dict（含 defect_type、edge_condition 等），
-        或 `{"error": "中文原因"}`。
-    """
-    key = image_url.replace("mock://", "").strip().lower()
-    mock_map: dict[str, dict[str, Any]] = {
-        "sample-damage": {
-            "visual_description": "商品局部存在明显外观破损，边缘不规则。",
-            "findings": ["局部区域可见破损", "破损边缘不规则", "问题区域较集中"],
-            "attributes": {"issue_location": "商品局部", "damage_shape": "不规则", "damage_severity": "中等"},
-            "defect_type": "外观破损",
-            "defect_location": "商品局部",
-            "edge_condition": "不规则",
-            "background": "平面背景",
-            "wear_signs": "无法仅凭图片判断使用痕迹",
-        },
-        "sample-stain": {
-            "visual_description": "商品表面存在明显污渍，分布在局部区域。",
-            "findings": ["表面可见污渍", "污渍集中在单一区域"],
-            "attributes": {"issue_location": "表面局部", "issue_type": "污渍"},
-            "defect_type": "污渍",
-            "defect_location": "表面局部",
-            "edge_condition": "无法判断",
-            "background": "平面背景",
-            "wear_signs": "无法仅凭图片判断使用痕迹",
-        },
-        "sample-clean": {
-            "visual_description": "图片中未发现明显外观异常。",
-            "findings": ["未见明显破损或污渍", "整体外观较完整"],
-            "attributes": {"issue_type": "无明显瑕疵"},
-            "defect_type": "无瑕疵",
-            "defect_location": "无法判断",
-            "edge_condition": "无法判断",
-            "background": "平面背景",
-            "wear_signs": "无法仅凭图片判断使用痕迹",
-        },
-    }
-    if key not in mock_map:
-        return {"error": f"图片分析失败：未识别的 mock 图片标识 {key}"}
-    payload = mock_map[key]
-    if guidance:
-        payload["guided_by"] = guidance
-    return payload
 
 
 # ---------- 端点识别：阿里云百炼多模态 generation 走专用协议 ----------
@@ -233,6 +180,16 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
     tag = _coerce_has_tag(raw.get("has_tag"))
     if tag is not None:
         out["has_tag"] = tag
+
+    category_slug = validate_category_slug(raw.get("category_slug"))
+    if category_slug:
+        out["category_slug"] = category_slug
+    try:
+        category_confidence = float(raw.get("category_confidence", 0.0))
+    except (TypeError, ValueError):
+        category_confidence = 0.0
+    if category_slug:
+        out["category_confidence"] = max(0.0, min(1.0, category_confidence))
     return out
 
 
@@ -275,6 +232,7 @@ def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> 
         可作为 json= 发送的 dict。
     """
     guide_text = guidance.strip() or "请提取图片里与买家诉求相关的关键视觉信息。"
+    slug_catalog = format_category_slug_catalog_lines()
     vision_prompt = (
         "你是电商售后视觉分析助手。请依据图片与分析指引输出 JSON，不要输出其他内容。\n"
         f"分析指引：{guide_text}\n"
@@ -284,6 +242,9 @@ def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> 
         "- visual_red_flags: 字符串数组，**仅基于本张图片**可客观陈述的疑点或待核实点（如水印/网址截屏、"
         "明显非本单商品环境、与买家文字描述无法对齐等）；无疑点则 []\n"
         "- attributes: 对象，放可扩展细节（如位置、尺寸、状态）\n"
+        "- category_slug: 字符串或 null，从下列 slug 枚举中选择最匹配特殊品类；无法判断填 null\n"
+        "- category_confidence: 0~1 浮点，与 category_slug 对应\n"
+        f"可选 slug 列表：\n{slug_catalog}\n"
         "- 若发现水印/网址/网图等可疑图源线索，请同时写入 findings 或 visual_description，并在 visual_red_flags 给一条可展示短句\n"
         "输出必须是合法 JSON。"
     )
@@ -455,7 +416,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     """
     调用多模态服务，从单张图片 URL 提取视觉事实字段。
 
-    mock:// 走 _mock_analyze_image；百炼 DashScope 走专用 input.messages 协议并要求模型输出 JSON；
+    百炼 DashScope 走专用 input.messages 协议并要求模型输出 JSON；
     其它 endpoint 仍按旧版 `{"image_url": ...}` 转发。
 
     参数:
@@ -466,9 +427,6 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     """
     if not image_url:
         return {"error": "图片分析失败：image_url 为空"}
-
-    if image_url.startswith("mock://"):
-        return _mock_analyze_image(image_url=image_url, guidance=guidance)
 
     endpoint = os.getenv("VISION_API_ENDPOINT", "").strip()
     api_key = os.getenv("VISION_API_KEY", "").strip()

@@ -77,16 +77,27 @@ def _save_redis(dispute_id: str, materials: dict[str, Any]) -> None:
         logger.warning("%s 材料层 Redis 写入失败：dispute_id=%s", CACHE_LOG_PREFIX, dispute_id)
 
 
-def _merge_dicts(cached_materials: dict[str, Any], new_materials: dict[str, Any]) -> dict[str, Any]:
+def _merge_dicts(
+    cached_materials: dict[str, Any],
+    new_materials: dict[str, Any],
+    *,
+    snapshot: bool,
+) -> dict[str, Any]:
     """
-    将新材料合并进已有材料：chat_history/image_urls 增量去重，其余覆盖。
+    将新材料合并进已有材料：snapshot 模式下 chat/image 整包覆盖，否则增量去重追加。
     """
     merged_materials = deepcopy(cached_materials)
+    skip_keys = {"reset_context", "materials_snapshot"}
     for key, value in new_materials.items():
+        if key in skip_keys:
+            continue
         if key in {"chat_history", "image_urls"}:
-            old_items = _to_list(merged_materials.get(key))
-            new_items = _to_list(value)
-            merged_materials[key] = _dedupe_preserve_order(old_items + new_items)
+            if snapshot:
+                merged_materials[key] = deepcopy(_to_list(value))
+            else:
+                old_items = _to_list(merged_materials.get(key))
+                new_items = _to_list(value)
+                merged_materials[key] = _dedupe_preserve_order(old_items + new_items)
         else:
             merged_materials[key] = deepcopy(value)
     return merged_materials
@@ -98,9 +109,13 @@ def merge_materials(dispute_id: str, new_materials: dict[str, Any]) -> dict[str,
     """
     if bool(new_materials.get("reset_context")):
         merged_materials = deepcopy(new_materials)
+        for meta_key in ("reset_context", "materials_snapshot"):
+            merged_materials.pop(meta_key, None)
         _save_local(dispute_id, merged_materials)
         _save_redis(dispute_id, merged_materials)
         return deepcopy(merged_materials)
+
+    snapshot = bool(new_materials.get("materials_snapshot", True))
 
     cached_materials = _load_redis(dispute_id)
     if cached_materials is None:
@@ -109,7 +124,10 @@ def merge_materials(dispute_id: str, new_materials: dict[str, Any]) -> dict[str,
     if cached_materials is None:
         merged_materials = deepcopy(new_materials)
     else:
-        merged_materials = _merge_dicts(cached_materials, new_materials)
+        merged_materials = _merge_dicts(cached_materials, new_materials, snapshot=snapshot)
+
+    for meta_key in ("reset_context", "materials_snapshot"):
+        merged_materials.pop(meta_key, None)
 
     _save_local(dispute_id, merged_materials)
     _save_redis(dispute_id, merged_materials)

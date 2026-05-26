@@ -42,7 +42,7 @@
 
 | 工具名                           | 功能         | 来源                      | 技术选型         |
 | ----------------------------- | ---------- | ----------------------- | ------------ |
-| `match_rules`                 | 匹配平台规则     | MySQL `platform_rules` + `rule_match_lexicon.json` | 节内双层检索词 |
+| `match_rules`                 | 匹配平台规则     | MySQL `platform_rules` + `rule_match_lexicon.json` | 节内双层检索词；单 doc LRU 缓存 |
 | `query_buyer_profile`         | 查询买家画像     | MySQL                   | 主数据库         |
 | `search_similar_cases`        | 检索历史判例     | MySQL                   | 结构化标签检索      |
 | `search_similar_cases_vector` | 向量语义检索历史判例 | ChromaDB                | 可选，不可用时返回空列表 |
@@ -54,7 +54,8 @@
 
 - 输入：`facts: FactOutput`（含 `rule_match_plan`，由 Agent1 同次产出）
 - 输出：`List[MatchedRule]`（前端代表条 3～5）；完整结果见 `match_rules_full()` → `RuleMatchResult`
-- 实现：锁 doc → 锁 section → 篇内 `must_terms`/`case_terms` 匹配 → `must/should/weak` 分级；正文来自 MySQL 爬取 `taobao_rule::*`
+- 实现：锁 doc → 锁 section → LLM 条文选型（同批输出 `display_rule_ids`）→ 字面降级；展示条仅在 pool 过多且无同批 id 时再调展示筛选 LLM
+- 缓存：单 doc MySQL 正文 `lru_cache(maxsize=64)`，更新规则库后调用 `clear_rule_document_cache()`
 - 索引：`data/rule_match_lexicon.json`（环境变量 `RULE_MATCH_LEXICON_PATH`）
 - 约束：不再使用 `dispute_rules.json` / `conditions` 引擎路径
 
@@ -88,16 +89,16 @@
 ## Agent 3 — 话术生成员
 
 
-| 工具名                   | 功能     | 来源                                 | 技术选型 |
-| --------------------- | ------ | ---------------------------------- | ---- |
-| `get_script_template` | 获取话术模板 | 本地 `script_templates.json` 或 MySQL | 模板库  |
+| 工具名 | 功能 | 来源 | 技术选型 |
+| --- | --- | --- | --- |
+| `generate_buyer_script` | 在 Agent2 输出的 `dialogue_context` 约束下生成买家话术 | LLM API | `AGENT3_LLM_MODEL` |
 
+`**generate_buyer_script**`
 
-`**get_script_template**`
-
-- 输入：`strategy_type: str`（"defend" / "negotiate" / "compensate"）
-- 输出：`str`（含 `{{变量}}` 占位符的模板文本）
-- 约束：优先读取商家自定义模板（数据库），若无则用系统默认模板。
+- 输入：`payload: dict`，含 `dialogue_context`、`response_mode`、`strategy_stage`、`compensation_policy` 等
+- 输出：`str | None`（话术正文；失败时上层使用 `dialogue_context.fallback_script`）
+- 约束：结构化 JSON 输出 `{"script": "..."}`；禁用词命中时重试一次；禁止调用模板文件或数据库
+- 说明：对话语境（blocked/actionable 举证）由 Agent2 策略 JSON 一次产出，Agent3 不再独立调用对话分析 LLM
 
 ## Agent 4 — 情绪监控员
 
@@ -134,5 +135,5 @@
 1. API 调用：失败重试最多 3 次，指数退避。最终失败返回 `{"error": "具体错误信息"}`。
 2. 数据库查询：失败记录日志，抛出异常由上层 Controller 捕获。
 3. 本地模型：加载失败时降级为简单关键词匹配，并记录日志。
-4. 本地文件读取：文件不存在时返回默认规则/模板，并记录日志。
+4. 本地文件读取：文件不存在时返回默认规则或空结果，并记录日志（Agent3 话术不走文件模板）。
 
