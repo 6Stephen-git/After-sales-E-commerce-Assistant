@@ -9,11 +9,11 @@
     </div>
 
     <el-alert
-      v-if="scripts?.usage_tip"
+      v-if="usage_tip_text"
       type="success"
       :closable="false"
       show-icon
-      :title="scripts.usage_tip"
+      :title="usage_tip_text"
       class="usage-tip-alert"
     />
 
@@ -42,6 +42,15 @@ const emit = defineEmits(['use_script'])
 // ---------- 派生状态：应对思想中文标签 ----------
 const response_mode_label = computed(() => {
   return getResponseModeLabel(props.scripts?.response_mode)
+})
+
+// ---------- 派生状态：话术使用提示（去除内部英文字段名） ----------
+const usage_tip_text = computed(() => {
+  const raw = String(props.scripts?.usage_tip || '').trim()
+  if (!raw) return ''
+  return raw
+    .replace(/\bdialogue_context\b/gi, '对话语境')
+    .replace(/\bevidence_first\b/gi, '举证阶段')
 })
 
 // ---------- 事件分发：把点击话术传递给上层 ----------

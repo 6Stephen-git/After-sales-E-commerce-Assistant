@@ -119,6 +119,14 @@ class FactOutput(BaseModel):
     issue_summary: Optional[str] = Field(default=None, description="买家核心诉求摘要（面向多模态分析的锚点）")
     intent_tags: List[str] = Field(default_factory=list, description="诉求标签（如：质量问题/物流异常/补偿诉求）")
     visual_observations: List[str] = Field(default_factory=list, description="视觉观察结论列表（自然语言短句）")
+    visual_defect_severity: Optional[str] = Field(
+        default=None,
+        description="视觉损失暴露：问题严重度 minor/moderate/severe；无有效举证图为 null",
+    )
+    visual_goods_recoverability: Optional[str] = Field(
+        default=None,
+        description="视觉损失暴露：商品可挽回性 resalable/repairable/unrecoverable；无有效举证图为 null",
+    )
     attributes: dict[str, Any] = Field(default_factory=dict, description="可扩展属性容器，存放品类相关细节")
     evidence_items: List[dict[str, Any]] = Field(default_factory=list, description="证据项列表（文本/图片/视频等）")
     goods_received: Optional[bool] = Field(default=None, description="买家是否收到货")
@@ -215,21 +223,31 @@ class StrategyInput(BaseModel):
         default=None,
         description="Controller 预计算的恶意检测结果（可选，传入则跳过 Agent2 内重复调用）",
     )
+    rule_match_skipped: bool = Field(
+        default=False,
+        description="简单案门控未触发条文匹配时为 true，置信度规则维按「刻意无规则」计分",
+    )
 
 
 class CustomerValueInput(BaseModel):
     """客户价值评估输入"""
     buyer_profile: BuyerProfile = Field(..., description="买家画像，长期价值评估主输入")
     order_amount: float = Field(default=0.0, description="当前纠纷订单金额")
-    defect_severity: str = Field(default="moderate", description="问题严重性：minor/moderate/severe")
-    goods_recoverability: str = Field(
-        default="repairable",
-        description="商品可挽回性：resalable/repairable/unrecoverable（越不可挽回分越高）",
+    defect_severity: Optional[str] = Field(
+        default=None,
+        description="本单问题严重度（来自 Agent1 视觉 visual_defect_severity；无图则为 null）",
     )
-    buyer_cooperation: str = Field(default="neutral", description="买家配合度：good/neutral/poor")
-    demand_reasonableness: str = Field(
-        default="borderline",
-        description="诉求合理性：reasonable/borderline/unreasonable",
+    goods_recoverability: Optional[str] = Field(
+        default=None,
+        description="本单商品可挽回性（来自 Agent1 视觉 visual_goods_recoverability；无图则为 null）",
+    )
+    has_visual_loss_exposure: bool = Field(
+        default=False,
+        description="是否已有视觉损失暴露评估（两枚举均非空）",
+    )
+    block_order_channel: bool = Field(
+        default=False,
+        description="本单优待通道门槛：red_flags 或低证据缺证时为 true",
     )
     emotion_note: Optional[str] = Field(default=None, description="Agent 4 输出的情绪描述（可选）")
 
@@ -245,7 +263,7 @@ class CustomerValueScoreItem(BaseModel):
 class CustomerValueOutput(BaseModel):
     """客户价值评估输出"""
     long_term_score: int = Field(default=0, description="长期价值总分（0-100）")
-    order_score: int = Field(default=0, description="本单价值总分（0-100）")
+    order_score: int = Field(default=0, description="本单价值总分（0-85，满分 85 触发阈值 60）")
     long_term_breakdown: List[CustomerValueScoreItem] = Field(default_factory=list, description="长期价值分项")
     order_breakdown: List[CustomerValueScoreItem] = Field(default_factory=list, description="本单价值分项")
     long_term_triggered: bool = Field(default=False, description="是否触发长期客户优待通道")

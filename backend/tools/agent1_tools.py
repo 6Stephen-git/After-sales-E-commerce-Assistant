@@ -15,10 +15,48 @@ from typing import Any
 
 import httpx
 
-from backend.tools.rule_lexicon import format_category_slug_catalog_lines, validate_category_slug
-
 LOG_PREFIX = "[Agent1工具]"
 logger = logging.getLogger(__name__)
+
+# ---------- 视觉 prompt：诉求锚定 + 通用 schema（品类 slug 仅可见时输出） ----------
+_VISION_TASK_BLOCK = (
+    "任务：下方是买家的售后诉求。请只从本张图片中提取与该诉求直接相关的可见信息。\n"
+    "原则：\n"
+    "1) 以诉求为唯一锚点，不做与诉求无关的泛化描述；\n"
+    "2) 图中能印证诉求的写清楚；看不清的明确写无法从本图确认；与诉求陈述明显不符的写入 visual_red_flags；\n"
+    "3) 品类：仅当商品形态在图中清晰可见（如手机、鞋、食品包装）时，可输出 category_slug；"
+    "看不清或仅能确认瑕疵但看不出商品类别时填 null；不得臆测。\n"
+    "4) 只陈述客观可见事实，不做责任判定；描述用语优先对齐买家诉求中的说法。"
+)
+
+_VISION_JSON_SCHEMA_BASE = (
+    "只输出 JSON，不要其它文字：\n"
+    "- visual_description: 与买家诉求最相关的一两句视觉结论\n"
+    "- findings: 字符串数组，2~4 条短句，说明图中哪些内容与诉求对应（可见/不可见/部分可见）\n"
+    "- visual_red_flags: 与诉求陈述明显矛盾、或图源可疑（如水印/网图/非实拍环境）；无则 []\n"
+    "- defect_type: 字符串或 null，诉求所涉问题的客观现象描述\n"
+    "- defect_location: 字符串或 null，该现象在图中的位置或区域\n"
+    "- visual_defect_severity: minor|moderate|severe|null，据可见损毁判断问题严重程度；看不清填 null\n"
+    "- visual_goods_recoverability: resalable|repairable|unrecoverable|null，"
+    "据可见状态判断退回后能否再售或修复；看不清填 null\n"
+    "- attributes: 对象，其它与诉求相关的可见细节；无则 {}"
+)
+
+
+def _build_vision_json_schema_block() -> str:
+    """拼装视觉 JSON schema，含可选 category_slug 枚举。"""
+    from backend.tools.rule_lexicon import format_category_slug_compact
+
+    slug_compact = format_category_slug_compact()
+    slug_line = ""
+    if slug_compact:
+        slug_line = (
+            f"\n- category_slug: 字符串或 null，商品形态清晰可见时从 [{slug_compact}] 中选择；不确定填 null"
+        )
+    return f"{_VISION_JSON_SCHEMA_BASE}{slug_line}"
+
+VISUAL_DEFECT_SEVERITY_VALUES = frozenset({"minor", "moderate", "severe"})
+VISUAL_GOODS_RECOVERABILITY_VALUES = frozenset({"resalable", "repairable", "unrecoverable"})
 
 
 # ---------- 端点识别：阿里云百炼多模态 generation 走专用协议 ----------
@@ -127,6 +165,14 @@ def _coerce_has_tag(value: Any) -> bool | None:
     return None
 
 
+def _coerce_visual_enum(value: Any, valid_values: frozenset[str]) -> str | None:
+    """将视觉枚举字段规范为小写合法值，非法则返回 None。"""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in valid_values else None
+
+
 # ---------- 字段映射：百炼 JSON → analyze_image 统一返回键 ----------
 def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
     """
@@ -177,19 +223,23 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
         val = raw.get(key)
         if isinstance(val, str) and val.strip():
             out[key] = val.strip()
+
+    severity = _coerce_visual_enum(raw.get("visual_defect_severity"), VISUAL_DEFECT_SEVERITY_VALUES)
+    if severity:
+        out["visual_defect_severity"] = severity
+    recoverability = _coerce_visual_enum(raw.get("visual_goods_recoverability"), VISUAL_GOODS_RECOVERABILITY_VALUES)
+    if recoverability:
+        out["visual_goods_recoverability"] = recoverability
+
+    from backend.tools.rule_lexicon import validate_category_slug
+
+    visual_slug = validate_category_slug(raw.get("category_slug"))
+    if visual_slug:
+        out["category_slug"] = visual_slug
     tag = _coerce_has_tag(raw.get("has_tag"))
     if tag is not None:
         out["has_tag"] = tag
 
-    category_slug = validate_category_slug(raw.get("category_slug"))
-    if category_slug:
-        out["category_slug"] = category_slug
-    try:
-        category_confidence = float(raw.get("category_confidence", 0.0))
-    except (TypeError, ValueError):
-        category_confidence = 0.0
-    if category_slug:
-        out["category_confidence"] = max(0.0, min(1.0, category_confidence))
     return out
 
 
@@ -219,6 +269,20 @@ def _has_meaningful_vision_content(normalized: dict[str, Any]) -> bool:
     return False
 
 
+# ---------- 视觉分析指引：诉求锚定 prompt ----------
+def _build_vision_analysis_prompt(guidance: str) -> str:
+    """
+    将买家诉求与任务说明合并为完整视觉 prompt。
+    """
+    claim_text = guidance.strip() or "（买家未提供文字诉求：请描述图中可能与售后争议相关的客观可见事实。）"
+    return (
+        "你是电商售后视觉分析助手。\n"
+        f"{_VISION_TASK_BLOCK}\n"
+        f"【买家诉求】\n{claim_text}\n"
+        f"{_build_vision_json_schema_block()}"
+    )
+
+
 # ---------- 百炼请求体：OpenAI 兼容 multimodal messages 结构 ----------
 def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> dict[str, Any]:
     """
@@ -227,27 +291,12 @@ def _build_dashscope_payload(image_ref: str, model: str, guidance: str = "") -> 
     参数:
         image_ref: 公网 URL 或 data:image/...;base64,... 。
         model: 百炼控制台模型名。
+        guidance: 事实 LLM 提炼后的买家诉求文本。
 
     返回:
         可作为 json= 发送的 dict。
     """
-    guide_text = guidance.strip() or "请提取图片里与买家诉求相关的关键视觉信息。"
-    slug_catalog = format_category_slug_catalog_lines()
-    vision_prompt = (
-        "你是电商售后视觉分析助手。请依据图片与分析指引输出 JSON，不要输出其他内容。\n"
-        f"分析指引：{guide_text}\n"
-        "JSON 字段要求：\n"
-        "- visual_description: 字符串，一两句话描述关键观察结果\n"
-        "- findings: 字符串数组，列出 3~6 条关键观察\n"
-        "- visual_red_flags: 字符串数组，**仅基于本张图片**可客观陈述的疑点或待核实点（如水印/网址截屏、"
-        "明显非本单商品环境、与买家文字描述无法对齐等）；无疑点则 []\n"
-        "- attributes: 对象，放可扩展细节（如位置、尺寸、状态）\n"
-        "- category_slug: 字符串或 null，从下列 slug 枚举中选择最匹配特殊品类；无法判断填 null\n"
-        "- category_confidence: 0~1 浮点，与 category_slug 对应\n"
-        f"可选 slug 列表：\n{slug_catalog}\n"
-        "- 若发现水印/网址/网图等可疑图源线索，请同时写入 findings 或 visual_description，并在 visual_red_flags 给一条可展示短句\n"
-        "输出必须是合法 JSON。"
-    )
+    vision_prompt = _build_vision_analysis_prompt(guidance=guidance)
     return {
         "model": model,
         "input": {

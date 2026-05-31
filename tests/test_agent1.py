@@ -165,6 +165,37 @@ def test_extract_should_keep_intent_tags_from_issue_llm(monkeypatch):
     assert result.goods_received is False
 
 
+# ---------- 场景：视觉分析应使用事实 LLM 提炼后的诉求作为 guidance ----------
+def test_extract_vision_should_anchor_on_issue_summary(monkeypatch):
+    captured_guidance: list[str] = []
+
+    def _mock_llm_extract_issue(**_kwargs):
+        return {
+            "issue_summary": "买家反映香蕉收到即严重褐变发黑",
+            "intent_tags": ["质量问题", "退款诉求"],
+            "confidence": 0.9,
+        }
+
+    def _mock_analyze_image(**kwargs):
+        captured_guidance.append(str(kwargs.get("guidance", "")))
+        return {"visual_description": "图中香蕉大面积褐变", "findings": ["表皮黑斑明显"]}
+
+    monkeypatch.setattr(fact_extractor_module, "_llm_extract_issue", _mock_llm_extract_issue)
+    monkeypatch.setattr(fact_extractor_module, "analyze_image", _mock_analyze_image)
+
+    extract(
+        {
+            "order_id": "ORDER10015",
+            "buyer_text": "水果有问题",
+            "chat_history": [{"role": "buyer", "content": "你看图"}],
+            "image_urls": ["mock://banana"],
+        }
+    )
+    assert captured_guidance
+    assert "严重褐变发黑" in captured_guidance[0]
+    assert "质量问题" in captured_guidance[0]
+
+
 # ---------- 场景：可疑图源线索由模型直接写入视觉描述 ----------
 def test_extract_should_keep_external_source_clue_in_visual_observations(monkeypatch):
     monkeypatch.setattr(

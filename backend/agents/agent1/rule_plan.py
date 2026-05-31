@@ -11,13 +11,11 @@ from backend.tools.rule_lexicon import (
     CE_CONFIDENCE_THRESHOLD,
     collect_lexicon_search_hints,
     expand_doc_ids_by_lanes,
-    format_category_slug_catalog_lines,
     get_category_doc_id,
     get_doc_by_id,
     infer_category_slug_llm,
     infer_lanes_from_intent,
     is_category_doc,
-    list_section_candidates_for_doc,
     resolve_doc_id_reference,
     resolve_doc_ids_from_materials,
     resolve_hint_section_keys,
@@ -37,9 +35,27 @@ COLLOQUIAL_MUST_BLOCKLIST = frozenset(
     {"开箱视频", "没录", "未录", "视频", "聊天记录", "截图"}
 )
 
+# 质量/描述类争点关键词：无 slug 时才条件触发品类推断 LLM
+_CATEGORY_DISPUTE_KEYWORDS = (
+    "质量",
+    "瑕疵",
+    "破损",
+    "描述不符",
+    "不一致",
+    "腐烂",
+    "变质",
+    "划痕",
+    "假货",
+    "缺件",
+    "少件",
+    "损坏",
+    "功能异常",
+    "发霉",
+    "过期",
+)
+
 
 def merge_llm_rule_plan(
-    raw_plan: dict[str, Any] | None,
     materials: dict[str, Any],
     intent_tags: list[str],
     logistics_normal: bool | None,
@@ -48,20 +64,24 @@ def merge_llm_rule_plan(
     category_slugs: list[str] | None = None,
 ) -> RuleMatchPlan:
     """
-    将 LLM 输出的 rule_match_plan 与 materials API 标合并，并执行门控校验。
+    由 API 标、品类 slug、intent 与 lexicon 确定性生成 rule_match_plan。
     """
-    plan = _parse_raw_plan(raw_plan)
+    plan = RuleMatchPlan()
     buyer_text = _merge_buyer_text(text_context, issue_summary, materials)
     api_doc_ids, api_lanes = resolve_doc_ids_from_materials(materials)
-    normalized_slugs = _normalize_category_slugs(category_slugs, materials, raw_plan)
+    normalized_slugs = _normalize_category_slugs(category_slugs, materials)
 
-    if not normalized_slugs and not str(materials.get("product_category_slug", "") or "").strip():
+    if (
+        not normalized_slugs
+        and not str(materials.get("product_category_slug", "") or "").strip()
+        and _intent_suggests_category_dispute(intent_tags, buyer_text)
+    ):
         inferred_slug, inferred_conf = infer_category_slug_llm(buyer_text, materials)
         if inferred_slug:
             normalized_slugs.append(inferred_slug)
             plan.category_confidence = max(plan.category_confidence, inferred_conf)
             logger.info(
-                "%s 上游未提供 category_slug，品类 LLM 兜底 slug=%s confidence=%.2f",
+                "%s 质量类争点且无 slug，品类 LLM 兜底 slug=%s confidence=%.2f",
                 LOG_PREFIX,
                 inferred_slug,
                 inferred_conf,
@@ -93,110 +113,6 @@ def merge_llm_rule_plan(
     if not plan.search_terms.must_terms:
         plan.search_terms = _default_search_terms(intent_tags, plan)
     return plan
-
-
-def _format_section_prompt_line(sec: dict[str, Any]) -> str:
-    """将单节索引信息格式化为 prompt 一行。"""
-    parts = [
-        sec.get("section_key", ""),
-        sec.get("label", ""),
-        f"facets={sec.get('facet_tags', [])}",
-    ]
-    rule_terms = sec.get("rule_terms_top") or []
-    if rule_terms:
-        parts.append(f"规则词:{','.join(rule_terms)}")
-    alias_hint = str(sec.get("alias_hint", "") or "").strip()
-    if alias_hint:
-        parts.append(f"口语映射:{alias_hint}")
-    excerpt = str(sec.get("excerpt_snippet", "") or "").strip()
-    if excerpt:
-        parts.append(f"摘录:{excerpt}")
-    return " | ".join(str(p) for p in parts if p)
-
-
-def build_rule_navigation_prompt_block(
-    materials: dict[str, Any],
-    intent_tags: list[str],
-    text_context: str = "",
-) -> str:
-    """生成写入 Agent1 user prompt 的规则导航说明块。"""
-    doc_ids, lanes = resolve_doc_ids_from_materials(materials)
-    api_slug = str(materials.get("product_category_slug", "") or "").strip()
-    if api_slug:
-        cat_doc = get_category_doc_id(api_slug)
-        if cat_doc and cat_doc not in doc_ids:
-            doc_ids.append(cat_doc)
-        if "C" not in lanes:
-            lanes.append("C")
-
-    buyer_text = _merge_buyer_text(text_context, None, materials)
-    slug_catalog = format_category_slug_catalog_lines()
-
-    lines = [
-        "rule_match_plan 字段要求（与事实同次 JSON 输出）：",
-        "- activated_lanes: 数组，如 A,C,G",
-        "- target_doc_ids: 从下列候选 doc 中选择",
-        "- section_selections: 每项含 doc_id、section_keys（必须来自候选表）、confidence(0~1)、reason",
-        "- search_terms: {must_terms, should_terms, case_terms, exclude_terms}；"
-        "must 须用规则正文用语；case_terms 可填买家原话；"
-        "系统会据已选节的 rule_terms/case_aliases 自动补全 must/should，LLM 可少填 must",
-        f"- category_confidence / service_confidence: 无 API 品类/服务标时填推断置信度；"
-        f"一旦激活 C 通道或选中品类 doc，后续必检索该品类规范（勿因置信度低自行放弃 C）",
-        f"- 服务保障 E 通道：无 API 服务标且 service_confidence 低于 {CE_CONFIDENCE_THRESHOLD} 时可不选 E doc",
-        "- category_slug: 字符串或 null，从下列 slug 枚举中选择最匹配特殊品类（无图场景必填；有图时可与视觉 slug 一致）",
-        "",
-        "可选 slug 列表：",
-        slug_catalog,
-        "",
-        "候选 doc 与节（仅可从中勾选 section_keys；★=与当前诉求 facet 更相关）：",
-    ]
-    for doc_id in doc_ids[:6]:
-        doc = get_doc_by_id(doc_id)
-        if not doc:
-            continue
-        lines.append(f"doc_id={doc_id} name={doc.get('doc_name','')}")
-        for sec in list_section_candidates_for_doc(doc_id, buyer_text=buyer_text, intent_tags=intent_tags)[:10]:
-            prefix = "★ " if sec.get("facet_match") else "  "
-            lines.append(f"{prefix}- {_format_section_prompt_line(sec)}")
-    if api_slug:
-        lines.append(f"API 品类 slug={api_slug}（应激活 C 并勾选对应品类 doc）")
-    elif not doc_ids:
-        lines.append("（暂无 API 品类/服务标；若聊天可判断品类请填 category_slug 并激活 C）")
-    lines.append(f"当前 intent_tags={intent_tags}")
-    return "\n".join(lines)
-
-
-def _parse_raw_plan(raw: dict[str, Any] | None) -> RuleMatchPlan:
-    """解析 LLM 返回的 rule_match_plan 字典。"""
-    if not isinstance(raw, dict):
-        return RuleMatchPlan()
-    terms_raw = raw.get("search_terms") if isinstance(raw.get("search_terms"), dict) else {}
-    terms = RuleSearchTerms(
-        must_terms=_as_str_list(terms_raw.get("must_terms")),
-        should_terms=_as_str_list(terms_raw.get("should_terms")),
-        case_terms=_as_str_list(terms_raw.get("case_terms")),
-        exclude_terms=_as_str_list(terms_raw.get("exclude_terms")),
-    )
-    selections: list[SectionSelection] = []
-    for item in raw.get("section_selections") or []:
-        if not isinstance(item, dict):
-            continue
-        selections.append(
-            SectionSelection(
-                doc_id=str(item.get("doc_id", "")).strip(),
-                section_keys=_as_str_list(item.get("section_keys")),
-                confidence=_clamp_float(item.get("confidence"), 0.0),
-                reason=str(item.get("reason", "")).strip()[:200],
-            )
-        )
-    return RuleMatchPlan(
-        activated_lanes=_as_str_list(raw.get("activated_lanes")),
-        target_doc_ids=_as_str_list(raw.get("target_doc_ids")),
-        section_selections=selections,
-        search_terms=terms,
-        category_confidence=_clamp_float(raw.get("category_confidence"), 0.0),
-        service_confidence=_clamp_float(raw.get("service_confidence"), 0.0),
-    )
 
 
 def _apply_ce_confidence_gate(
@@ -249,9 +165,8 @@ def _is_category_lane_locked(
 def _normalize_category_slugs(
     category_slugs: list[str] | None,
     materials: dict[str, Any],
-    raw_plan: dict[str, Any] | None = None,
 ) -> list[str]:
-    """合并 API slug、上游 LLM/视觉 slug 与 rule_match_plan 内嵌 slug，去重保序。"""
+    """合并 API slug 与上游事实 LLM category_slug，去重保序。"""
     slugs: list[str] = []
     api_slug = validate_category_slug(str(materials.get("product_category_slug", "") or "").strip() or None)
     if api_slug:
@@ -260,10 +175,6 @@ def _normalize_category_slugs(
         validated = validate_category_slug(item)
         if validated and validated not in slugs:
             slugs.append(validated)
-    if isinstance(raw_plan, dict):
-        nested_slug = validate_category_slug(raw_plan.get("category_slug"))
-        if nested_slug and nested_slug not in slugs:
-            slugs.append(nested_slug)
     return slugs
 
 
@@ -413,6 +324,12 @@ def _enrich_search_terms(
     return plan
 
 
+def _intent_suggests_category_dispute(intent_tags: list[str], buyer_text: str) -> bool:
+    """判断是否为可能需 C 通道专项规范的质量/描述类争点。"""
+    blob = f"{' '.join(intent_tags)} {buyer_text}"
+    return any(keyword in blob for keyword in _CATEGORY_DISPUTE_KEYWORDS)
+
+
 def _merge_buyer_text(
     text_context: str,
     issue_summary: str | None,
@@ -503,19 +420,3 @@ def _default_search_terms(intent_tags: list[str], plan: RuleMatchPlan | None = N
                 if item not in must:
                     must.append(item)
     return RuleSearchTerms(must_terms=must, should_terms=should, case_terms=case, exclude_terms=[])
-
-
-def _as_str_list(value: Any) -> list[str]:
-    """将值转为非空字符串列表。"""
-    if not isinstance(value, list):
-        return []
-    return [str(x).strip() for x in value if str(x).strip()]
-
-
-def _clamp_float(value: Any, default: float) -> float:
-    """解析 0~1 浮点。"""
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0.0, min(1.0, num))

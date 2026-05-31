@@ -10,6 +10,7 @@ from typing import Any, Callable, List
 import json
 import logging
 import re
+import time
 
 from schemas import (
     DialogueContext,
@@ -19,6 +20,7 @@ from schemas import (
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
+    STRATEGY_STAGE_EVIDENCE_FIRST,
     StrategyInput,
     StrategyOutput,
 )
@@ -28,6 +30,13 @@ from backend.tools.llm_client import chat_completion
 
 AGENT2_LOG_PREFIX = "[Agent2]"
 logger = logging.getLogger(__name__)
+
+# ---------- 策略 LLM payload 截断与模型分级 ----------
+STRATEGY_RECENT_TURNS_MAX = 8
+STRATEGY_VISUAL_OBS_MAX = 3
+STRATEGY_RED_FLAGS_MAX = 4
+STRATEGY_FAST_MODEL_ENV = "AGENT2_LLM_MODEL"
+STRATEGY_PRO_MODEL_ENV = "AGENT2_LLM_MODEL_STRATEGY"
 
 # ---------- 策略参谋核心目标（全链路提示词共用） ----------
 _MERCHANT_INTEREST_GOAL = (
@@ -48,7 +57,7 @@ def _polish_merchant_facing_text(text: str) -> str:
 
 
 def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
-    """从 matched_rules（前端代表条）提取与本案相关的规则要点，最多 3 条。"""
+    """从条文匹配 display_rules 提取与争点贴合的规则要点；无贴合时不回退 brief 凑数。"""
     lines: List[str] = []
     seen: set[str] = set()
     for rule in input_data.matched_rules or []:
@@ -56,7 +65,7 @@ def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
         if text and text not in seen:
             seen.add(text)
             lines.append(text)
-    return lines[:3]
+    return lines
 
 
 def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
@@ -355,6 +364,7 @@ def _estimate_confidence(
 ) -> float:
     """
     置信度：规则确定性 + 证据充分性 + 信号一致性。
+    简单案跳过条文匹配（rule_match_skipped）且无命中时，规则维按 0.30 计。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
     missing_count = len(input_data.facts.missing_evidence)
@@ -365,6 +375,8 @@ def _estimate_confidence(
         dim_rule = 0.40
     elif rule_count >= 1:
         dim_rule = 0.20
+    elif input_data.rule_match_skipped:
+        dim_rule = 0.30
     else:
         dim_rule = 0.08
 
@@ -600,7 +612,6 @@ def _build_strategy_json_system_prompt() -> str:
         '  "customer_intent_analysis": "面向商家的客户意图分析",\n'
         '  "strategy_direction_summary": "当前这一步的单一路径动作（1～2句）",\n'
         '  "strategy_direction_rationale": "2～4句推理理由，口语化",\n'
-        '  "platform_rule_basis": ["规则要点1", "规则要点2"],\n'
         '  "risk_factors": ["风险点1"],\n'
         '  "dialogue_context": {\n'
         '    "dialogue_mode": "continue|cold_start",\n'
@@ -612,8 +623,10 @@ def _build_strategy_json_system_prompt() -> str:
         "若 strategy_stage=evidence_first：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
         "若 dialogue_context.blocked_evidence_requests 非空：不得再要求其中任何一项。"
         "若 recent_turns 非空：须承接对话，禁止重复商家已提且买家已拒的举证要求。"
-        "禁止罗列多套备选方案；platform_rule_basis 禁止条号/章节编号。"
+        "禁止罗列多套备选方案。"
         "dialogue_context.fallback_script 须遵守 compensation_policy 与 strategy_stage，嵌入对话语境。"
+        "平台规则依据由系统从 rule_briefs 另行注入，勿在 JSON 中输出 platform_rule_basis。"
+        "若 rule_briefs 为空：禁止引用或编造具体平台条款，策略仅基于 facts、对话与画像。"
     )
 
 
@@ -682,6 +695,113 @@ def _compose_reasoning_from_fields(
     )
 
 
+def _build_strategy_facts_summary(input_data: StrategyInput) -> dict[str, Any]:
+    """
+    构造策略 LLM 用 facts 摘要：去掉 evidence_items、rule_match_plan 与无用兼容字段。
+    """
+    facts = input_data.facts
+    summary: dict[str, Any] = {
+        "issue_summary": facts.issue_summary,
+        "intent_tags": list(facts.intent_tags or []),
+        "visual_observations": list((facts.visual_observations or [])[:STRATEGY_VISUAL_OBS_MAX]),
+        "defect_type": facts.defect_type,
+        "defect_location": facts.defect_location,
+        "goods_received": facts.goods_received,
+        "logistics_normal": facts.logistics_normal,
+        "missing_evidence": list(facts.missing_evidence or []),
+        "red_flags": list((facts.red_flags or [])[:STRATEGY_RED_FLAGS_MAX]),
+        "evidence_quality": facts.evidence_quality,
+    }
+    if facts.attributes:
+        summary["attributes"] = facts.attributes
+    if facts.uncertainty_note and str(facts.uncertainty_note).strip():
+        summary["uncertainty_note"] = str(facts.uncertainty_note).strip()
+    return summary
+
+
+def _build_strategy_buyer_profile_summary(input_data: StrategyInput) -> dict[str, Any]:
+    """
+    构造策略 LLM 用买家画像摘要：去掉无策略意义的 buyer_id。
+    """
+    profile = input_data.buyer_profile.model_dump()
+    profile.pop("buyer_id", None)
+    return profile
+
+
+def _build_strategy_rule_briefs_payload(input_data: StrategyInput) -> list[dict[str, Any]]:
+    """
+    仅传策略 LLM 写推理所需的 brief 字段（展示用 platform_rule_basis 由条文匹配结果单独注入）。
+    """
+    briefs: list[dict[str, Any]] = []
+    for item in input_data.rule_briefs or []:
+        briefs.append(
+            {
+                "brief": item.brief,
+                "relevance": item.relevance,
+                "stance_hint": item.stance_hint,
+            }
+        )
+    return briefs
+
+
+def _build_strategy_prompt_payload(
+    *,
+    disposition: str,
+    strategy_stage: str,
+    compensation_policy: str,
+    evidence_incomplete: bool,
+    merchant_fault_signal: bool,
+    input_data: StrategyInput,
+    risk_factors: List[str],
+    estimated_win_rate: float | None,
+) -> dict[str, Any]:
+    """
+    组装精简后的策略 LLM user payload（Grill #1-C）。
+    """
+    payload: dict[str, Any] = {
+        "disposition": disposition,
+        "strategy_stage": strategy_stage,
+        "compensation_policy": compensation_policy,
+        "evidence_incomplete": evidence_incomplete,
+        "merchant_fault_clear": merchant_fault_signal,
+        "facts": _build_strategy_facts_summary(input_data),
+        "buyer_profile": _build_strategy_buyer_profile_summary(input_data),
+        "rule_briefs": _build_strategy_rule_briefs_payload(input_data),
+        "risk_factors": risk_factors,
+        "order_amount": input_data.order_amount,
+        "estimated_win_rate": estimated_win_rate,
+    }
+    if input_data.similar_cases:
+        payload["similar_cases"] = [item.model_dump() for item in input_data.similar_cases]
+    turns = input_data.chat_turns or []
+    if turns:
+        payload["recent_turns"] = [t.model_dump() for t in turns[-STRATEGY_RECENT_TURNS_MAX:]]
+    return payload
+
+
+def _needs_strategy_pro_model(
+    *,
+    malicious_result: MaliciousDetectionOutput,
+    customer_value: CustomerValueOutput,
+    strategy_stage: str,
+    merchant_fault_signal: bool,
+    disposition: str,
+    has_signal_conflict: bool,
+) -> bool:
+    """
+    判定策略 LLM 是否升档 Pro：恶意/价值通道/商责善后/信号冲突（不含举证未闭环）。
+    """
+    if malicious_result.risk_level in {"medium", "high"}:
+        return True
+    if customer_value.channel in {"long_term", "order"}:
+        return True
+    if has_signal_conflict:
+        return True
+    if merchant_fault_signal and disposition == DISPOSITION_COMPENSATE:
+        return True
+    return False
+
+
 def _llm_generate_strategy(
     *,
     disposition: str,
@@ -689,43 +809,54 @@ def _llm_generate_strategy(
     risk_factors: List[str],
     estimated_win_rate: float | None,
     strategy_stage: str,
+    malicious_result: MaliciousDetectionOutput,
+    customer_value: CustomerValueOutput,
+    merchant_fault_signal: bool,
+    has_signal_conflict: bool,
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
     """
-    用 Pro 模型一次输出结构化策略 JSON（含 dialogue_context）。
+    输出结构化策略 JSON；默认小模型，复杂 case 升 Pro。
     """
-    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
-    briefs_for_fault = input_data.rule_briefs or []
-    merchant_fault_signal = any(
-        getattr(b, "stance_hint", "") == "buyer" or "支持买家" in b.brief
-        for b in briefs_for_fault
-    ) and evidence_quality == "high"
     compensation_policy = "forbid" if (input_data.facts.missing_evidence or []) else "negotiate_soft"
-    prompt_payload = {
-        "disposition": disposition,
-        "strategy_stage": strategy_stage,
-        "compensation_policy": compensation_policy,
-        "evidence_incomplete": _is_evidence_insufficient_for_decision(input_data),
-        "merchant_fault_clear": merchant_fault_signal,
-        "facts": input_data.facts.model_dump(),
-        "buyer_profile": input_data.buyer_profile.model_dump(),
-        "rule_briefs": [item.model_dump() for item in (input_data.rule_briefs or [])],
-        "matched_rules": [item.model_dump() for item in input_data.matched_rules],
-        "similar_cases": [item.model_dump() for item in input_data.similar_cases],
-        "risk_factors": risk_factors,
-        "order_amount": input_data.order_amount,
-        "estimated_win_rate": estimated_win_rate,
-        "recent_turns": [t.model_dump() for t in (input_data.chat_turns or [])],
-    }
+    prompt_payload = _build_strategy_prompt_payload(
+        disposition=disposition,
+        strategy_stage=strategy_stage,
+        compensation_policy=compensation_policy,
+        evidence_incomplete=_is_evidence_insufficient_for_decision(input_data),
+        merchant_fault_signal=merchant_fault_signal,
+        input_data=input_data,
+        risk_factors=risk_factors,
+        estimated_win_rate=estimated_win_rate,
+    )
+    use_pro = _needs_strategy_pro_model(
+        malicious_result=malicious_result,
+        customer_value=customer_value,
+        strategy_stage=strategy_stage,
+        merchant_fault_signal=merchant_fault_signal,
+        disposition=disposition,
+        has_signal_conflict=has_signal_conflict,
+    )
+    model_env_key = STRATEGY_PRO_MODEL_ENV if use_pro else STRATEGY_FAST_MODEL_ENV
+    user_content = f"请基于以下输入生成策略 JSON：\n{json.dumps(prompt_payload, ensure_ascii=False)}"
+    call_start = time.perf_counter()
     llm_text = chat_completion(
         messages=[
             {"role": "system", "content": _build_strategy_json_system_prompt()},
-            {"role": "user", "content": f"请基于以下输入生成策略 JSON：\n{json.dumps(prompt_payload, ensure_ascii=False)}"},
+            {"role": "user", "content": user_content},
         ],
-        model_env_key="AGENT2_LLM_MODEL_STRATEGY",
-        fallback_model_env_key="AGENT2_LLM_MODEL",
+        model_env_key=model_env_key,
+        fallback_model_env_key=STRATEGY_FAST_MODEL_ENV,
         temperature=0.3,
         stream_delta_callback=reasoning_delta_callback,
+    )
+    elapsed_ms = int((time.perf_counter() - call_start) * 1000)
+    logger.info(
+        "%s 策略 LLM 完成 tier=%s elapsed_ms=%s prompt_chars=%s",
+        AGENT2_LOG_PREFIX,
+        "pro" if use_pro else "fast",
+        elapsed_ms,
+        len(user_content),
     )
     if not llm_text:
         return None
@@ -772,7 +903,12 @@ def recommend(
     risk_factors.extend(malicious_risks)
     risk_factors.extend(value_risks)
 
-    if _has_major_signal_conflict(input_data, malicious_result=malicious_result, rule_stance=rule_stance):
+    has_signal_conflict = _has_major_signal_conflict(
+        input_data,
+        malicious_result=malicious_result,
+        rule_stance=rule_stance,
+    )
+    if has_signal_conflict:
         risk_factors.append("[信号一致性] 恶意风险与商责明确信号同时存在，需说明冲突并按优先级谨慎处理")
 
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
@@ -812,6 +948,10 @@ def recommend(
         risk_factors=risk_factors,
         estimated_win_rate=estimated_win_rate,
         strategy_stage=strategy_stage,
+        malicious_result=malicious_result,
+        customer_value=customer_value,
+        merchant_fault_signal=merchant_fault_signal,
+        has_signal_conflict=has_signal_conflict,
         reasoning_delta_callback=reasoning_delta_callback,
     )
 
@@ -836,15 +976,7 @@ def recommend(
                 text = str(item or "").strip()
                 if text:
                     risk_factors.append(text)
-        basis_raw = strategy_json.get("platform_rule_basis")
-        platform_rule_basis: List[str] = []
-        if isinstance(basis_raw, list):
-            for item in basis_raw:
-                text = _polish_merchant_facing_text(str(item or "").strip())
-                if text:
-                    platform_rule_basis.append(text)
-        if not platform_rule_basis:
-            platform_rule_basis = _build_platform_rule_basis(input_data)
+        platform_rule_basis = _build_platform_rule_basis(input_data)
         dialogue_context = _normalize_dialogue_context(strategy_json.get("dialogue_context"), input_data)
         reasoning = _compose_reasoning_from_fields(
             customer_intent_analysis=customer_intent_analysis,

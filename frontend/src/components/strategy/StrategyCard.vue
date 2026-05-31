@@ -28,95 +28,89 @@
       </el-descriptions>
     </div>
 
-    <!-- 关键依据区：疑点 / 规则 / 恶意 / 客户价值 -->
-    <div class="zone">
-      <h3 class="zone-title">关键依据区</h3>
+    <!-- 关键依据区：默认折叠，子模块同样折叠 -->
+    <el-collapse class="evidence-collapse">
+      <el-collapse-item title="关键依据区" name="evidence">
+        <el-collapse class="inner-collapse">
+          <el-collapse-item title="疑点列表" name="red-flags">
+            <el-empty v-if="red_flag_items.length === 0" description="暂无疑点" :image-size="60" />
+            <el-tag
+              v-for="item in red_flag_items"
+              :key="item"
+              class="tag-gap"
+              type="danger"
+            >{{ item }}</el-tag>
+          </el-collapse-item>
 
-      <div class="text-block">
-        <h4>疑点列表</h4>
-        <el-empty v-if="red_flag_items.length === 0" description="暂无疑点" :image-size="60" />
-        <el-tag
-          v-for="item in red_flag_items"
-          :key="item"
-          class="tag-gap"
-          type="danger"
-        >{{ item }}</el-tag>
-      </div>
+          <el-collapse-item title="平台规则依据" name="rules">
+            <ol v-if="platform_rule_lines.length > 0" class="rule-list">
+              <li
+                v-for="(line, idx) in platform_rule_lines"
+                :key="'rule-line-' + idx"
+                class="rule-item"
+              >
+                {{ line }}
+              </li>
+            </ol>
+            <el-empty v-else description="暂无规则命中" :image-size="60" />
+          </el-collapse-item>
 
-      <div class="text-block">
-        <h4>平台规则依据</h4>
-        <ol v-if="platform_rule_lines.length > 0" class="rule-list">
-          <li
-            v-for="(line, idx) in platform_rule_lines"
-            :key="'rule-line-' + idx"
-            class="rule-item"
+          <el-collapse-item title="恶意风险提示" name="malicious">
+            <el-empty
+              v-if="!strategy?.malicious_detection"
+              description="暂无恶意风险信号"
+              :image-size="60"
+            />
+            <div v-else class="sub-block">
+              <el-descriptions :column="2" border size="small">
+                <el-descriptions-item label="恶意风险等级">
+                  <el-tag :type="malicious_level_type">{{ malicious_level_label }}</el-tag>
+                </el-descriptions-item>
+                <el-descriptions-item label="风险评分">
+                  {{ strategy.malicious_detection.risk_score }}
+                </el-descriptions-item>
+                <el-descriptions-item label="聚合说明" :span="2">
+                  <p class="risk-hints">{{ malicious_risk_hints_text }}</p>
+                </el-descriptions-item>
+                <el-descriptions-item label="处置建议" :span="2">
+                  {{ strategy.malicious_detection.disposition_advice || '—' }}
+                </el-descriptions-item>
+              </el-descriptions>
+              <div v-if="strategy.malicious_detection.triggered_signals?.length" class="signal-list">
+                <el-tag
+                  v-for="sig in strategy.malicious_detection.triggered_signals"
+                  :key="sig.signal_type + (sig.description || '')"
+                  class="tag-gap"
+                  type="danger"
+                  size="small"
+                >{{ malicious_signal_label(sig.signal_type) }}：{{ sig.description }}（{{ sig.score }}分，{{ signal_source_label(sig.source) }}）</el-tag>
+              </div>
+            </div>
+          </el-collapse-item>
+
+          <el-collapse-item
+            v-if="strategy?.customer_value"
+            title="客户价值提示"
+            name="customer-value"
           >
-            {{ line }}
-          </li>
-        </ol>
-        <el-empty v-else description="暂无规则命中" :image-size="60" />
-      </div>
-
-      <div class="text-block">
-        <h4>恶意风险提示</h4>
-        <el-empty
-          v-if="risk_factors.length === 0 && !strategy?.malicious_detection"
-          description="暂无风险提示"
-          :image-size="60"
-        />
-        <template v-else>
-          <el-tag
-            v-for="item in risk_factors"
-            :key="item"
-            class="tag-gap"
-            type="warning"
-          >{{ item }}</el-tag>
-          <div v-if="strategy?.malicious_detection" class="sub-block">
             <el-descriptions :column="2" border size="small">
-              <el-descriptions-item label="恶意风险等级">
-                <el-tag :type="malicious_level_type">{{ strategy.malicious_detection.risk_level }}</el-tag>
+              <el-descriptions-item label="长期价值分">
+                {{ strategy.customer_value.long_term_score }}
               </el-descriptions-item>
-              <el-descriptions-item label="风险评分">
-                {{ strategy.malicious_detection.risk_score }}
+              <el-descriptions-item label="本单价值分">
+                {{ strategy.customer_value.order_score }}
               </el-descriptions-item>
-              <el-descriptions-item label="聚合说明" :span="2">
-                <p class="risk-hints">{{ malicious_risk_hints_text }}</p>
+              <el-descriptions-item label="触发通道" :span="2">
+                <el-tag :type="channel_type">{{ channel_summary }}</el-tag>
               </el-descriptions-item>
-              <el-descriptions-item label="处置建议" :span="2">
-                {{ strategy.malicious_detection.disposition_advice || '—' }}
+              <el-descriptions-item label="话术温度建议" :span="2">
+                {{ strategy.customer_value.tone_suggestion || '—' }}
               </el-descriptions-item>
             </el-descriptions>
-            <div v-if="strategy.malicious_detection.triggered_signals?.length" class="signal-list">
-              <el-tag
-                v-for="sig in strategy.malicious_detection.triggered_signals"
-                :key="sig.signal_type + (sig.description || '')"
-                class="tag-gap"
-                type="danger"
-                size="small"
-              >{{ malicious_signal_label(sig.signal_type) }}：{{ sig.description }}（{{ sig.score }}分，{{ signal_source_label(sig.source) }}）</el-tag>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <div v-if="strategy?.customer_value" class="text-block">
-        <h4>客户价值提示</h4>
-        <el-descriptions :column="2" border size="small">
-          <el-descriptions-item label="长期价值分">
-            {{ strategy.customer_value.long_term_score }}
-          </el-descriptions-item>
-          <el-descriptions-item label="本单价值分">
-            {{ strategy.customer_value.order_score }}
-          </el-descriptions-item>
-          <el-descriptions-item label="触发通道" :span="2">
-            <el-tag :type="channel_type">{{ channel_summary }}</el-tag>
-          </el-descriptions-item>
-          <el-descriptions-item label="话术温度建议" :span="2">
-            {{ strategy.customer_value.tone_suggestion || '—' }}
-          </el-descriptions-item>
-        </el-descriptions>
-      </div>
-    </div>
+          </el-collapse-item>
+        </el-collapse>
+      </el-collapse-item>
+    </el-collapse>
 
     <!-- 参考信息区：仅买家画像 + 相似判例 -->
     <el-collapse class="ref-collapse ref-zone-collapse">
@@ -183,9 +177,9 @@
 
 <script setup>
 import { computed } from 'vue'
-import { getDispositionLabel } from '../../utils/enums'
+import { getDispositionLabel, getRiskLevelLabel } from '../../utils/enums'
 
-// ---------- 组件输入：策略、事实疑点、命中规则、参考信息 ----------
+// ---------- 组件输入：策略、事实疑点、命中规则、参考信息、话术使用提示 ----------
 const props = defineProps({
   strategy: {
     type: Object,
@@ -290,11 +284,6 @@ const confidence_percent = computed(() => {
   return Math.max(0, Math.min(100, Math.round(value * 100)))
 })
 
-// ---------- 派生状态：风险项列表 ----------
-const risk_factors = computed(() => {
-  return Array.isArray(props.strategy?.risk_factors) ? props.strategy.risk_factors : []
-})
-
 // ---------- 派生状态：疑点列表（来自 Agent1 事实） ----------
 const red_flag_items = computed(() => {
   const raw_flags = Array.isArray(props.facts?.red_flags) ? props.facts.red_flags : []
@@ -328,24 +317,20 @@ const platform_rule_lines = computed(() => {
   return matched_rules_list.value.map((rule) => format_rule_for_merchant(rule)).filter(Boolean)
 })
 
-// ---------- 派生状态：前端代表规则（3～5 条，must 优先） ----------
+// ---------- 派生状态：前端代表规则（后端 display_rules 已做争点过滤，此处仅排序展示） ----------
 const matched_rules_list = computed(() => {
   const raw = Array.isArray(props.matched_rules) ? props.matched_rules : []
   const rank = { must: 0, should: 1, weak: 2 }
-  const sorted = [...raw].sort(
-    (a, b) => (rank[a?.relevance] ?? 9) - (rank[b?.relevance] ?? 9)
-  )
-  const must = sorted.filter((r) => r?.relevance === 'must')
-  const should = sorted.filter((r) => r?.relevance === 'should')
-  const picked = [...must]
-  if (picked.length < 3) {
-    picked.push(...should.slice(0, 3 - picked.length))
-  }
-  const display = picked.length > 0 ? picked : sorted
-  return display.slice(0, 5)
+  return [...raw]
+    .sort((a, b) => (rank[a?.relevance] ?? 9) - (rank[b?.relevance] ?? 9))
+    .slice(0, 5)
 })
 
-// ---------- 派生状态：恶意风险等级对应标签颜色 ----------
+// ---------- 派生状态：恶意风险等级对应标签颜色与中文 ----------
+const malicious_level_label = computed(() => {
+  return getRiskLevelLabel(props.strategy?.malicious_detection?.risk_level)
+})
+
 const malicious_level_type = computed(() => {
   const level = props.strategy?.malicious_detection?.risk_level
   if (level === 'high') return 'danger'
@@ -383,26 +368,24 @@ const channel_type = computed(() => {
   color: #303133;
 }
 
-.text-block {
+.evidence-collapse {
   margin-top: 12px;
 }
 
-.text-block h4 {
-  margin: 0 0 8px;
+.inner-collapse {
+  contain: content;
+}
+
+.inner-collapse :deep(.el-collapse-item__header) {
   font-size: 14px;
+  font-weight: 500;
 }
 
-.text-block h5 {
-  margin: 8px 0 6px;
-  font-size: 13px;
-  color: #606266;
+.ref-collapse {  margin-top: 12px;
 }
 
-.plain-text {
-  margin: 0;
-  color: #606266;
-  line-height: 1.6;
-  white-space: pre-wrap;
+.ref-zone-collapse {
+  contain: content;
 }
 
 .tag-gap {
@@ -415,14 +398,6 @@ const channel_type = computed(() => {
 
 .signal-list {
   margin-top: 8px;
-}
-
-.ref-collapse {
-  margin-top: 12px;
-}
-
-.ref-zone-collapse {
-  contain: content;
 }
 
 .direction-text {

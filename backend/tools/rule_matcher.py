@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import select
@@ -36,11 +35,16 @@ from schemas import (
 LOG_PREFIX = "[RuleMatcher]"
 logger = logging.getLogger(__name__)
 
+RULE_DOCUMENT_CACHE_MAX = 64
+_rule_document_cache: dict[str, dict[str, Any] | None] = {}
+
 MATCH_POOL_CAP = 30
-DISPLAY_MIN = 3
 DISPLAY_MAX = 5
 RULE_SUMMARY_MAX_LEN = 480
 RULE_BRIEF_MAX_LEN = 320
+NON_CATEGORY_LLM_CAP_PER_DOC = 10
+LLM_ARTICLE_EXCERPT_MAX = 200
+RULE_MATCH_LITERAL_ONLY_MAX = 5
 
 GENERIC_ARTICLE_TITLES = frozenset(
     {"商品质量问题", "描述不当问题", "描述不符问题", "物流问题", "举证要求", "处理标准", "买家原因退换货"}
@@ -49,7 +53,6 @@ GENERIC_ARTICLE_TITLES = frozenset(
 GENERIC_WEAK_ONLY_TERMS = frozenset(
     {"举证", "初步凭证", "商品质量问题", "表面不一致", "签收", "确认收货", "处理标准", "举证要求"}
 )
-DISPLAY_FILTER_MAX = 3
 
 
 def _format_merchant_rule_text(article: dict[str, Any]) -> str:
@@ -104,10 +107,23 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
 
     section_map = {sel.doc_id: sel.section_keys for sel in plan.section_selections}
 
-    from backend.tools.rule_matcher_llm import llm_filter_event_display_rules, llm_match_articles
+    from backend.tools.rule_matcher_llm import llm_match_articles
 
     llm_display_ids: list[str] | None = None
-    llm_result = llm_match_articles(facts=facts, documents=documents, section_map=section_map)
+    llm_candidates = prepare_llm_candidates(
+        documents=documents,
+        section_map=section_map,
+        terms=plan.search_terms,
+    )
+    if len(llm_candidates) <= RULE_MATCH_LITERAL_ONLY_MAX:
+        logger.info(
+            "%s 候选≤%s，跳过条文 LLM，走字面降级",
+            LOG_PREFIX,
+            RULE_MATCH_LITERAL_ONLY_MAX,
+        )
+        llm_result = None
+    else:
+        llm_result = llm_match_articles(facts=facts, candidates=llm_candidates)
     if llm_result is None:
         logger.warning("%s LLM 条文匹配失败，回退字面检索", LOG_PREFIX)
         terms = plan.search_terms
@@ -122,19 +138,11 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
     else:
         llm_display_ids = llm_result.display_rule_ids
         pool = _sort_pool_category_first(llm_result.matched_rules[:MATCH_POOL_CAP])
-        if len(pool) < DISPLAY_MIN:
-            pool = _supplement_pool_from_terms(
-                existing=pool,
-                documents=documents,
-                section_map=section_map,
-                terms=plan.search_terms,
-            )
     briefs = _build_briefs(pool)
     display = _resolve_display_rules(
         pool,
         facts=facts,
         llm_display_ids=llm_display_ids,
-        max_count=DISPLAY_FILTER_MAX,
     )
     logger.info(
         "%s 匹配完成 pool=%s briefs=%s display=%s",
@@ -146,37 +154,10 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
     return RuleMatchResult(matched_rules=pool, rule_briefs=briefs, display_rules=display)
 
 
-def _load_documents(doc_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """按 doc_id 从 MySQL 加载爬取规则 JSON（单 doc LRU 缓存）。"""
-    loaded: dict[str, dict[str, Any]] = {}
-    for doc_id in doc_ids:
-        payload = _load_document_cached(doc_id)
-        if payload:
-            loaded[doc_id] = payload
-    return loaded
-
-
-@lru_cache(maxsize=64)
-def _load_document_cached(doc_id: str) -> dict[str, Any] | None:
-    """
-    从 MySQL 加载单份规则文档并缓存；规则正文变更需重启进程或调 clear_rule_document_cache。
-    """
-    engine = get_engine()
-    rule_key = f"taobao_rule::{doc_id}"
+def _parse_rule_document_payload(doc_id: str, rule_content: str | None) -> dict[str, Any] | None:
+    """解析 MySQL 中存储的单份规则 JSON。"""
     try:
-        with Session(bind=engine) as session:
-            row = session.execute(
-                select(PlatformRule).where(PlatformRule.rule_key == rule_key)
-            ).scalar_one_or_none()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s MySQL 加载规则 doc_id=%s 失败：%s", LOG_PREFIX, doc_id, exc)
-        raise RuntimeError(f"平台规则加载失败：{exc}") from exc
-
-    if row is None:
-        logger.warning("%s MySQL 未找到规则 doc_id=%s", LOG_PREFIX, doc_id)
-        return None
-    try:
-        payload = json.loads(row.rule_content or "{}")
+        payload = json.loads(rule_content or "{}")
     except json.JSONDecodeError:
         logger.warning("%s 规则 JSON 解析失败 doc_id=%s", LOG_PREFIX, doc_id)
         return None
@@ -187,9 +168,96 @@ def _load_document_cached(doc_id: str) -> dict[str, Any] | None:
     return payload
 
 
+def _rule_key_for_doc_id(doc_id: str) -> str:
+    """构造 PlatformRule.rule_key。"""
+    return f"taobao_rule::{doc_id}"
+
+
+def _store_rule_document_cache(doc_id: str, payload: dict[str, Any] | None) -> None:
+    """写入规则文档缓存，超出容量时淘汰最早项。"""
+    if doc_id not in _rule_document_cache and len(_rule_document_cache) >= RULE_DOCUMENT_CACHE_MAX:
+        oldest_key = next(iter(_rule_document_cache))
+        _rule_document_cache.pop(oldest_key, None)
+    _rule_document_cache[doc_id] = payload
+
+
+def _fetch_rule_documents_from_db(doc_ids: list[str]) -> dict[str, dict[str, Any] | None]:
+    """批量从 MySQL 加载多份规则文档。"""
+    if not doc_ids:
+        return {}
+    rule_keys = [_rule_key_for_doc_id(doc_id) for doc_id in doc_ids]
+    key_to_doc_id = {rule_key: doc_id for rule_key, doc_id in zip(rule_keys, doc_ids)}
+    loaded: dict[str, dict[str, Any] | None] = {doc_id: None for doc_id in doc_ids}
+    engine = get_engine()
+    try:
+        with Session(bind=engine) as session:
+            rows = session.execute(
+                select(PlatformRule).where(PlatformRule.rule_key.in_(rule_keys))
+            ).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s MySQL 批量加载规则失败 doc_ids=%s：%s", LOG_PREFIX, doc_ids, exc)
+        raise RuntimeError(f"平台规则批量加载失败：{exc}") from exc
+
+    for row in rows:
+        rule_key = str(row.rule_key or "").strip()
+        doc_id = key_to_doc_id.get(rule_key)
+        if not doc_id:
+            continue
+        loaded[doc_id] = _parse_rule_document_payload(doc_id, row.rule_content)
+
+    for doc_id in doc_ids:
+        if loaded.get(doc_id) is None:
+            logger.warning("%s MySQL 未找到规则 doc_id=%s", LOG_PREFIX, doc_id)
+    return loaded
+
+
+def _load_documents(doc_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """按 doc_id 从 MySQL 加载爬取规则 JSON（内存缓存 + 批量查询）。"""
+    unique_ids = list(dict.fromkeys(doc_id for doc_id in doc_ids if doc_id))
+    missing_ids = [doc_id for doc_id in unique_ids if doc_id not in _rule_document_cache]
+    if missing_ids:
+        batch_loaded = _fetch_rule_documents_from_db(missing_ids)
+        for doc_id, payload in batch_loaded.items():
+            _store_rule_document_cache(doc_id, payload)
+
+    loaded: dict[str, dict[str, Any]] = {}
+    for doc_id in unique_ids:
+        payload = _rule_document_cache.get(doc_id)
+        if payload:
+            loaded[doc_id] = payload
+    return loaded
+
+
+def _load_document_cached(doc_id: str) -> dict[str, Any] | None:
+    """
+    加载单份规则文档（走统一缓存；未命中时单次查询）。
+    """
+    if doc_id in _rule_document_cache:
+        return _rule_document_cache[doc_id]
+
+    engine = get_engine()
+    rule_key = _rule_key_for_doc_id(doc_id)
+    try:
+        with Session(bind=engine) as session:
+            row = session.execute(
+                select(PlatformRule).where(PlatformRule.rule_key == rule_key)
+            ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s MySQL 加载规则 doc_id=%s 失败：%s", LOG_PREFIX, doc_id, exc)
+        raise RuntimeError(f"平台规则加载失败：{exc}") from exc
+
+    payload = None
+    if row is not None:
+        payload = _parse_rule_document_payload(doc_id, row.rule_content)
+    else:
+        logger.warning("%s MySQL 未找到规则 doc_id=%s", LOG_PREFIX, doc_id)
+    _store_rule_document_cache(doc_id, payload)
+    return payload
+
+
 def clear_rule_document_cache() -> None:
-    """清空规则文档 LRU 缓存（规则库更新后联调可调用）。"""
-    _load_document_cached.cache_clear()
+    """清空规则文档内存缓存（规则库更新后联调可调用）。"""
+    _rule_document_cache.clear()
 
 
 def _filter_articles_by_sections(doc: dict[str, Any], section_keys: list[str] | None) -> list[dict[str, Any]]:
@@ -221,32 +289,72 @@ def _filter_articles_by_sections(doc: dict[str, Any], section_keys: list[str] | 
     return [a for a in articles if str(a.get("article_no", "")).strip() in allowed_nos]
 
 
-def _supplement_pool_from_terms(
-    *,
-    existing: list[MatchedRule],
+def _literal_article_score(article: dict[str, Any], terms: RuleSearchTerms) -> int:
+    """计算条文与检索词字面命中分，供非 C doc 预筛 cap 排序。"""
+    title = str(article.get("article_title", "") or "")
+    chapter = str(article.get("chapter", "") or "")
+    article_no = str(article.get("article_no", "") or "")
+    content = str(article.get("content", "") or "")
+    header = f"{chapter} {article_no} {title}"
+    blob = f"{header} {content}"
+    score = 0
+    for term in terms.must_terms:
+        if not term:
+            continue
+        if term in header:
+            score += 3
+        elif term in blob:
+            score += 1
+    for term in terms.should_terms:
+        if term and term in blob:
+            score += 1
+    for term in terms.case_terms:
+        if term and term in blob:
+            score += 1
+    return score
+
+
+def prepare_llm_candidates(
     documents: dict[str, dict[str, Any]],
     section_map: dict[str, list[str] | None],
     terms: RuleSearchTerms,
-) -> list[MatchedRule]:
+) -> list[dict[str, Any]]:
     """
-    LLM 命中不足 DISPLAY_MIN 时，用检索词对剩余候选条文补量（去重合并）。
+    收集条文匹配 LLM 候选：C 通道 doc 全保留，非 C doc 按字面分 cap 后合并。
     """
-    seen = {rule.rule_id for rule in existing}
-    scored: list[tuple[int, str, MatchedRule]] = []
+    candidates: list[dict[str, Any]] = []
     for doc_id, doc in documents.items():
-        for article in _filter_articles_by_sections(doc, section_map.get(doc_id)):
-            rule = _score_article(doc_id, doc, article, terms)
-            if rule is None or rule.rule_id in seen:
+        articles = _filter_articles_by_sections(doc, section_map.get(doc_id))
+        if is_category_doc(doc_id):
+            selected = articles
+        else:
+            ranked = sorted(
+                enumerate(articles),
+                key=lambda item: (-_literal_article_score(item[1], terms), item[0]),
+            )
+            selected = [article for _, article in ranked[:NON_CATEGORY_LLM_CAP_PER_DOC]]
+        for article in selected:
+            if not isinstance(article, dict):
                 continue
-            scored.append((_relevance_rank(rule.relevance), rule.relevance, rule))
-    scored.sort(key=lambda x: (x[0], -_count_must_signal(x[2])))
-    merged = list(existing)
-    for _rank, _rel, rule in scored:
-        if len(merged) >= MATCH_POOL_CAP:
-            break
-        merged.append(rule)
-        seen.add(rule.rule_id)
-    return _sort_pool_category_first(merged)
+            article_no = str(article.get("article_no", "") or "").strip()
+            if not article_no:
+                continue
+            candidates.append(
+                {
+                    "doc_id": doc_id,
+                    "article_no": article_no,
+                    "article_title": str(article.get("article_title", "") or "").strip(),
+                    "content": str(article.get("content", "") or "").strip(),
+                    "chapter": str(article.get("chapter", "") or "").strip(),
+                }
+            )
+    logger.info(
+        "%s LLM 候选预筛完成 total=%s docs=%s",
+        LOG_PREFIX,
+        len(candidates),
+        len(documents),
+    )
+    return candidates
 
 
 def _score_article(
@@ -422,59 +530,59 @@ def _resolve_display_rules(
     *,
     facts: FactOutput,
     llm_display_ids: list[str] | None,
-    max_count: int = DISPLAY_FILTER_MAX,
 ) -> list[MatchedRule]:
     """
-    解析前端展示条：优先用条文匹配 LLM 同批返回的 display_rule_ids；否则启发式选取，仅在过多时再调展示筛选 LLM。
+    解析前端展示条：LLM 路径只认同批 display_rule_ids（可 0 条）；字面降级走争点启发式，不凑条数。
     """
-    from backend.tools.rule_matcher_llm import llm_filter_event_display_rules
-
-    if llm_display_ids:
+    if llm_display_ids is not None:
+        if not llm_display_ids:
+            logger.info("%s 展示规则为空（LLM 判定无贴合展示条）", LOG_PREFIX)
+            return []
         id_order = {rid: index for index, rid in enumerate(llm_display_ids)}
         picked = [rule for rule in pool if rule.rule_id in id_order]
         picked.sort(key=lambda rule: id_order.get(rule.rule_id, 999))
-        if picked:
-            logger.info("%s 展示规则使用条文匹配 LLM 同批 display_rule_ids", LOG_PREFIX)
-            return picked[:max_count]
+        logger.info("%s 展示规则使用条文匹配 LLM display_rule_ids count=%s", LOG_PREFIX, len(picked))
+        return picked
 
-    picked = _pick_display_rules(pool)
-    if len(picked) <= max_count:
-        return picked[:max_count]
-
-    filtered = llm_filter_event_display_rules(facts, picked, max_count=max_count)
-    return filtered if filtered else picked[:max_count]
+    return _pick_display_rules(pool)[:DISPLAY_MAX]
 
 
 def _pick_display_rules(pool: list[MatchedRule]) -> list[MatchedRule]:
     """
-    前端代表条：品类专项（C 通道）优先，基本规则（A）最多补 1 条，共 3～5 条。
+    字面降级展示：优先 case 争点命中条，其次品类 must；不强制凑满条数。
     """
+    if not pool:
+        return []
+
+    case_hit = [
+        r
+        for r in pool
+        if "case:" in r.condition_result and r.relevance in (RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD)
+    ]
+    if case_hit:
+        return _dedupe_rules(case_hit)
+
     category_must = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST and is_category_doc(r.doc_id)]
-    category_should = [r for r in pool if r.relevance == RULE_RELEVANCE_SHOULD and is_category_doc(r.doc_id)]
-    base_must = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST and not is_category_doc(r.doc_id)]
-    base_should = [r for r in pool if r.relevance == RULE_RELEVANCE_SHOULD and not is_category_doc(r.doc_id)]
+    if category_must:
+        return _dedupe_rules(category_must)
 
+    must_rules = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST]
+    if must_rules:
+        return _dedupe_rules(must_rules)
+
+    should_rules = [r for r in pool if r.relevance == RULE_RELEVANCE_SHOULD]
+    return _dedupe_rules(should_rules)
+
+
+def _dedupe_rules(rules: list[MatchedRule]) -> list[MatchedRule]:
+    """按 rule_id 去重并保持原顺序。"""
+    seen: set[str] = set()
     picked: list[MatchedRule] = []
-    for bucket in (category_must, category_should):
-        for rule in bucket:
-            if len(picked) >= DISPLAY_MAX:
-                break
-            picked.append(rule)
-        if len(picked) >= DISPLAY_MAX:
-            break
-
-    if len(picked) < DISPLAY_MIN:
-        for rule in base_must[:1]:
-            if rule not in picked:
-                picked.append(rule)
-        for rule in base_should:
-            if len(picked) >= DISPLAY_MIN:
-                break
-            if rule not in picked:
-                picked.append(rule)
-
-    if len(picked) > DISPLAY_MAX:
-        picked = picked[:DISPLAY_MAX]
+    for rule in rules:
+        if rule.rule_id in seen:
+            continue
+        seen.add(rule.rule_id)
+        picked.append(rule)
     return picked
 
 

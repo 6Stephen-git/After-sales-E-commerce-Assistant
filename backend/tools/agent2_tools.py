@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -28,6 +29,7 @@ from schemas import (  # noqa: E402
     CustomerValueInput,
     CustomerValueOutput,
     CustomerValueScoreItem,
+    EVIDENCE_LOW,
     FactOutput,
     MaliciousDetectionInput,
     MaliciousDetectionOutput,
@@ -69,6 +71,27 @@ def match_rules_full(facts: FactOutput) -> "RuleMatchResult":
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 规则匹配失败：%s", AGENT2_LOG_PREFIX, exc)
         raise RuntimeError(f"规则匹配失败：{exc}") from exc
+
+
+def needs_rule_match(
+    facts: FactOutput,
+    malicious_result: MaliciousDetectionOutput,
+    customer_value: CustomerValueOutput,
+) -> bool:
+    """
+    判定是否启动条文匹配：仅复杂/高风险案调用条文 LLM；简单案由策略 LLM 基于事实处理。
+
+    触发：恶意 medium+、价值通道、多诉求标签、恶意与商责信号冲突。
+    不含举证未闭环（补证属流程动作，不必查平台条文）。
+    """
+    if malicious_result.risk_level in {"medium", "high"}:
+        return True
+    if customer_value.channel in {"long_term", "order"}:
+        return True
+    intent_tags = [str(t).strip() for t in (facts.intent_tags or []) if str(t).strip()]
+    if len(intent_tags) > 1:
+        return True
+    return False
 
 
 # ---------- 买家画像：默认值与数据库记录解析 ----------
@@ -200,184 +223,40 @@ def search_similar_cases_vector(dispute_desc: str, top_k: int = 3) -> List[Simil
     return []
 
 
-# ---------- 客户价值：LLM 推断四字段 + 双维评分（完整工具链，供 Agent2 / 智能模式 Controller 复用） ----------
+# ---------- 客户价值：视觉损失暴露 + 双维评分（无专用 LLM） ----------
+ORDER_VALUE_SCORE_THRESHOLD = 60
+ORDER_VALUE_AMOUNT_ONLY_THRESHOLD = 500.0
 
 
-def _build_customer_value_infer_messages(payload: Dict[str, Any]) -> List[Dict[str, str]]:
-    """
-    构建客户价值字段推断的 LLM messages（规则化判定说明 + 跨品类 few-shot）。
+def _facts_has_visual_loss_exposure(facts: FactOutput) -> bool:
+    """两枚举均非空时视为已有视觉损失暴露评估。"""
+    severity = str(facts.visual_defect_severity or "").strip().lower()
+    recoverability = str(facts.visual_goods_recoverability or "").strip().lower()
+    return bool(severity and recoverability)
 
-    返回:
-        OpenAI 兼容 messages 列表，供 chat_completion 使用。
-    """
-    system_prompt = (
-        "你是电商售后策略分析器。任务是从输入事实中推断 4 个结构化字段，"
-        "用于后续客户价值评估。禁止假设固定品类；必须遵循以下判定规则。\n"
-        "\n"
-        "【字段1：defect_severity】\n"
-        "- severe：核心功能不可用/影响安全/无法正常履约，或损坏程度显著。\n"
-        "- moderate：存在明确问题并影响体验，但不构成完全不可用。\n"
-        "- minor：轻微瑕疵或主观体验差异，基本功能可用。\n"
-        "优先看事实证据（facts）中的问题描述、证据质量、使用影响，不要看品类名。\n"
-        "\n"
-        "【字段2：goods_recoverability】\n"
-        "- unrecoverable：退回后基本无法二次销售，或修复成本显著不经济。\n"
-        "- repairable：可修复后再处理，但存在明确损失。\n"
-        "- resalable：可直接二次销售或轻微处理即可再次流转。\n"
-        "优先看损坏可逆性与再销售可能性，不依赖类目经验。\n"
-        "\n"
-        "【字段3：buyer_cooperation】\n"
-        "- good：愿意配合补充证据、反馈及时、沟通一致。\n"
-        "- neutral：部分配合或信息不完整，但可继续推进。\n"
-        "- poor：明显拒绝配合、前后矛盾、反复施压且缺乏有效信息。\n"
-        "优先看聊天行为和证据配合度。\n"
-        "\n"
-        "【字段4：demand_reasonableness】\n"
-        "- reasonable：诉求与事实证据、平台常规规则基本一致。\n"
-        "- borderline：诉求有部分合理性，但金额或方式偏激进。\n"
-        "- unreasonable：诉求明显超出事实支撑或违背规则边界。\n"
-        "优先看诉求-证据一致性，再看金额与处理方式是否成比例。\n"
-        "\n"
-        "输出要求：\n"
-        "1) 只输出 JSON 对象，不输出解释文本。\n"
-        "2) JSON 严格包含且仅包含 4 个键：\n"
-        '{"defect_severity":"minor|moderate|severe","goods_recoverability":"resalable|repairable|unrecoverable",'
-        '"buyer_cooperation":"good|neutral|poor","demand_reasonableness":"reasonable|borderline|unreasonable"}\n'
-        "3) 不允许返回 null、空字符串或中文枚举。"
+
+def _should_block_order_value_channel(facts: FactOutput) -> bool:
+    """本单优待通道门槛：疑点或低证据且仍缺证时不触发。"""
+    if facts.red_flags:
+        return True
+    if facts.evidence_quality == EVIDENCE_LOW and facts.missing_evidence:
+        return True
+    return False
+
+
+def _build_customer_value_input_from_strategy(input_data: StrategyInput) -> CustomerValueInput:
+    """从策略输入构造客户价值评估参数（严重度/可挽回性仅来自视觉）。"""
+    facts = input_data.facts
+    has_loss = _facts_has_visual_loss_exposure(facts)
+    return CustomerValueInput(
+        buyer_profile=input_data.buyer_profile,
+        order_amount=input_data.order_amount,
+        defect_severity=facts.visual_defect_severity if has_loss else None,
+        goods_recoverability=facts.visual_goods_recoverability if has_loss else None,
+        has_visual_loss_exposure=has_loss,
+        block_order_channel=_should_block_order_value_channel(facts),
+        emotion_note=input_data.emotion_note,
     )
-
-    few_shot_user_1 = (
-        "示例输入1："
-        '{"facts":{"defect_type":"污渍","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
-        '"buyer_profile":{"purchase_count":6},"order_amount":159.0,'
-        '"chat_behavior":"买家上传清晰图片并同意补充细节，诉求为部分退款"}'
-    )
-    few_shot_assistant_1 = (
-        '{"defect_severity":"moderate","goods_recoverability":"repairable",'
-        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
-    )
-
-    few_shot_user_2 = (
-        "示例输入2："
-        '{"facts":{"defect_type":"功能故障","evidence_quality":"high","missing_evidence":[],"red_flags":[]},'
-        '"buyer_profile":{"purchase_count":2},"order_amount":899.0,'
-        '"chat_behavior":"买家提供故障视频，诉求全额退款"}'
-    )
-    few_shot_assistant_2 = (
-        '{"defect_severity":"severe","goods_recoverability":"unrecoverable",'
-        '"buyer_cooperation":"good","demand_reasonableness":"reasonable"}'
-    )
-
-    few_shot_user_3 = (
-        "示例输入3："
-        '{"facts":{"defect_type":"无瑕疵","evidence_quality":"low","missing_evidence":["清晰照片"],"red_flags":["前后说法不一致"]},'
-        '"buyer_profile":{"purchase_count":1},"order_amount":299.0,'
-        '"chat_behavior":"拒绝补证，坚持仅退款并威胁差评"}'
-    )
-    few_shot_assistant_3 = (
-        '{"defect_severity":"minor","goods_recoverability":"resalable",'
-        '"buyer_cooperation":"poor","demand_reasonableness":"unreasonable"}'
-    )
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": few_shot_user_1},
-        {"role": "assistant", "content": few_shot_assistant_1},
-        {"role": "user", "content": few_shot_user_2},
-        {"role": "assistant", "content": few_shot_assistant_2},
-        {"role": "user", "content": few_shot_user_3},
-        {"role": "assistant", "content": few_shot_assistant_3},
-        {"role": "user", "content": f"请按相同规则输出当前输入的 JSON：{json.dumps(payload, ensure_ascii=False)}"},
-    ]
-
-
-def _strip_markdown_json(raw_text: str) -> str:
-    """
-    去除 LLM 可能返回的 markdown 代码块包裹，便于 JSON 解析。
-    """
-    text = raw_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            text = "\n".join(lines[1:-1]).strip()
-    return text
-
-
-def _require_customer_value_field(value: str, valid_values: set[str], field_name: str) -> str:
-    """
-    校验 LLM 推断字段值；不合法时抛错，由上层捕获并记录。
-    """
-    normalized = (value or "").strip().lower()
-    if normalized not in valid_values:
-        raise ValueError(f"字段 {field_name} 返回非法值：{value}")
-    return normalized
-
-
-def infer_customer_value_fields(input_data: StrategyInput) -> Dict[str, str]:
-    """
-    通过 LLM 推断客户价值评估所需的四个结构化字段（全品类泛化）。
-
-    参数:
-        input_data: Agent2 标准输入，含 facts、buyer_profile、order_amount。
-
-    返回:
-        defect_severity 等四键字典；LLM 不可用或解析失败时抛出 RuntimeError。
-
-    说明:
-        仅负责推断，不计算分值；打分请使用 evaluate_customer_value 或 run_customer_value_analysis。
-    """
-    payload: Dict[str, Any] = {
-        "facts": input_data.facts.model_dump(),
-        "buyer_profile": input_data.buyer_profile.model_dump(),
-        "order_amount": input_data.order_amount,
-    }
-    logger.info("%s 开始调用 LLM 推断客户价值字段", AGENT2_LOG_PREFIX)
-    try:
-        llm_text = chat_completion(
-            messages=_build_customer_value_infer_messages(payload),
-            model_env_key="AGENT2_LLM_MODEL_VALUE",
-            fallback_model_env_key="AGENT2_LLM_MODEL",
-            temperature=0.0,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s 客户价值字段推断调用 LLM 失败：%s", AGENT2_LOG_PREFIX, exc)
-        raise RuntimeError(f"客户价值字段推断失败：LLM 调用异常，原因：{exc}") from exc
-
-    if not llm_text:
-        logger.error("%s 客户价值字段推断失败：LLM 无返回内容", AGENT2_LOG_PREFIX)
-        raise RuntimeError("客户价值字段推断失败：LLM 无返回内容")
-
-    try:
-        parsed = json.loads(_strip_markdown_json(llm_text))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s 客户价值字段推断解析 JSON 失败：%s", AGENT2_LOG_PREFIX, exc)
-        raise RuntimeError(f"客户价值字段推断失败：LLM 输出解析异常，原因：{exc}") from exc
-
-    return {
-        "defect_severity": _require_customer_value_field(
-            str(parsed.get("defect_severity", "")),
-            {"minor", "moderate", "severe"},
-            "defect_severity",
-        ),
-        "goods_recoverability": _require_customer_value_field(
-            str(parsed.get("goods_recoverability", "")),
-            {"resalable", "repairable", "unrecoverable"},
-            "goods_recoverability",
-        ),
-        "buyer_cooperation": _require_customer_value_field(
-            str(parsed.get("buyer_cooperation", "")),
-            {"good", "neutral", "poor"},
-            "buyer_cooperation",
-        ),
-        "demand_reasonableness": _require_customer_value_field(
-            str(parsed.get("demand_reasonableness", "")),
-            {"reasonable", "borderline", "unreasonable"},
-            "demand_reasonableness",
-        ),
-    }
-
-
-# ---------- 客户价值评估：双维评分（长期价值 + 本单价值） ----------
 def _build_score_item(dimension: str, score: int, max_score: int, reason: str) -> CustomerValueScoreItem:
     """
     构建统一分项结构，确保输出格式稳定。
@@ -455,67 +334,77 @@ def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutp
     ]
     long_term_score = sum(item.score for item in long_term_breakdown)
 
-    # ----- 本单价值分（满分 100）-----
+    # ----- 本单价值分（满分 85，触发阈值 60）-----
     order_amount = max(0.0, input_data.order_amount)
     if order_amount >= 500:
         amount_score, amount_reason = 40, "本单金额高，处理影响大"
     elif order_amount >= 200:
-        amount_score, amount_reason = 28, "本单金额中高，需要兼顾体验与成本"
+        amount_score, amount_reason = 25, "本单金额中高，需要兼顾体验与成本"
     elif order_amount >= 50:
-        amount_score, amount_reason = 14, "本单金额中等，建议稳妥处理"
+        amount_score, amount_reason = 15, "本单金额中等，建议稳妥处理"
     else:
-        amount_score, amount_reason = 4, "本单金额较低，优先控制处理成本"
+        amount_score, amount_reason = 5, "本单金额较低，优先控制处理成本"
 
-    severity_key = input_data.defect_severity.strip().lower()
-    severity_score_map = {
-        "severe": (25, "问题严重，处理不当易升级"),
-        "moderate": (15, "问题中等，需给出明确方案"),
-        "minor": (5, "问题较轻，可在规则内快速收敛"),
-    }
-    severity_score, severity_reason = severity_score_map.get(severity_key, (15, "严重性未明确，按中等严重处理"))
+    order_breakdown = [_build_score_item("本单金额", amount_score, 40, amount_reason)]
 
-    recoverability_key = input_data.goods_recoverability.strip().lower()
-    recoverability_score_map = {
-        "unrecoverable": (20, "商品不可挽回，商家损失大，需重点处理"),
-        "repairable": (12, "商品可修复，存在一定损失与处理空间"),
-        "resalable": (4, "商品可二次销售，实际损失相对可控"),
-    }
-    recoverability_score, recoverability_reason = recoverability_score_map.get(
-        recoverability_key,
-        (12, "可挽回性未明确，按可修复处理"),
-    )
+    severity_key = str(input_data.defect_severity or "").strip().lower()
+    if input_data.has_visual_loss_exposure and severity_key:
+        severity_score_map = {
+            "severe": (25, "问题严重，处理不当易升级"),
+            "moderate": (15, "问题中等，需给出明确方案"),
+            "minor": (5, "问题较轻，可在规则内快速收敛"),
+        }
+        severity_score, severity_reason = severity_score_map.get(severity_key, (0, "视觉严重度未识别，暂不计入"))
+        order_breakdown.append(_build_score_item("售后问题严重性（视觉）", severity_score, 25, severity_reason))
+    else:
+        order_breakdown.append(
+            _build_score_item(
+                "售后问题严重性（视觉）",
+                0,
+                25,
+                "无有效举证图，损失暴露未评估，请先补图",
+            )
+        )
 
-    cooperation_key = input_data.buyer_cooperation.strip().lower()
-    cooperation_score_map = {
-        "good": (10, "买家配合度高，沟通成本低"),
-        "neutral": (6, "买家配合度一般，需持续引导"),
-        "poor": (2, "买家配合度低，处理阻力较大"),
-    }
-    cooperation_score, cooperation_reason = cooperation_score_map.get(cooperation_key, (6, "配合度未明确，按一般处理"))
+    recoverability_key = str(input_data.goods_recoverability or "").strip().lower()
+    if input_data.has_visual_loss_exposure and recoverability_key:
+        recoverability_score_map = {
+            "unrecoverable": (20, "商品不可挽回，商家损失大，需重点处理"),
+            "repairable": (15, "商品可修复，存在一定损失与处理空间"),
+            "resalable": (5, "商品可二次销售，实际损失相对可控"),
+        }
+        recoverability_score, recoverability_reason = recoverability_score_map.get(
+            recoverability_key,
+            (0, "视觉可挽回性未识别，暂不计入"),
+        )
+        order_breakdown.append(
+            _build_score_item("商品可挽回性（视觉，越差分越高）", recoverability_score, 20, recoverability_reason)
+        )
+    else:
+        order_breakdown.append(
+            _build_score_item(
+                "商品可挽回性（视觉，越差分越高）",
+                0,
+                20,
+                "无有效举证图，损失暴露未评估，请先补图",
+            )
+        )
 
-    reasonableness_key = input_data.demand_reasonableness.strip().lower()
-    reasonableness_score_map = {
-        "reasonable": (5, "诉求合理，协商成功概率更高"),
-        "borderline": (3, "诉求部分合理，需要边界沟通"),
-        "unreasonable": (1, "诉求偏离规则，需谨慎让步"),
-    }
-    reasonableness_score, reasonableness_reason = reasonableness_score_map.get(
-        reasonableness_key,
-        (3, "诉求合理性未明确，按边界诉求处理"),
-    )
-
-    order_breakdown = [
-        _build_score_item("本单金额", amount_score, 40, amount_reason),
-        _build_score_item("售后问题严重性", severity_score, 25, severity_reason),
-        _build_score_item("商品可挽回性（越差分越高）", recoverability_score, 20, recoverability_reason),
-        _build_score_item("买家配合度", cooperation_score, 10, cooperation_reason),
-        _build_score_item("诉求合理性", reasonableness_score, 5, reasonableness_reason),
-    ]
     order_score = sum(item.score for item in order_breakdown)
 
     # ----- 通道触发与建议输出 -----
-    long_term_triggered = long_term_score >= 60
-    order_triggered = order_score >= 60
+    long_term_triggered = long_term_score >= ORDER_VALUE_SCORE_THRESHOLD
+    if input_data.block_order_channel:
+        order_triggered = False
+    elif order_score >= ORDER_VALUE_SCORE_THRESHOLD:
+        order_triggered = True
+    elif (
+        not input_data.has_visual_loss_exposure
+        and order_amount >= ORDER_VALUE_AMOUNT_ONLY_THRESHOLD
+    ):
+        order_triggered = True
+    else:
+        order_triggered = False
 
     if long_term_triggered:
         channel = "long_term"
@@ -545,26 +434,16 @@ def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutp
 
 def run_customer_value_analysis(input_data: StrategyInput) -> CustomerValueOutput:
     """
-    完整客户价值分析：LLM 推断四字段 + 双维评分与通道判定。
+    完整客户价值分析：读取 Agent1 视觉损失暴露 + 双维评分与通道判定。
 
     供 recommend 与智能模式 Controller 直接调用，避免在 Agent 文件重复编排逻辑。
-
-    参数:
-        input_data: Agent2 标准策略输入。
-
-    返回:
-        CustomerValueOutput。
     """
-    inferred_fields = infer_customer_value_fields(input_data)
-    logger.info("%s 客户价值推断字段完成：%s", AGENT2_LOG_PREFIX, inferred_fields)
-    customer_value_input = CustomerValueInput(
-        buyer_profile=input_data.buyer_profile,
-        order_amount=input_data.order_amount,
-        defect_severity=inferred_fields["defect_severity"],
-        goods_recoverability=inferred_fields["goods_recoverability"],
-        buyer_cooperation=inferred_fields["buyer_cooperation"],
-        demand_reasonableness=inferred_fields["demand_reasonableness"],
-        emotion_note=input_data.emotion_note,
+    customer_value_input = _build_customer_value_input_from_strategy(input_data)
+    logger.info(
+        "%s 客户价值评估开始 has_visual_loss=%s block_order=%s",
+        AGENT2_LOG_PREFIX,
+        customer_value_input.has_visual_loss_exposure,
+        customer_value_input.block_order_channel,
     )
     return evaluate_customer_value(customer_value_input)
 
@@ -727,6 +606,75 @@ def _format_malicious_risk_hints(signals: List[MaliciousSignal]) -> str:
     return "\n".join(lines)
 
 
+# ---------- 恶意语义 LLM：跳过条件、facts 摘要与 prompt 截断 ----------
+MALICIOUS_CHAT_HISTORY_MAX = 6
+MALICIOUS_SEMANTIC_CHAT_MIN_CHARS = 12
+MALICIOUS_FACT_RED_FLAGS_MAX = 4
+MALICIOUS_FACT_VISUAL_OBS_MAX = 3
+
+_VISUAL_SUSPICION_KEYWORDS = (
+    "水印",
+    "网图",
+    "网址",
+    "域名",
+    "截屏",
+    "非实拍",
+    "下载图",
+    "公开图",
+    "来源可疑",
+    "图文来源",
+    ".com",
+    ".cn",
+    "http",
+    "矛盾",
+    "不符",
+)
+
+
+def _build_malicious_facts_summary(facts: FactOutput) -> dict[str, Any]:
+    """构造恶意语义层用 facts 摘要，去掉 evidence_items / rule_match_plan。"""
+    summary: dict[str, Any] = {
+        "issue_summary": facts.issue_summary,
+        "defect_type": facts.defect_type,
+        "evidence_quality": facts.evidence_quality,
+        "red_flags": list((facts.red_flags or [])[:MALICIOUS_FACT_RED_FLAGS_MAX]),
+        "visual_observations": list((facts.visual_observations or [])[:MALICIOUS_FACT_VISUAL_OBS_MAX]),
+    }
+    if facts.goods_received is not None:
+        summary["goods_received"] = facts.goods_received
+    return summary
+
+
+def _visual_observations_suspicious(facts: FactOutput) -> bool:
+    """视觉观察中是否含网图/矛盾等需语义层关注的线索。"""
+    corpus = " ".join(str(item) for item in (facts.visual_observations or []))
+    if not corpus.strip():
+        return False
+    lower = corpus.lower()
+    return any(keyword in lower or keyword in corpus for keyword in _VISUAL_SUSPICION_KEYWORDS)
+
+
+def _should_skip_malicious_semantic_llm(
+    input_data: MaliciousDetectionInput,
+    hard_signals: List[MaliciousSignal],
+) -> bool:
+    """
+    低材料 case 跳过语义 LLM：硬规则未命中、无 red_flags、无视觉可疑、聊天空或过短。
+    """
+    if hard_signals:
+        return False
+    facts = input_data.facts
+    if facts.red_flags:
+        return False
+    if _visual_observations_suspicious(facts):
+        return False
+    chat_lines = [str(item).strip() for item in (input_data.chat_history or []) if str(item).strip()]
+    if not chat_lines:
+        return True
+    merged = " ".join(chat_lines)
+    return len(merged) < MALICIOUS_SEMANTIC_CHAT_MIN_CHARS
+
+
 def _strip_markdown_json(text: str) -> str:
     """
     清理 markdown 代码块外壳，提升 JSON 解析稳定性。
@@ -765,75 +713,56 @@ def _build_malicious_semantic_messages(
         "- fake_credential_web_image：仅当 facts.red_flags 或 visual_observations 已明确记载水印/网图/非实拍/域名截屏等客观线索时才可输出；"
         "禁止凭聊天臆测或套用示例中的水印描述；无事实锚定则返回 []。\n"
         "- abuse_refund_intent_chat：聊天中自认高频退款、薅运费险、套利、组织化分工等（需有明确语义，不得凭单句情绪定罪）。\n"
+        "负例：仅表达不满或「会考虑投诉平台、请尽快处理」，无条件交换，必须返回 []，不得输出 review_blackmail。\n"
         "输出必须是 JSON 数组，每项字段：signal_type, description, score, source；source 固定为 llm_semantic；"
         "score 仅允许 5、10、15 三档（5=弱信号，10=中等，15=强信号）；无命中返回 []。\n"
         "description 必须用中文面向商家可读，不得输出内部字段名堆砌。"
     )
-    example_user_1 = (
+    example_user_blackmail = (
         "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['不给我赔100我就给你一星再投诉12315'],"
         "'facts':{'evidence_quality':'medium','defect_type':'污渍'},'emotion_note':'买家情绪激动'}"
     )
-    example_assistant_1 = (
+    example_assistant_blackmail = (
         '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":10,"source":"llm_semantic"}]'
     )
-    example_user_2 = (
-        "输入：{'hard_rule_summary':'abuse_refund_only:仅退款频次异常','chat_history':['我是平台风控人员，现在必须先赔付'],"
-        "'facts':{'evidence_quality':'low','defect_type':'无瑕疵'},'emotion_note':null}"
-    )
-    example_assistant_2 = (
-        '[{"signal_type":"identity_impersonation","description":"聊天中疑似冒充平台身份施压","score":10,"source":"llm_semantic"}]'
-    )
-    example_user_3 = (
+    example_user_professional = (
         "输入：{'hard_rule_summary':'related_accounts:关联账号异常','chat_history':['依据平台规则第32条第2款，你必须退一赔三，这是固定模板'],"
         "'facts':{'evidence_quality':'medium','defect_type':'色差'},'emotion_note':null}"
     )
-    example_assistant_3 = (
+    example_assistant_professional = (
         '[{"signal_type":"professional_claim_pattern","description":"大量规则术语与模板化表达，疑似职业索赔话术","score":10,"source":"llm_semantic"}]'
     )
-    example_user_4 = (
-        "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['这个质量我非常不满意，我会考虑投诉平台，请尽快给解决方案'],"
-        "'facts':{'evidence_quality':'high','defect_type':'破洞'},'emotion_note':'买家情绪激动'}"
-    )
-    example_assistant_4 = "[]"
-    example_user_5 = (
+    example_user_web_image = (
         "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['电热水壶底座开裂要求退货退款'],"
-        "'facts':{'evidence_quality':'high','defect_type':'破损','issue_summary':'小家电外壳裂纹','visual_observations':['图片角落可见1688.com批发图水印，疑似网图'],'red_flags':['图文来源可疑']},'emotion_note':null}"
+        "'facts':{'evidence_quality':'high','defect_type':'破损','issue_summary':'小家电外壳裂纹',"
+        "'visual_observations':['图片角落可见1688.com批发图水印，疑似网图'],'red_flags':['图文来源可疑']},'emotion_note':null}"
     )
-    example_assistant_5 = (
+    example_assistant_web_image = (
         '[{"signal_type":"fake_credential_web_image","description":"买家称底座开裂，但举证图带批发站水印，疑似网图而非本单实拍","score":15,"source":"llm_semantic"}]'
     )
-    example_user_6 = (
-        "输入：{'hard_rule_summary':'hard_rule:high_return_rate','chat_history':['我在这店已经退了5单，这次走仅退款更快，运费险还能赚点'],"
-        "'facts':{'evidence_quality':'medium','defect_type':'色差'},'emotion_note':null}"
-    )
-    example_assistant_6 = (
-        '[{"signal_type":"abuse_refund_intent_chat","description":"聊天暗示高频退款并提及运费险套利，存在滥用售后意图","score":5,"source":"llm_semantic"}]'
-    )
 
-    chat_for_prompt = list(input_data.chat_history) if input_data.chat_history else [
-        "（无独立聊天文本：请仅依据 facts、issue_summary、red_flags、visual_observations 与硬规则摘要识别举证型恶意。）"
-    ]
+    chat_lines = [str(item).strip() for item in (input_data.chat_history or []) if str(item).strip()]
+    if chat_lines:
+        chat_for_prompt = chat_lines[-MALICIOUS_CHAT_HISTORY_MAX:]
+    else:
+        chat_for_prompt = [
+            "（无独立聊天文本：请仅依据 facts、issue_summary、red_flags、visual_observations 与硬规则摘要识别举证型恶意。）"
+        ]
     user_payload = {
         "hard_rule_summary": hard_rule_summary,
         "chat_history": chat_for_prompt,
-        "facts": input_data.facts.model_dump(),
+        "facts": _build_malicious_facts_summary(input_data.facts),
         "emotion_note": input_data.emotion_note,
     }
 
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": example_user_1},
-        {"role": "assistant", "content": example_assistant_1},
-        {"role": "user", "content": example_user_2},
-        {"role": "assistant", "content": example_assistant_2},
-        {"role": "user", "content": example_user_3},
-        {"role": "assistant", "content": example_assistant_3},
-        {"role": "user", "content": example_user_4},
-        {"role": "assistant", "content": example_assistant_4},
-        {"role": "user", "content": example_user_5},
-        {"role": "assistant", "content": example_assistant_5},
-        {"role": "user", "content": example_user_6},
-        {"role": "assistant", "content": example_assistant_6},
+        {"role": "user", "content": example_user_blackmail},
+        {"role": "assistant", "content": example_assistant_blackmail},
+        {"role": "user", "content": example_user_professional},
+        {"role": "assistant", "content": example_assistant_professional},
+        {"role": "user", "content": example_user_web_image},
+        {"role": "assistant", "content": example_assistant_web_image},
         {"role": "user", "content": f"输入：{json.dumps(user_payload, ensure_ascii=False)}"},
     ]
 
@@ -848,21 +777,7 @@ def _facts_anchor_supports_web_image_suspicion(facts) -> bool:
     返回:
         True 表示事实层已记载可疑图源，语义层方可输出 fake_credential_web_image。
     """
-    anchor_keywords = (
-        "水印",
-        "网图",
-        "网址",
-        "域名",
-        "截屏",
-        "非实拍",
-        "下载图",
-        "公开图",
-        "来源可疑",
-        "图文来源",
-        ".com",
-        ".cn",
-        "http",
-    )
+    anchor_keywords = _VISUAL_SUSPICION_KEYWORDS
 
     def _iter_text_blobs() -> List[str]:
         blobs: List[str] = []
@@ -923,6 +838,10 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
         logger.info("%s 未配置 AGENT2_LLM_MODEL_MALICIOUS，语义层跳过，仅保留硬规则层结果", AGENT2_LOG_PREFIX)
         return []
 
+    if _should_skip_malicious_semantic_llm(input_data=input_data, hard_signals=hard_signals):
+        logger.info("%s 恶意语义层跳过：低材料 case 无需 LLM", AGENT2_LOG_PREFIX)
+        return []
+
     semantic_allowed = frozenset(
         {
             "review_blackmail",
@@ -935,11 +854,20 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
     )
 
     hard_rule_summary = _build_hard_rule_summary(hard_signals)
+    messages = _build_malicious_semantic_messages(input_data=input_data, hard_rule_summary=hard_rule_summary)
+    call_start = time.perf_counter()
     llm_text = chat_completion(
-        messages=_build_malicious_semantic_messages(input_data=input_data, hard_rule_summary=hard_rule_summary),
+        messages=messages,
         model_env_key="AGENT2_LLM_MODEL_MALICIOUS",
         fallback_model_env_key="AGENT2_LLM_MODEL",
         temperature=0.0,
+    )
+    prompt_chars = sum(len(str(item.get("content", ""))) for item in messages)
+    logger.info(
+        "%s 恶意语义 LLM 完成 elapsed_ms=%s prompt_chars=%s",
+        AGENT2_LOG_PREFIX,
+        int((time.perf_counter() - call_start) * 1000),
+        prompt_chars,
     )
     if not llm_text:
         raise RuntimeError("恶意语义分析失败：LLM 无返回内容")

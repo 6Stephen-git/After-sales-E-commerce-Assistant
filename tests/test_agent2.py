@@ -46,28 +46,19 @@ from schemas import (
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
+    RULE_RELEVANCE_MUST,
 )
 
 
 # ---------- recommend：单链路处置方向 + 胜率/置信度 ----------
 class TestAgent2Recommend:
-    def _mock_customer_value_fields(self, monkeypatch):
-        """屏蔽客户价值字段推断的外部依赖，保证单测稳定。"""
-        monkeypatch.setattr(
-            agent2_tools_module,
-            "infer_customer_value_fields",
-            lambda _input: {
-                "defect_severity": "moderate",
-                "goods_recoverability": "repairable",
-                "buyer_cooperation": "neutral",
-                "demand_reasonableness": "borderline",
-            },
-        )
+    def _mock_strategy_llm(self, monkeypatch):
+        """屏蔽策略 LLM 外部依赖，保证单测稳定。"""
         monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **kwargs: None)
 
     def test_recommend_compensate_when_high_quality_defect(self, monkeypatch):
         """高质量瑕疵证据，倾向善后策略。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="破洞",
@@ -100,7 +91,7 @@ class TestAgent2Recommend:
 
     def test_recommend_defend_when_low_evidence_and_high_risk_buyer(self, monkeypatch):
         """证据不足且买家风险高，倾向抗辩。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="无瑕疵",
@@ -138,7 +129,7 @@ class TestAgent2Recommend:
 
     def test_recommend_negotiate_when_medium_evidence_but_missing_key_proof(self, monkeypatch):
         """有图有文但关键举证未齐（如划痕缺开箱视频）：处置仍为协商，当下动作由补证阶段约束。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="划痕",
@@ -164,7 +155,7 @@ class TestAgent2Recommend:
 
     def test_recommend_negotiate_for_medium_evidence_color_diff(self, monkeypatch):
         """色差且证据中等，倾向协商。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
             defect_type="色差",
@@ -199,7 +190,7 @@ class TestAgent2Recommend:
 
     def test_recommend_negotiate_when_medium_risk_conflicts_with_merchant_fault(self, monkeypatch):
         """中风险恶意与商责明确信号冲突时，应协商且降低置信度。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         monkeypatch.setattr(
             strategist_module,
             "detect_malicious_behavior",
@@ -236,7 +227,7 @@ class TestAgent2Recommend:
 
     def test_recommend_boundary_with_empty_rules_and_cases(self, monkeypatch):
         """边界场景：无规则无判例时仍应输出合法策略。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(evidence_quality="medium")
         profile = BuyerProfile(buyer_id="buyer_unknown")
         input_data = StrategyInput(
@@ -252,9 +243,27 @@ class TestAgent2Recommend:
         assert 0.0 <= output.confidence <= 1.0
         assert output.customer_value is not None
 
+    def test_confidence_rule_dim_should_be_higher_when_rule_match_skipped(self):
+        """简单案跳过条文匹配时，无命中规则维应按 0.30 计而非 0.08。"""
+        from backend.agents.agent2.strategist import _estimate_confidence
+
+        facts = FactOutput(evidence_quality="high")
+        malicious = MaliciousDetectionOutput(risk_level="low")
+        base = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="b1"),
+            matched_rules=[],
+            rule_briefs=[],
+            order_amount=50.0,
+        )
+        skipped = base.model_copy(update={"rule_match_skipped": True})
+        conf_default = _estimate_confidence(base, malicious_result=malicious, rule_stance="neutral", rule_count=0)
+        conf_skipped = _estimate_confidence(skipped, malicious_result=malicious, rule_stance="neutral", rule_count=0)
+        assert conf_skipped == conf_default + 0.22
+
     def test_recommend_should_use_fallback_reasoning_when_llm_unavailable(self, monkeypatch):
         """LLM不可用时，reasoning 仍应保持三段结构。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **kwargs: None)
         facts = FactOutput(evidence_quality="medium", missing_evidence=["缺少清晰图片"])
         profile = BuyerProfile(buyer_id="buyer_fallback")
@@ -276,7 +285,7 @@ class TestAgent2Recommend:
 
     def test_recommend_should_accept_llm_reasoning_when_format_valid(self, monkeypatch):
         """LLM输出三段结构时应直接采用。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         monkeypatch.setattr(
             strategist_module,
             "_llm_generate_strategy",
@@ -310,9 +319,44 @@ class TestAgent2Recommend:
         assert output.dialogue_context is not None
         assert "开箱视频" in output.dialogue_context.actionable_evidence_requests
 
-    def test_recommend_should_expose_malicious_layer_result(self, monkeypatch):
+    def test_platform_rule_basis_should_come_from_matched_rules_not_llm(self, monkeypatch):
+        """平台规则依据固定来自条文匹配，忽略策略 LLM 自造要点。"""
+        self._mock_strategy_llm(monkeypatch)
+        monkeypatch.setattr(
+            strategist_module,
+            "_llm_generate_strategy",
+            lambda **kwargs: {
+                "customer_intent_analysis": "屏幕划痕维权。",
+                "strategy_direction_summary": "先核对举证再协商。",
+                "strategy_direction_rationale": "需结合专项规范处理。",
+                "platform_rule_basis": ["平台可能基于综合信息如大数据判断支持退货退款"],
+                "risk_factors": [],
+                "dialogue_context": {
+                    "dialogue_mode": "continue",
+                    "blocked_evidence_requests": [],
+                    "actionable_evidence_requests": [],
+                    "fallback_script": "我这边还在核对。",
+                },
+            },
+        )
+        phone_rule = MatchedRule(
+            rule_id="phone::quality",
+            rule_summary="手机存在质量问题且买家举证有效时，卖家不得以划痕为由拒绝退货退款",
+            condition_result="LLM判定",
+            relevance=RULE_RELEVANCE_MUST,
+            doc_id="phone",
+        )
+        input_data = StrategyInput(
+            facts=FactOutput(issue_summary="屏幕划痕", evidence_quality="high"),
+            buyer_profile=BuyerProfile(buyer_id="buyer_phone"),
+            matched_rules=[phone_rule],
+            order_amount=399.0,
+        )
+        output = recommend(input_data)
+        assert "大数据" not in " ".join(output.platform_rule_basis)
+        assert any("划痕" in line for line in output.platform_rule_basis)
         """A2-4 分层编排后，应透传恶意检测层输出并写入风险提示。"""
-        self._mock_customer_value_fields(monkeypatch)
+        self._mock_strategy_llm(monkeypatch)
         monkeypatch.setattr(
             strategist_module,
             "detect_malicious_behavior",
@@ -380,16 +424,16 @@ class TestAgent2Tools:
             lambda doc_ids: {k: v for k, v in mock_docs.items() if k in doc_ids},
         )
 
-        def _fake_llm_match(facts, documents, section_map):
-            from backend.tools.rule_matcher import _filter_articles_by_sections, _score_article
+        def _fake_llm_match(facts, candidates):
+            from backend.tools.rule_matcher import _score_article
             from backend.tools.rule_matcher_llm import RuleMatchLLMResult
 
             scored = []
-            for doc_id, doc in documents.items():
-                for article in _filter_articles_by_sections(doc, section_map.get(doc_id)):
-                    rule = _score_article(doc_id, doc, article, facts.rule_match_plan.search_terms)
-                    if rule is not None:
-                        scored.append(rule)
+            for item in candidates:
+                doc_id = item["doc_id"]
+                rule = _score_article(doc_id, {"doc_id": doc_id}, item, facts.rule_match_plan.search_terms)
+                if rule is not None:
+                    scored.append(rule)
             return RuleMatchLLMResult(matched_rules=scored, display_rule_ids=None)
 
         monkeypatch.setattr("backend.tools.rule_matcher_llm.llm_match_articles", _fake_llm_match)
@@ -524,10 +568,10 @@ class TestAgent2Tools:
         )
         assert relevance == RULE_RELEVANCE_WEAK
 
-    def test_resolve_display_should_use_llm_display_ids_without_second_call(self, monkeypatch):
-        """条文匹配同批返回 display_rule_ids 时，不再调用展示筛选 LLM。"""
+    def test_resolve_display_should_use_llm_display_ids(self):
+        """条文匹配同批返回 display_rule_ids 时直接用于展示。"""
         from backend.tools.rule_matcher import _resolve_display_rules
-        from schemas import MatchedRule, RULE_RELEVANCE_MUST
+        from schemas import MatchedRule, RULE_RELEVANCE_MUST, FactOutput
 
         pool = [
             MatchedRule(
@@ -545,23 +589,32 @@ class TestAgent2Tools:
                 doc_id="fresh",
             ),
         ]
-
-        def _should_not_call(*_args, **_kwargs):
-            raise AssertionError("不应再调用展示筛选 LLM")
-
-        monkeypatch.setattr(
-            "backend.tools.rule_matcher_llm.llm_filter_event_display_rules",
-            _should_not_call,
-        )
         facts = FactOutput(issue_summary="香蕉腐烂")
         display = _resolve_display_rules(
             pool,
             facts=facts,
             llm_display_ids=["fresh::第七条"],
-            max_count=3,
         )
         assert len(display) == 1
         assert display[0].rule_id == "fresh::第七条"
+
+    def test_resolve_display_should_return_empty_when_llm_says_none(self):
+        """LLM 显式返回空 display_rule_ids 时不应启发式凑条。"""
+        from backend.tools.rule_matcher import _resolve_display_rules
+        from schemas import MatchedRule, RULE_RELEVANCE_MUST, FactOutput
+
+        pool = [
+            MatchedRule(
+                rule_id="phone::quality",
+                rule_summary="手机质量问题",
+                condition_result="",
+                relevance=RULE_RELEVANCE_MUST,
+                doc_id="phone",
+            ),
+        ]
+        facts = FactOutput(issue_summary="无关诉求")
+        display = _resolve_display_rules(pool, facts=facts, llm_display_ids=[])
+        assert display == []
 
     def test_query_buyer_profile_should_return_default_when_unknown(self):
         """未知买家 ID 返回默认画像。"""
@@ -589,8 +642,7 @@ class TestAgent2Tools:
             order_amount=120.0,
             defect_severity="minor",
             goods_recoverability="resalable",
-            buyer_cooperation="good",
-            demand_reasonableness="reasonable",
+            has_visual_loss_exposure=True,
         )
         result = evaluate_customer_value(input_data)
         assert result.long_term_triggered is True
@@ -606,8 +658,7 @@ class TestAgent2Tools:
                 order_amount=260.0,
                 defect_severity="moderate",
                 goods_recoverability="resalable",
-                buyer_cooperation="neutral",
-                demand_reasonableness="borderline",
+                has_visual_loss_exposure=True,
             )
         )
         high_loss = evaluate_customer_value(
@@ -616,13 +667,71 @@ class TestAgent2Tools:
                 order_amount=260.0,
                 defect_severity="moderate",
                 goods_recoverability="unrecoverable",
-                buyer_cooperation="neutral",
-                demand_reasonableness="borderline",
+                has_visual_loss_exposure=True,
             )
         )
         assert high_loss.order_score > low_loss.order_score
 
-    def test_detect_malicious_behavior_should_trigger_hard_rules(self):
+    def test_evaluate_customer_value_should_not_trigger_order_without_visual_loss(self):
+        """无视觉损失暴露且金额一般时不触发本单通道。"""
+        result = evaluate_customer_value(
+            CustomerValueInput(
+                buyer_profile=BuyerProfile(buyer_id="b1"),
+                order_amount=260.0,
+                has_visual_loss_exposure=False,
+            )
+        )
+        assert result.order_triggered is False
+        assert result.channel == "none"
+
+    def test_evaluate_customer_value_should_trigger_order_on_high_amount_without_visual(self):
+        """无图但本单金额够高仍可触发本单通道。"""
+        result = evaluate_customer_value(
+            CustomerValueInput(
+                buyer_profile=BuyerProfile(buyer_id="b2"),
+                order_amount=520.0,
+                has_visual_loss_exposure=False,
+            )
+        )
+        assert result.order_triggered is True
+        assert result.channel == "order"
+
+    def test_run_customer_value_should_read_visual_fields_from_facts(self):
+        """客户价值应从 FactOutput 视觉枚举读取损失暴露。"""
+        from backend.tools.agent2_tools import run_customer_value_analysis
+
+        output = run_customer_value_analysis(
+            StrategyInput(
+                facts=FactOutput(
+                    visual_defect_severity="severe",
+                    visual_goods_recoverability="unrecoverable",
+                    evidence_quality="high",
+                ),
+                buyer_profile=BuyerProfile(buyer_id="b3"),
+                order_amount=280.0,
+            )
+        )
+        assert output.order_score >= 60
+        assert output.channel == "order"
+
+    def test_run_customer_value_should_block_order_channel_on_red_flags(self):
+        """有 red_flags 时不触发本单优待通道。"""
+        from backend.tools.agent2_tools import run_customer_value_analysis
+
+        output = run_customer_value_analysis(
+            StrategyInput(
+                facts=FactOutput(
+                    visual_defect_severity="severe",
+                    visual_goods_recoverability="unrecoverable",
+                    red_flags=["图文来源可疑"],
+                    evidence_quality="high",
+                ),
+                buyer_profile=BuyerProfile(buyer_id="b4"),
+                order_amount=600.0,
+            )
+        )
+        assert output.order_triggered is False
+        assert output.channel == "none"
         """硬规则命中时应输出风险分与等级。"""
         profile = BuyerProfile(
             buyer_id="buyer_risk",
@@ -734,3 +843,278 @@ class TestAgent2Tools:
         result = detect_malicious_behavior(input_data)
         assert result.risk_score == 0
         assert not any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
+
+
+class TestMaliciousSemanticOptimization:
+    def test_should_skip_semantic_llm_on_low_material_case(self, monkeypatch):
+        """无硬规则、无疑点、无聊天时不调语义 LLM。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
+        called = {"count": 0}
+
+        def _should_not_call(**_kwargs):
+            called["count"] += 1
+            return "[]"
+
+        monkeypatch.setattr(agent2_tools_module, "chat_completion", _should_not_call)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_plain", return_rate=0.05),
+            facts=FactOutput(evidence_quality="high", issue_summary="香蕉褐变", defect_type="变质"),
+            order_amount=29.9,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert called["count"] == 0
+        assert result.risk_score == 0
+
+    def test_should_call_semantic_llm_when_red_flags_present(self, monkeypatch):
+        """有 red_flags 时仍调语义 LLM。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
+        called = {"count": 0}
+
+        def _mock_call(**_kwargs):
+            called["count"] += 1
+            return "[]"
+
+        monkeypatch.setattr(agent2_tools_module, "chat_completion", _mock_call)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_flag", return_rate=0.05),
+            facts=FactOutput(evidence_quality="high", red_flags=["图片带 sohu 水印"]),
+            order_amount=29.9,
+            chat_history=[],
+        )
+        detect_malicious_behavior(input_data)
+        assert called["count"] == 1
+
+    def test_malicious_facts_summary_omits_heavy_fields(self):
+        from backend.tools.agent2_tools import _build_malicious_facts_summary, _build_malicious_semantic_messages
+
+        facts = FactOutput(
+            issue_summary="屏幕划痕",
+            red_flags=["疑点"],
+            evidence_items=[{"type": "text", "content": "x" * 200}],
+        )
+        summary = _build_malicious_facts_summary(facts)
+        assert "evidence_items" not in summary
+        assert summary["issue_summary"] == "屏幕划痕"
+        messages = _build_malicious_semantic_messages(
+            input_data=MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="b", return_rate=0.1),
+                facts=facts,
+                chat_history=["a"] * 10,
+            ),
+            hard_rule_summary="硬规则层未命中异常项。",
+        )
+        user_msg = messages[-1]["content"]
+        assert "evidence_items" not in user_msg
+        assert messages.count({"role": "user", "content": messages[1]["content"]}) == 1
+        assert len([m for m in messages if m["role"] == "assistant"]) == 3
+
+
+class TestStrategyPromptPayload:
+    def test_build_strategy_prompt_payload_should_omit_heavy_fields(self):
+        from backend.agents.agent2.strategist import _build_strategy_prompt_payload
+        from schemas import ChatTurn, CustomerValueOutput, RuleBrief, RuleMatchPlan, RuleSearchTerms
+
+        long_chat = "x" * 500
+        input_data = StrategyInput(
+            facts=FactOutput(
+                issue_summary="香蕉褐变",
+                intent_tags=["质量问题"],
+                visual_observations=["表皮黑斑"],
+                evidence_items=[{"type": "text", "content": long_chat}],
+                red_flags=["水印"],
+                rule_match_plan=RuleMatchPlan(
+                    target_doc_ids=["doc_a"],
+                    search_terms=RuleSearchTerms(must_terms=["举证"]),
+                ),
+            ),
+            buyer_profile=BuyerProfile(buyer_id="hash_id", purchase_count=3),
+            matched_rules=[
+                MatchedRule(
+                    rule_id="doc::1",
+                    rule_summary="规则摘要",
+                    condition_result="条件",
+                )
+            ],
+            rule_briefs=[RuleBrief(article_ref="第七条", brief="食品质量要点", relevance="must")],
+            similar_cases=[],
+            chat_turns=[ChatTurn(role="buyer", content=f"turn{i}") for i in range(12)],
+        )
+        payload = _build_strategy_prompt_payload(
+            disposition=DISPOSITION_NEGOTIATE,
+            strategy_stage="negotiate_settle",
+            compensation_policy="negotiate_soft",
+            evidence_incomplete=False,
+            merchant_fault_signal=False,
+            input_data=input_data,
+            risk_factors=[],
+            estimated_win_rate=0.6,
+        )
+        facts = payload["facts"]
+        assert "evidence_items" not in facts
+        assert "rule_match_plan" not in facts
+        assert "matched_rules" not in payload
+        assert "similar_cases" not in payload
+        assert len(payload["recent_turns"]) == 8
+        assert payload["buyer_profile"].get("buyer_id") is None
+        assert payload["rule_briefs"][0]["brief"] == "食品质量要点"
+        assert "article_ref" not in payload["rule_briefs"][0]
+
+    def test_needs_strategy_pro_model_triggers(self):
+        from backend.agents.agent2.strategist import _needs_strategy_pro_model
+        from schemas import CustomerValueOutput, STRATEGY_STAGE_EVIDENCE_FIRST
+
+        base_malicious = MaliciousDetectionOutput(risk_level="low")
+        base_value = CustomerValueOutput(channel="none")
+        assert not _needs_strategy_pro_model(
+            malicious_result=base_malicious,
+            customer_value=base_value,
+            strategy_stage="negotiate_settle",
+            merchant_fault_signal=False,
+            disposition=DISPOSITION_NEGOTIATE,
+            has_signal_conflict=False,
+        )
+        assert _needs_strategy_pro_model(
+            malicious_result=MaliciousDetectionOutput(risk_level="medium"),
+            customer_value=base_value,
+            strategy_stage="negotiate_settle",
+            merchant_fault_signal=False,
+            disposition=DISPOSITION_DEFEND,
+            has_signal_conflict=False,
+        )
+        assert _needs_strategy_pro_model(
+            malicious_result=base_malicious,
+            customer_value=CustomerValueOutput(channel="long_term"),
+            strategy_stage="negotiate_settle",
+            merchant_fault_signal=False,
+            disposition=DISPOSITION_NEGOTIATE,
+            has_signal_conflict=False,
+        )
+        assert not _needs_strategy_pro_model(
+            malicious_result=base_malicious,
+            customer_value=base_value,
+            strategy_stage=STRATEGY_STAGE_EVIDENCE_FIRST,
+            merchant_fault_signal=False,
+            disposition=DISPOSITION_NEGOTIATE,
+            has_signal_conflict=False,
+        )
+
+    def test_needs_rule_match_gate(self):
+        """简单案跳过条文匹配；恶意/价值/多诉求标签触发。"""
+        from backend.tools.agent2_tools import needs_rule_match
+        from schemas import CustomerValueOutput, FactOutput, MaliciousDetectionOutput
+
+        base_facts = FactOutput(issue_summary="屏幕划痕", intent_tags=["质量问题"], evidence_quality="high")
+        base_malicious = MaliciousDetectionOutput(risk_level="low")
+        base_value = CustomerValueOutput(channel="none")
+        assert not needs_rule_match(base_facts, base_malicious, base_value)
+
+        assert needs_rule_match(
+            base_facts,
+            MaliciousDetectionOutput(risk_level="medium"),
+            base_value,
+        )
+        assert needs_rule_match(
+            base_facts,
+            base_malicious,
+            CustomerValueOutput(channel="order"),
+        )
+        multi_intent = FactOutput(issue_summary="既要退款又投诉物流", intent_tags=["质量问题", "物流异常"])
+        assert needs_rule_match(multi_intent, base_malicious, base_value)
+
+        missing_evidence = FactOutput(
+            issue_summary="要求退款",
+            intent_tags=["质量问题"],
+            missing_evidence=["开箱视频"],
+            evidence_quality="low",
+        )
+        assert not needs_rule_match(missing_evidence, base_malicious, base_value)
+
+
+class TestRuleMatcherInfra:
+    def test_load_documents_should_batch_fetch_uncached_doc_ids(self, monkeypatch):
+        """未命中缓存的 doc 应一次批量查询 MySQL。"""
+        from backend.tools import rule_matcher as rule_matcher_module
+
+        rule_matcher_module.clear_rule_document_cache()
+        batch_calls: list[list[str]] = []
+
+        def _fake_batch_fetch(doc_ids: list[str]) -> dict[str, dict | None]:
+            batch_calls.append(list(doc_ids))
+            return {doc_id: {"doc_id": doc_id, "articles": []} for doc_id in doc_ids}
+
+        monkeypatch.setattr(rule_matcher_module, "_fetch_rule_documents_from_db", _fake_batch_fetch)
+        loaded = rule_matcher_module._load_documents(["doc_a", "doc_b"])
+        assert len(batch_calls) == 1
+        assert set(batch_calls[0]) == {"doc_a", "doc_b"}
+        assert set(loaded.keys()) == {"doc_a", "doc_b"}
+
+        rule_matcher_module._load_documents(["doc_a"])
+        assert len(batch_calls) == 1
+
+    def test_llm_match_articles_should_use_rule_model_env(self, monkeypatch):
+        """条文匹配 LLM 应优先读取 AGENT2_LLM_MODEL_RULE。"""
+        from backend.tools.rule_matcher_llm import llm_match_articles
+
+        monkeypatch.setenv("AGENT2_LLM_MODEL_RULE", "rule-fast-model")
+        captured: dict[str, str] = {}
+
+        def _fake_chat(**kwargs):
+            captured["model_env_key"] = kwargs.get("model_env_key", "")
+            captured["fallback_model_env_key"] = kwargs.get("fallback_model_env_key", "")
+            return '{"matched_articles":[],"display_rule_ids":[]}'
+
+        monkeypatch.setattr("backend.tools.rule_matcher_llm.chat_completion", _fake_chat)
+        llm_match_articles(
+            facts=FactOutput(issue_summary="屏幕划痕"),
+            candidates=[{"doc_id": "phone", "article_no": "第四条", "content": "质量问题", "article_title": "质量"}],
+        )
+        assert captured["model_env_key"] == "AGENT2_LLM_MODEL_RULE"
+        assert captured["fallback_model_env_key"] == "AGENT2_LLM_MODEL"
+
+    def test_match_rules_should_skip_llm_when_candidates_at_most_five(self, monkeypatch):
+        """候选≤5 时不调条文 LLM，走字面降级。"""
+        from backend.tools.rule_matcher import match_rules_from_facts
+
+        called = {"count": 0}
+
+        def _should_not_call(*_args, **_kwargs):
+            called["count"] += 1
+            return None
+
+        monkeypatch.setattr("backend.tools.rule_matcher_llm.llm_match_articles", _should_not_call)
+        mock_doc = {
+            "doc_id": "fresh",
+            "articles": [
+                {
+                    "article_no": "第七条",
+                    "article_title": "商品质量问题",
+                    "content": "买家主张商品质量问题应提供初步凭证。",
+                    "chapter": "",
+                }
+            ],
+        }
+        monkeypatch.setattr(
+            "backend.tools.rule_matcher._load_documents",
+            lambda _doc_ids: {"fresh": mock_doc},
+        )
+        from schemas import RuleMatchPlan, RuleSearchTerms, SectionSelection
+
+        facts = FactOutput(
+            issue_summary="香蕉腐烂",
+            intent_tags=["质量问题"],
+            rule_match_plan=RuleMatchPlan(
+                target_doc_ids=["fresh"],
+                section_selections=[
+                    SectionSelection(doc_id="fresh", section_keys=[], confidence=0.9, reason=""),
+                ],
+                search_terms=RuleSearchTerms(
+                    must_terms=["商品质量问题", "初步凭证"],
+                    should_terms=[],
+                    case_terms=["腐烂"],
+                ),
+            ),
+        )
+        result = match_rules_from_facts(facts)
+        assert called["count"] == 0
+        assert len(result.matched_rules) >= 1

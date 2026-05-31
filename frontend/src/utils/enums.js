@@ -23,6 +23,12 @@ const RESPONSE_MODE_LABEL_MAP = {
   neutral_negotiate: '协商沟通'
 }
 
+const RISK_LEVEL_LABEL_MAP = {
+  low: '低',
+  medium: '中',
+  high: '高'
+}
+
 // ---------- 映射函数：处置方向 ----------
 export function getDispositionLabel(value) {
   return DISPOSITION_LABEL_MAP[value] || '未知处置方向'
@@ -41,4 +47,9 @@ export function getSentimentLabel(value) {
 // ---------- 映射函数：话术应对思想 ----------
 export function getResponseModeLabel(value) {
   return RESPONSE_MODE_LABEL_MAP[value] || '未知应对模式'
+}
+
+// ---------- 映射函数：恶意风险等级 ----------
+export function getRiskLevelLabel(value) {
+  return RISK_LEVEL_LABEL_MAP[value] || '未知等级'
 }

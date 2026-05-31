@@ -25,6 +25,7 @@ from backend.cache import (
 from backend.tools.agent2_tools import (
     detect_malicious_behavior,
     match_rules_full,
+    needs_rule_match,
     query_buyer_profile,
     run_customer_value_analysis,
     search_similar_cases,
@@ -35,6 +36,7 @@ from schemas import (
     MaliciousDetectionInput,
     MatchedRule,
     RuleBrief,
+    RuleMatchResult,
     ScriptInput,
     StrategyInput,
 )
@@ -353,7 +355,7 @@ def run_with_events(
         )
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
-    # 3) Batch1：规则匹配 + 客户价值 + 恶意检测并行，再策略 LLM
+    # 3) Batch1：恶意 + 价值并行 → 门控决定是否条文匹配 → 策略 LLM
     _emit_event(
         emit_event,
         "stage_start",
@@ -380,13 +382,23 @@ def run_with_events(
             emotion_note=emotion_note,
         )
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            future_rules = executor.submit(match_rules_full, facts=facts)
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_value = executor.submit(run_customer_value_analysis, partial_strategy_input)
             future_malicious = executor.submit(detect_malicious_behavior, malicious_input)
-            rule_result = future_rules.result()
             customer_value = future_value.result()
             malicious_detection = future_malicious.result()
+
+        if needs_rule_match(facts, malicious_detection, customer_value):
+            rule_result = match_rules_full(facts=facts)
+            rule_match_skipped = False
+        else:
+            logger.info(
+                "%s 简单案跳过规则匹配 dispute_id=%s",
+                ASSISTED_LOG_PREFIX,
+                normalized_dispute_id,
+            )
+            rule_result = RuleMatchResult()
+            rule_match_skipped = True
 
         matched_rules = rule_result.display_rules
         rule_briefs = rule_result.rule_briefs
@@ -399,6 +411,7 @@ def run_with_events(
                 "elapsed_ms": tools_elapsed,
                 "dispute_id": normalized_dispute_id,
                 "parallel": True,
+                "rule_match_skipped": rule_match_skipped,
                 "partial_report": {
                     "matched_rules": [item.model_dump() for item in matched_rules],
                 },
@@ -429,6 +442,7 @@ def run_with_events(
             emotion_note=emotion_note,
             precomputed_customer_value=customer_value,
             precomputed_malicious_detection=malicious_detection,
+            rule_match_skipped=rule_match_skipped,
         )
 
         def emit_reasoning_delta(delta_text: str) -> None:

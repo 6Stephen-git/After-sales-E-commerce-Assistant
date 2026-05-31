@@ -8,20 +8,58 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput, RuleMatchPlan
 
-from backend.agents.agent1.rule_plan import build_rule_navigation_prompt_block, merge_llm_rule_plan
+from backend.agents.agent1.rule_plan import merge_llm_rule_plan
 
-from backend.tools.agent1_tools import analyze_image
+from backend.tools.agent1_tools import (
+    VISUAL_DEFECT_SEVERITY_VALUES,
+    VISUAL_GOODS_RECOVERABILITY_VALUES,
+    analyze_image,
+)
 from backend.tools.llm_client import chat_completion
 from backend.tools.platform_api import query_logistics
-from backend.tools.rule_lexicon import validate_category_slug
+from backend.tools.rule_lexicon import format_category_slug_compact, validate_category_slug
 
 LOG_PREFIX = "[Agent1]"
 logger = logging.getLogger(__name__)
+
+_VISUAL_SEVERITY_RANK = {"minor": 1, "moderate": 2, "severe": 3}
+_VISUAL_RECOVERABILITY_LOSS_RANK = {"resalable": 1, "repairable": 2, "unrecoverable": 3}
+
+
+def _merge_visual_defect_severity(current: str | None, new: str | None) -> str | None:
+    """多图合并严重度：取更高等级。"""
+    if not new:
+        return current
+    if not current:
+        return new
+    if _VISUAL_SEVERITY_RANK[new] > _VISUAL_SEVERITY_RANK[current]:
+        return new
+    return current
+
+
+def _merge_visual_goods_recoverability(current: str | None, new: str | None) -> str | None:
+    """多图合并可挽回性：取损失更大（越不可挽回）的一侧。"""
+    if not new:
+        return current
+    if not current:
+        return new
+    if _VISUAL_RECOVERABILITY_LOSS_RANK[new] > _VISUAL_RECOVERABILITY_LOSS_RANK[current]:
+        return new
+    return current
+
+
+def _coerce_visual_field(value: Any, valid_values: frozenset[str]) -> str | None:
+    """规范视觉枚举字段。"""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in valid_values else None
 
 
 # ---------- 纠纷材料解析：图片 URL 与可检索文本上下文 ----------
@@ -170,15 +208,19 @@ def _llm_extract_issue(
     materials: dict[str, Any],
 ) -> dict[str, Any] | None:
     """
-    调用 LLM 提取核心诉求、标签、收货判断、补证建议与 rule_match_plan。
+    调用 LLM 提取核心诉求与事实字段；规则导航由 merge_llm_rule_plan 确定性生成。
     """
     if not text_context:
         return None
-    nav_block = build_rule_navigation_prompt_block(
-        materials=materials,
-        intent_tags=[],
-        text_context=text_context,
-    )
+    api_slug = str(materials.get("product_category_slug", "") or "").strip()
+    slug_line = ""
+    if not api_slug:
+        compact_slugs = format_category_slug_compact()
+        if compact_slugs:
+            slug_line = (
+                f"- category_slug: 字符串或 null，可选枚举 [{compact_slugs}]；无法判断填 null\n"
+            )
+
     system_prompt = (
         "你是售后事实提取助手。只抽取客观事实，不做责任归因；疑点仅描述「观察到的矛盾或待核实点」，不对买家做道德定性。"
         "请输出 JSON。"
@@ -199,17 +241,11 @@ def _llm_extract_issue(
         "  · 物流、签收、商品状态等与其他字段或常识存在矛盾\n"
         "  · 诉求与已提供证据能支撑的结论相比过度或不清\n"
         "  无则填 []；禁止把整段聊天粘进单条 red_flags；禁止单一条目硬编码某一品类示例句。\n"
-        "- rule_match_plan: 对象，含 activated_lanes、target_doc_ids、section_selections、search_terms、"
-        "category_confidence、service_confidence（规则导航，见下方候选表）\n"
-        "- category_slug: 字符串或 null，从候选 slug 枚举选择最匹配特殊品类（无图时尽量填写）\n"
-        "  search_terms 要求：must_terms 必须使用候选节摘录中的规则正文用语，禁止填买家口语；"
-        "将买家说法映射为规则用语（如破洞/撕裂→破损，开线→开线/质量问题）；"
-        "case_terms 可保留买家原话；若可判断商品品类，须激活 C 通道并选中对应品类 doc\n"
-        f"{nav_block}\n"
+        f"{slug_line}"
         "聊天记录：\n"
         f"{text_context}\n"
         f"物流签收状态：{logistics_signed}\n"
-        f"product_category_slug={materials.get('product_category_slug', '')}\n"
+        f"product_category_slug(API)={api_slug or '无'}\n"
         f"platform_service_tags={materials.get('platform_service_tags', [])}\n"
     )
     llm_text = chat_completion(
@@ -223,6 +259,37 @@ def _llm_extract_issue(
     if not llm_text:
         return None
     return _parse_json_text(llm_text)
+
+
+# ---------- 视觉指引：事实 LLM 完成后，用提炼诉求锚定多模态分析 ----------
+def _build_vision_guidance(
+    materials: dict[str, Any],
+    issue_result: dict[str, Any] | None,
+    *,
+    buyer_text: str,
+    text_context: str,
+) -> str:
+    """
+    拼装供视觉模型使用的买家诉求文本；优先 issue_summary，其次原始材料。
+    """
+    parts: list[str] = []
+    if isinstance(issue_result, dict):
+        summary = str(issue_result.get("issue_summary", "") or "").strip()
+        if summary:
+            parts.append(summary)
+        tags = [str(item).strip() for item in (issue_result.get("intent_tags") or []) if str(item).strip()]
+        if tags:
+            parts.append(f"诉求标签：{'、'.join(tags)}")
+    if not parts and buyer_text.strip():
+        parts.append(buyer_text.strip())
+    if not parts:
+        for key in ("complaint_text", "description"):
+            value = materials.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    if not parts and text_context.strip():
+        parts.append(text_context.strip()[:240])
+    return "\n".join(dict.fromkeys(parts))
 
 
 # ---------- 语义兜底：模型不可用时用最小关键词保证收货判断可用 ----------
@@ -241,27 +308,20 @@ def _fallback_infer_goods_received(text_context: str) -> bool | None:
 
 def _collect_category_slugs(
     issue_result: dict[str, Any] | None,
-    vision_results: list[dict[str, Any]],
+    vision_category_slug: str | None = None,
 ) -> list[str]:
     """
-    合并事实 LLM 与各图视觉分析输出的 category_slug，去重保序。
+    合并品类 slug：文本事实 LLM 优先，视觉 slug 次之（API slug 由 merge 单独注入）。
     """
     slugs: list[str] = []
     if isinstance(issue_result, dict):
         text_slug = validate_category_slug(issue_result.get("category_slug"))
         if text_slug:
             slugs.append(text_slug)
-        raw_plan = issue_result.get("rule_match_plan")
-        if isinstance(raw_plan, dict):
-            nested_slug = validate_category_slug(raw_plan.get("category_slug"))
-            if nested_slug and nested_slug not in slugs:
-                slugs.append(nested_slug)
-    for image_result in vision_results:
-        if not isinstance(image_result, dict) or image_result.get("error"):
-            continue
-        vision_slug = validate_category_slug(image_result.get("category_slug"))
-        if vision_slug and vision_slug not in slugs:
-            slugs.append(vision_slug)
+    if vision_category_slug:
+        validated = validate_category_slug(vision_category_slug)
+        if validated and validated not in slugs:
+            slugs.append(validated)
     return slugs
 
 
@@ -310,33 +370,42 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     logistics_info = query_logistics(order_id=order_id) if order_id else None
     logistics_normal = None if logistics_info is None else (not logistics_info.is_abnormal)
-    vision_guidance = buyer_text or ""
 
     issue_result: dict[str, Any] | None = None
     vision_results: list[dict[str, Any]] = []
-    if text_context or image_urls:
-        max_workers = max(1, min(4, 1 + len(image_urls[:3])))
+    batch_start = time.perf_counter()
+
+    # ---------- Batch0：先事实 LLM，再按诉求并行调视觉 LLM ----------
+    if text_context:
+        issue_result = _llm_extract_issue(
+            text_context=text_context,
+            logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
+            materials=materials,
+        )
+
+    image_cap = image_urls[:3]
+    if image_cap:
+        vision_guidance = _build_vision_guidance(
+            materials=materials,
+            issue_result=issue_result,
+            buyer_text=buyer_text,
+            text_context=text_context,
+        )
+        max_workers = max(1, min(3, len(image_cap)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_issue = (
-                executor.submit(
-                    _llm_extract_issue,
-                    text_context=text_context,
-                    logistics_signed=(None if logistics_info is None else logistics_info.is_signed),
-                    materials=materials,
-                )
-                if text_context
-                else None
-            )
             image_futures = [
                 executor.submit(_analyze_single_image, image_url=url, guidance=vision_guidance)
-                for url in image_urls[:3]
+                for url in image_cap
             ]
-            if future_issue is not None:
-                issue_result = future_issue.result()
             vision_results = [future.result() for future in image_futures]
-    else:
-        issue_result = None
-        vision_results = []
+
+    logger.info(
+        "%s Batch0 串行完成 elapsed_ms=%s images=%s has_text=%s",
+        LOG_PREFIX,
+        int((time.perf_counter() - batch_start) * 1000),
+        len(image_cap),
+        bool(text_context),
+    )
 
     issue_summary = None
     intent_tags: list[str] = []
@@ -371,6 +440,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     has_tag_visible = None
     photo_background = None
     wear_signs = None
+    visual_defect_severity: str | None = None
+    visual_goods_recoverability: str | None = None
+    visual_category_slug: str | None = None
     evidence_items: list[dict[str, Any]] = []
 
     if text_context:
@@ -386,7 +458,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
             }
         )
 
-    for image_url, image_result in zip(image_urls[:3], vision_results):
+    for image_url, image_result in zip(image_cap, vision_results):
         evidence_items.append({"type": "image", "url": image_url})
         if image_result.get("error"):
             error_text = str(image_result["error"])
@@ -420,6 +492,19 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         if wear_signs is None:
             wear_signs = image_result.get("wear_signs")
 
+        visual_defect_severity = _merge_visual_defect_severity(
+            visual_defect_severity,
+            _coerce_visual_field(image_result.get("visual_defect_severity"), VISUAL_DEFECT_SEVERITY_VALUES),
+        )
+        visual_goods_recoverability = _merge_visual_goods_recoverability(
+            visual_goods_recoverability,
+            _coerce_visual_field(image_result.get("visual_goods_recoverability"), VISUAL_GOODS_RECOVERABILITY_VALUES),
+        )
+        if visual_category_slug is None:
+            candidate_slug = image_result.get("category_slug")
+            if isinstance(candidate_slug, str) and candidate_slug.strip():
+                visual_category_slug = validate_category_slug(candidate_slug)
+
     if logistics_info and goods_received is False and logistics_info.is_signed:
         red_flags.append("买家称未收到货，但物流显示已签收")
     if logistics_info and logistics_info.is_abnormal:
@@ -448,6 +533,8 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         "has_tag_visible": has_tag_visible,
         "photo_background": photo_background,
         "wear_signs": wear_signs,
+        "visual_defect_severity": visual_defect_severity,
+        "visual_goods_recoverability": visual_goods_recoverability,
         "logistics_normal": logistics_normal,
     }.items():
         if value is None:
@@ -457,10 +544,10 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     uncertainty_note = "；".join(dict.fromkeys(uncertainty_reasons)) if uncertainty_reasons else None
 
-    category_slugs = _collect_category_slugs(issue_result, vision_results)
-    raw_plan = issue_result.get("rule_match_plan") if isinstance(issue_result, dict) else None
+    category_slugs = _collect_category_slugs(issue_result, vision_category_slug=visual_category_slug)
+    if visual_category_slug and visual_category_slug in category_slugs:
+        logger.info("%s 视觉识别品类 slug=%s", LOG_PREFIX, visual_category_slug)
     rule_match_plan = merge_llm_rule_plan(
-        raw_plan=raw_plan if isinstance(raw_plan, dict) else None,
         materials=materials,
         intent_tags=intent_tags,
         logistics_normal=logistics_normal,
@@ -486,6 +573,8 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         issue_summary=issue_summary,
         intent_tags=list(dict.fromkeys(intent_tags)),
         visual_observations=list(dict.fromkeys(visual_observations)),
+        visual_defect_severity=visual_defect_severity,
+        visual_goods_recoverability=visual_goods_recoverability,
         attributes=attributes,
         evidence_items=evidence_items,
         goods_received=goods_received,

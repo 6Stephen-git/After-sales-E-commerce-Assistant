@@ -50,9 +50,7 @@ CATEGORY_TEXT_EXTRA_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 # 聊天中出现下列词且伴随生鲜/食品语境时，优先推断为 fresh
-FRESH_ISSUE_TERMS: tuple[str, ...] = ("坏了", "烂了", "rotten", "腐", "臭", "霉")
-FRESH_CONTEXT_TERMS: tuple[str, ...] = ("收到", "签收", "拆开", "打开", "吃", "买", "寄")
-
+FRESH_ISSUE_TERMS: tuple[str, ...] = ("坏了", "烂了", "吃", "腐", "臭", "霉")
 
 @lru_cache(maxsize=1)
 def load_lexicon() -> dict[str, Any]:
@@ -311,6 +309,16 @@ def format_category_slug_catalog_lines() -> str:
     return "\n".join(f"- slug={item['slug']} doc={item['doc_name']}" for item in catalog)
 
 
+def format_category_slug_compact() -> str:
+    """
+    生成紧凑 slug 枚举（逗号分隔），供 Agent1 事实 LLM 轻量引用。
+    """
+    catalog = build_category_slug_catalog()
+    if not catalog:
+        return ""
+    return ", ".join(item["slug"] for item in catalog)
+
+
 def _parse_category_llm_json(raw_text: str) -> tuple[str | None, float]:
     """
     解析品类 LLM JSON：category_slug + confidence。
@@ -393,14 +401,6 @@ def infer_category_slug_llm(text: str, materials: dict[str, Any] | None = None) 
     if slug:
         logger.info("%s 品类 LLM 推断 slug=%s confidence=%.2f", LOG_PREFIX, slug, confidence)
     return slug, confidence
-
-
-def infer_category_slug_from_text(text: str) -> str | None:
-    """
-    从聊天/诉求文本推断品类 slug（LLM 主路径；LLM 不可用时不做关键词猜测）。
-    """
-    slug, _confidence = infer_category_slug_llm(text=text, materials=None)
-    return slug
 
 
 def collect_lexicon_search_hints(

@@ -46,12 +46,6 @@ def setup_function() -> None:
 
     agent2_tools_module.match_rules_full = _mock_match_rules_full
     assisted_controller_module.match_rules_full = _mock_match_rules_full
-    agent2_tools_module.infer_customer_value_fields = lambda _input: {
-        "defect_severity": "moderate",
-        "goods_recoverability": "repairable",
-        "buyer_cooperation": "neutral",
-        "demand_reasonableness": "borderline",
-    }
     strategist_module._llm_generate_strategy = lambda **kwargs: None
 
 

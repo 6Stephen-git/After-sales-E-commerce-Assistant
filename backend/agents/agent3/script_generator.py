@@ -217,7 +217,7 @@ def _build_usage_tip(*, response_mode: str, strategy_stage: str) -> str:
     """
     stage = (strategy_stage or "").strip().lower()
     if stage == STRATEGY_STAGE_EVIDENCE_FIRST:
-        return "当前处于举证阶段：话术由 dialogue_context 约束，勿提前承诺补偿。"
+        return "当前处于举证阶段：请按对话语境组织话术，勿提前承诺补偿。"
     if response_mode == RESPONSE_MODE_MERCHANT_FAULT:
         return "商责已基本明确：此话术主动担责并给出处理方向，可直接发送。"
     if response_mode == RESPONSE_MODE_MALICIOUS_RISK:
