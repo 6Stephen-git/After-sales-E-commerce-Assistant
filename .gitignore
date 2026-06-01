@@ -32,3 +32,7 @@ Thumbs.db
 
 # 规则抓取输出（核对后再决定是否提交）
 data/rules_raw/
+data/rule_match_lexicon_review_queue.json
+
+# 测试 SQLite 产物
+tests/tmp_*.sqlite3

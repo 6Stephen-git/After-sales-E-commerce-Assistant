@@ -153,7 +153,7 @@ REQUIRED_DIRS = [
     "backend/agents/agent5",
     "backend/controllers",
     "backend/tools",
-    "backend/api",
+    "backend/routers",
     "data",
     "frontend",
     "frontend/src",

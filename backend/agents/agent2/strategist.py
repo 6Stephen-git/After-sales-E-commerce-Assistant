@@ -14,7 +14,6 @@ import time
 
 from schemas import (
     DialogueContext,
-    MaliciousDetectionInput,
     MaliciousDetectionOutput,
     CustomerValueOutput,
     DISPOSITION_COMPENSATE,
@@ -24,7 +23,6 @@ from schemas import (
     StrategyInput,
     StrategyOutput,
 )
-from backend.tools.agent2_tools import detect_malicious_behavior, run_customer_value_analysis
 from backend.tools.llm_client import chat_completion
 
 
@@ -35,8 +33,7 @@ logger = logging.getLogger(__name__)
 STRATEGY_RECENT_TURNS_MAX = 8
 STRATEGY_VISUAL_OBS_MAX = 3
 STRATEGY_RED_FLAGS_MAX = 4
-STRATEGY_FAST_MODEL_ENV = "AGENT2_LLM_MODEL"
-STRATEGY_PRO_MODEL_ENV = "AGENT2_LLM_MODEL_STRATEGY"
+STRATEGY_MODEL_ENV = "AGENT2_LLM_MODEL_STRATEGY"
 
 # ---------- 策略参谋核心目标（全链路提示词共用） ----------
 _MERCHANT_INTEREST_GOAL = (
@@ -126,48 +123,6 @@ def _value_risks_from_result(customer_value: CustomerValueOutput) -> List[str]:
     elif customer_value.channel == "order":
         layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
     return layer_risks
-
-
-def _apply_malicious_layer(input_data: StrategyInput) -> tuple:
-    """
-    第二层：恶意行为风险过滤层，输出标准备注。
-
-    返回 (malicious_result, new_risk_factors) 元组，不修改外部 risk_factors，
-    保证并发安全。
-    """
-    malicious_input = MaliciousDetectionInput(
-        buyer_profile=input_data.buyer_profile,
-        facts=input_data.facts,
-        order_amount=input_data.order_amount,
-        chat_history=input_data.chat_history,
-        emotion_note=input_data.emotion_note,
-    )
-    malicious_result = detect_malicious_behavior(malicious_input)
-    layer_risks: List[str] = []
-    if malicious_result.risk_level == "high":
-        layer_risks.append("[恶意层] 高风险恶意：优先抗辩并准备平台介入，先固定证据链后再沟通")
-    elif malicious_result.risk_level == "medium":
-        layer_risks.append("[恶意层] 中风险恶意：谨慎协商；若证据质量 low，则先走抗辩补证路径")
-    return malicious_result, layer_risks
-
-
-def _apply_customer_value_layer(input_data: StrategyInput) -> tuple:
-    """
-    第三层：客户价值评估层（双维价值 + 触发通道）。
-
-    完整工具链见 backend.tools.agent2_tools.run_customer_value_analysis，供智能模式复用。
-
-    返回 (customer_value, new_risk_factors) 元组，不修改外部 risk_factors，
-    保证并发安全。
-    """
-    logger.info("%s 开始客户价值完整分析（工具链）", AGENT2_LOG_PREFIX)
-    customer_value = run_customer_value_analysis(input_data)
-    layer_risks: List[str] = []
-    if customer_value.channel == "long_term":
-        layer_risks.append("[客户价值层] 触发长期优待通道，优先协商维护关系")
-    elif customer_value.channel == "order":
-        layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
-    return customer_value, layer_risks
 
 
 def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
@@ -779,29 +734,6 @@ def _build_strategy_prompt_payload(
     return payload
 
 
-def _needs_strategy_pro_model(
-    *,
-    malicious_result: MaliciousDetectionOutput,
-    customer_value: CustomerValueOutput,
-    strategy_stage: str,
-    merchant_fault_signal: bool,
-    disposition: str,
-    has_signal_conflict: bool,
-) -> bool:
-    """
-    判定策略 LLM 是否升档 Pro：恶意/价值通道/商责善后/信号冲突（不含举证未闭环）。
-    """
-    if malicious_result.risk_level in {"medium", "high"}:
-        return True
-    if customer_value.channel in {"long_term", "order"}:
-        return True
-    if has_signal_conflict:
-        return True
-    if merchant_fault_signal and disposition == DISPOSITION_COMPENSATE:
-        return True
-    return False
-
-
 def _llm_generate_strategy(
     *,
     disposition: str,
@@ -816,7 +748,7 @@ def _llm_generate_strategy(
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
     """
-    输出结构化策略 JSON；默认小模型，复杂 case 升 Pro。
+    输出结构化策略 JSON（固定使用 AGENT2_LLM_MODEL_STRATEGY）。
     """
     compensation_policy = "forbid" if (input_data.facts.missing_evidence or []) else "negotiate_soft"
     prompt_payload = _build_strategy_prompt_payload(
@@ -829,15 +761,6 @@ def _llm_generate_strategy(
         risk_factors=risk_factors,
         estimated_win_rate=estimated_win_rate,
     )
-    use_pro = _needs_strategy_pro_model(
-        malicious_result=malicious_result,
-        customer_value=customer_value,
-        strategy_stage=strategy_stage,
-        merchant_fault_signal=merchant_fault_signal,
-        disposition=disposition,
-        has_signal_conflict=has_signal_conflict,
-    )
-    model_env_key = STRATEGY_PRO_MODEL_ENV if use_pro else STRATEGY_FAST_MODEL_ENV
     user_content = f"请基于以下输入生成策略 JSON：\n{json.dumps(prompt_payload, ensure_ascii=False)}"
     call_start = time.perf_counter()
     llm_text = chat_completion(
@@ -845,16 +768,14 @@ def _llm_generate_strategy(
             {"role": "system", "content": _build_strategy_json_system_prompt()},
             {"role": "user", "content": user_content},
         ],
-        model_env_key=model_env_key,
-        fallback_model_env_key=STRATEGY_FAST_MODEL_ENV,
+        model_env_key=STRATEGY_MODEL_ENV,
         temperature=0.3,
         stream_delta_callback=reasoning_delta_callback,
     )
     elapsed_ms = int((time.perf_counter() - call_start) * 1000)
     logger.info(
-        "%s 策略 LLM 完成 tier=%s elapsed_ms=%s prompt_chars=%s",
+        "%s 策略 LLM 完成 elapsed_ms=%s prompt_chars=%s",
         AGENT2_LOG_PREFIX,
-        "pro" if use_pro else "fast",
         elapsed_ms,
         len(user_content),
     )
@@ -882,23 +803,20 @@ def recommend(
         StrategyOutput，含 disposition、estimated_win_rate、customer_intent_analysis、
         reasoning、risk_factors、dialogue_context 等。
     """
+    if input_data.precomputed_malicious_detection is None:
+        raise ValueError(f"{AGENT2_LOG_PREFIX} precomputed_malicious_detection 必须由调用方注入")
+    if input_data.precomputed_customer_value is None:
+        raise ValueError(f"{AGENT2_LOG_PREFIX} precomputed_customer_value 必须由调用方注入")
+
     risk_factors: List[str] = []
 
     # 第一层：规则层（纯计算，无外部依赖）
     policy_refs, rule_stance, rule_count = _analyze_rule_stance(input_data)
 
-    # 第二层 + 第三层：优先使用 Controller 预计算结果
-    if input_data.precomputed_malicious_detection is not None:
-        malicious_result = input_data.precomputed_malicious_detection
-        malicious_risks = _malicious_risks_from_result(malicious_result)
-    else:
-        malicious_result, malicious_risks = _apply_malicious_layer(input_data)
-
-    if input_data.precomputed_customer_value is not None:
-        customer_value = input_data.precomputed_customer_value
-        value_risks = _value_risks_from_result(customer_value)
-    else:
-        customer_value, value_risks = _apply_customer_value_layer(input_data)
+    malicious_result = input_data.precomputed_malicious_detection
+    malicious_risks = _malicious_risks_from_result(malicious_result)
+    customer_value = input_data.precomputed_customer_value
+    value_risks = _value_risks_from_result(customer_value)
 
     risk_factors.extend(malicious_risks)
     risk_factors.extend(value_risks)

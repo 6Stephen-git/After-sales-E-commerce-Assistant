@@ -6,6 +6,8 @@ Agent2（策略参谋员）模块测试
 import os
 import sys
 
+import pytest
+
 
 # ---------- 与仓库根对齐的导入路径 ----------
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,7 +16,10 @@ if ROOT_DIR not in sys.path:
 
 TEST_DB_PATH = os.path.join(ROOT_DIR, "tests", "tmp_agent2.sqlite3")
 if os.path.exists(TEST_DB_PATH):
-    os.remove(TEST_DB_PATH)
+    try:
+        os.remove(TEST_DB_PATH)
+    except OSError:
+        pass
 os.environ["DB_URL"] = f"sqlite+pysqlite:///{TEST_DB_PATH.replace(os.sep, '/')}"
 os.environ.setdefault("ENABLE_TEST_STUBS", "1")
 
@@ -29,14 +34,15 @@ import backend.tools.agent2_tools as agent2_tools_module
 from backend.tools.agent2_tools import (
     detect_malicious_behavior,
     evaluate_customer_value,
-    match_rules,
     match_rules_full,
     query_buyer_profile,
+    run_customer_value_analysis,
     search_similar_cases,
 )
 from schemas import (
     BuyerProfile,
     CustomerValueInput,
+    CustomerValueOutput,
     FactOutput,
     MaliciousDetectionOutput,
     MaliciousSignal,
@@ -48,6 +54,41 @@ from schemas import (
     DISPOSITION_NEGOTIATE,
     RULE_RELEVANCE_MUST,
 )
+
+
+# ---------- 测试辅助：与 Controller 一致注入 precomputed 层 ----------
+def _with_precomputed(
+    input_data: StrategyInput,
+    *,
+    malicious_detection: MaliciousDetectionOutput | None = None,
+    customer_value: CustomerValueOutput | None = None,
+) -> StrategyInput:
+    """
+    为 recommend() 补齐 Controller 预计算的恶意/价值结果。
+    """
+    malicious_input = MaliciousDetectionInput(
+        buyer_profile=input_data.buyer_profile,
+        facts=input_data.facts,
+        order_amount=input_data.order_amount,
+        chat_history=input_data.chat_history or [],
+        emotion_note=input_data.emotion_note,
+    )
+    resolved_malicious = (
+        malicious_detection
+        if malicious_detection is not None
+        else detect_malicious_behavior(malicious_input)
+    )
+    resolved_value = (
+        customer_value
+        if customer_value is not None
+        else run_customer_value_analysis(input_data)
+    )
+    return input_data.model_copy(
+        update={
+            "precomputed_malicious_detection": resolved_malicious,
+            "precomputed_customer_value": resolved_value,
+        }
+    )
 
 
 # ---------- recommend：单链路处置方向 + 胜率/置信度 ----------
@@ -81,7 +122,7 @@ class TestAgent2Recommend:
             order_amount=128.0,
         )
 
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_COMPENSATE, f"期望 compensate，实际 {output.disposition}"
         assert output.estimated_win_rate is None
         assert 0.6 <= output.confidence <= 0.95
@@ -121,7 +162,7 @@ class TestAgent2Recommend:
             order_amount=99.0,
         )
 
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_DEFEND, f"期望 defend，实际 {output.disposition}"
         assert output.estimated_win_rate is not None
         assert 0.05 <= output.estimated_win_rate <= 0.95
@@ -148,7 +189,7 @@ class TestAgent2Recommend:
             similar_cases=[],
             order_amount=2999.0,
         )
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_NEGOTIATE
         assert any("策略阶段" in item for item in output.risk_factors)
         assert "补证" in output.strategy_direction_summary or "举证" in output.strategy_direction_summary
@@ -178,7 +219,7 @@ class TestAgent2Recommend:
             order_amount=168.0,
         )
 
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_NEGOTIATE, f"期望 negotiate，实际 {output.disposition}"
         assert output.estimated_win_rate is None
         assert 0.1 <= output.confidence <= 0.95
@@ -191,17 +232,6 @@ class TestAgent2Recommend:
     def test_recommend_negotiate_when_medium_risk_conflicts_with_merchant_fault(self, monkeypatch):
         """中风险恶意与商责明确信号冲突时，应协商且降低置信度。"""
         self._mock_strategy_llm(monkeypatch)
-        monkeypatch.setattr(
-            strategist_module,
-            "detect_malicious_behavior",
-            lambda _input: MaliciousDetectionOutput(
-                risk_score=42,
-                risk_level="medium",
-                triggered_signals=[],
-                hard_rule_summary="存在中风险信号。",
-                disposition_advice="建议谨慎协商并加强举证要求，控制补偿上限。",
-            ),
-        )
         facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
         matched_rules = [
             MatchedRule(
@@ -217,8 +247,14 @@ class TestAgent2Recommend:
             similar_cases=[],
             order_amount=128.0,
         )
-
-        output = recommend(input_data)
+        medium_malicious = MaliciousDetectionOutput(
+            risk_score=42,
+            risk_level="medium",
+            triggered_signals=[],
+            hard_rule_summary="存在中风险信号。",
+            disposition_advice="建议谨慎协商并加强举证要求，控制补偿上限。",
+        )
+        output = recommend(_with_precomputed(input_data, malicious_detection=medium_malicious))
         assert output.disposition == DISPOSITION_NEGOTIATE
         assert output.estimated_win_rate is None
         assert output.confidence <= 0.65
@@ -238,7 +274,7 @@ class TestAgent2Recommend:
             order_amount=0.0,
         )
 
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.disposition in {DISPOSITION_DEFEND, DISPOSITION_NEGOTIATE, DISPOSITION_COMPENSATE}
         assert 0.0 <= output.confidence <= 1.0
         assert output.customer_value is not None
@@ -274,7 +310,7 @@ class TestAgent2Recommend:
             similar_cases=[],
             order_amount=120.0,
         )
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert "客户意图：" in output.reasoning
         assert "风险点：" in output.reasoning
         assert "建议动作：" in output.reasoning
@@ -312,7 +348,7 @@ class TestAgent2Recommend:
             similar_cases=[],
             order_amount=220.0,
         )
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert output.reasoning.startswith("客户意图：")
         assert "质量问题维权" in output.customer_intent_analysis
         assert "开箱视频" in output.strategy_direction_summary
@@ -352,28 +388,26 @@ class TestAgent2Recommend:
             matched_rules=[phone_rule],
             order_amount=399.0,
         )
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data))
         assert "大数据" not in " ".join(output.platform_rule_basis)
         assert any("划痕" in line for line in output.platform_rule_basis)
-        """A2-4 分层编排后，应透传恶意检测层输出并写入风险提示。"""
+
+    def test_recommend_should_surface_precomputed_malicious_layer(self, monkeypatch):
+        """分层编排后，应透传 Controller 预计算的恶意检测并写入风险提示。"""
         self._mock_strategy_llm(monkeypatch)
-        monkeypatch.setattr(
-            strategist_module,
-            "detect_malicious_behavior",
-            lambda _input: MaliciousDetectionOutput(
-                risk_score=72,
-                risk_level="high",
-                triggered_signals=[
-                    MaliciousSignal(
-                        signal_type="review_blackmail",
-                        description="条件交换式投诉威胁",
-                        score=12,
-                        source="llm_semantic",
-                    )
-                ],
-                hard_rule_summary="硬规则层未命中异常项。",
-                disposition_advice="建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。",
-            ),
+        high_malicious = MaliciousDetectionOutput(
+            risk_score=72,
+            risk_level="high",
+            triggered_signals=[
+                MaliciousSignal(
+                    signal_type="review_blackmail",
+                    description="条件交换式投诉威胁",
+                    score=12,
+                    source="llm_semantic",
+                )
+            ],
+            hard_rule_summary="硬规则层未命中异常项。",
+            disposition_advice="建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。",
         )
         input_data = StrategyInput(
             facts=FactOutput(evidence_quality="medium"),
@@ -383,7 +417,7 @@ class TestAgent2Recommend:
             order_amount=120.0,
             chat_history=["不给补偿我就去投诉平台"],
         )
-        output = recommend(input_data)
+        output = recommend(_with_precomputed(input_data, malicious_detection=high_malicious))
         assert output.malicious_detection is not None
         assert output.malicious_detection.risk_level == "high"
         assert any(item.startswith("[恶意层]") for item in output.risk_factors)
@@ -553,7 +587,7 @@ class TestAgent2Tools:
     def test_match_rules_empty_without_plan(self):
         """无 target_doc_ids 时不应匹配。"""
         facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
-        assert match_rules(facts) == []
+        assert match_rules_full(facts).display_rules == []
 
     def test_classify_relevance_should_drop_generic_case_only_hits(self):
         """字面降级：仅命中泛化 case 词时应判 weak 并丢弃。"""
@@ -623,10 +657,10 @@ class TestAgent2Tools:
         assert profile.purchase_count >= 0
 
     def test_search_similar_cases_top_k(self):
-        """判例检索应按 top_k 截断结果。"""
-        cases = search_similar_cases("物流异常退款", top_k=2)
-        assert len(cases) == 2
-        assert cases[0].similarity >= cases[1].similarity
+        """判例检索占位：未接 DB 前恒为空，仅校验 top_k 参数。"""
+        assert search_similar_cases("物流异常退款", top_k=2) == []
+        with pytest.raises(ValueError, match="top_k"):
+            search_similar_cases("物流异常退款", top_k=0)
 
     def test_evaluate_customer_value_should_trigger_long_term_channel(self):
         """客户长期价值高时应触发长期优待通道。"""
@@ -959,45 +993,6 @@ class TestStrategyPromptPayload:
         assert payload["buyer_profile"].get("buyer_id") is None
         assert payload["rule_briefs"][0]["brief"] == "食品质量要点"
         assert "article_ref" not in payload["rule_briefs"][0]
-
-    def test_needs_strategy_pro_model_triggers(self):
-        from backend.agents.agent2.strategist import _needs_strategy_pro_model
-        from schemas import CustomerValueOutput, STRATEGY_STAGE_EVIDENCE_FIRST
-
-        base_malicious = MaliciousDetectionOutput(risk_level="low")
-        base_value = CustomerValueOutput(channel="none")
-        assert not _needs_strategy_pro_model(
-            malicious_result=base_malicious,
-            customer_value=base_value,
-            strategy_stage="negotiate_settle",
-            merchant_fault_signal=False,
-            disposition=DISPOSITION_NEGOTIATE,
-            has_signal_conflict=False,
-        )
-        assert _needs_strategy_pro_model(
-            malicious_result=MaliciousDetectionOutput(risk_level="medium"),
-            customer_value=base_value,
-            strategy_stage="negotiate_settle",
-            merchant_fault_signal=False,
-            disposition=DISPOSITION_DEFEND,
-            has_signal_conflict=False,
-        )
-        assert _needs_strategy_pro_model(
-            malicious_result=base_malicious,
-            customer_value=CustomerValueOutput(channel="long_term"),
-            strategy_stage="negotiate_settle",
-            merchant_fault_signal=False,
-            disposition=DISPOSITION_NEGOTIATE,
-            has_signal_conflict=False,
-        )
-        assert not _needs_strategy_pro_model(
-            malicious_result=base_malicious,
-            customer_value=base_value,
-            strategy_stage=STRATEGY_STAGE_EVIDENCE_FIRST,
-            merchant_fault_signal=False,
-            disposition=DISPOSITION_NEGOTIATE,
-            has_signal_conflict=False,
-        )
 
     def test_needs_rule_match_gate(self):
         """简单案跳过条文匹配；恶意/价值/多诉求标签触发。"""

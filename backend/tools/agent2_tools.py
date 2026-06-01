@@ -46,15 +46,6 @@ AGENT2_LOG_PREFIX = "[Agent2]"
 
 
 # ---------- 规则匹配：lexicon 导航 + MySQL 爬取正文（单一路径） ----------
-def match_rules(facts: FactOutput) -> List[MatchedRule]:
-    """
-    执行平台规则匹配，返回前端代表条（3～5 条，含 relevance 等扩展字段）。
-
-    完整命中池与 rule_briefs 见 match_rules_full()。
-    """
-    return match_rules_full(facts).display_rules
-
-
 def match_rules_full(facts: FactOutput) -> "RuleMatchResult":
     """
     返回完整匹配结果：命中池、策略 brief、前端代表条。
@@ -197,29 +188,6 @@ def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
 
-    return []
-
-
-# ---------- 可选占位：向量检索未启用时恒返回空列表 ----------
-def search_similar_cases_vector(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]:
-    """
-    向量语义检索相似判例（可选能力占位）。
-
-    MVP 未接入 ChromaDB 时固定返回空列表，并打 info 日志说明未启用。
-
-    参数:
-        dispute_desc: 预留，与后续向量查询语义对齐。
-        top_k: 预留截断条数。
-
-    返回:
-        恒为空列表。
-    """
-    logger.info(
-        "%s 向量检索未启用，返回空结果，dispute_desc=%s top_k=%s",
-        AGENT2_LOG_PREFIX,
-        dispute_desc,
-        top_k,
-    )
     return []
 
 

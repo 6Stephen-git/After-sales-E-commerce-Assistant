@@ -91,18 +91,3 @@ class PlatformRule(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-
-
-# ---------- 话术模板表：系统模板 + 商家自定义模板 ----------
-class ScriptTemplateRecord(Base):
-    """
-    话术模板（merchant_id 为空表示全局模板）。
-    """
-
-    __tablename__ = "script_templates"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    merchant_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    scene: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    template_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())

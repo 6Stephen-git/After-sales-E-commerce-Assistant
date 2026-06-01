@@ -83,7 +83,7 @@
                   class="tag-gap"
                   type="danger"
                   size="small"
-                >{{ malicious_signal_label(sig.signal_type) }}：{{ sig.description }}（{{ sig.score }}分，{{ signal_source_label(sig.source) }}）</el-tag>
+                >{{ getMaliciousSignalLabel(sig.signal_type) }}：{{ sig.description }}（{{ sig.score }}分，{{ getMaliciousSignalSourceLabel(sig.source) }}）</el-tag>
               </div>
             </div>
           </el-collapse-item>
@@ -177,7 +177,14 @@
 
 <script setup>
 import { computed } from 'vue'
-import { getDispositionLabel, getRiskLevelLabel } from '../../utils/enums'
+import {
+  formatRedFlagItem,
+  getDispositionLabel,
+  getMaliciousSignalLabel,
+  getMaliciousSignalSourceLabel,
+  getRiskLevelLabel,
+  polishRuleLine
+} from '../../utils/enums'
 
 // ---------- 组件输入：策略、事实疑点、命中规则、参考信息、话术使用提示 ----------
 const props = defineProps({
@@ -207,52 +214,6 @@ const props = defineProps({
 function format_percent(value) {
   if (value === null || value === undefined) return '—'
   return `${(Number(value) * 100).toFixed(1)}%`
-}
-
-// ---------- 工具函数：疑点枚举键前缀转可读文案（与旧 FactCard 逻辑一致） ----------
-function format_red_flag_item(raw) {
-  const s = String(raw || '').trim()
-  if (!s) return ''
-  const sepIndex = s.includes('：') ? s.indexOf('：') : s.indexOf(':')
-  if (sepIndex <= 0) return s
-  const key = s.slice(0, sepIndex).trim().toLowerCase()
-  const body = s.slice(sepIndex + 1).trim()
-  const label_map = {
-    evidence_contradiction: '证据矛盾',
-    fake_evidence: '疑似虚假举证',
-    logistics_mismatch: '物流信息与描述不符',
-  }
-  const label = label_map[key] || key.replace(/_/g, ' ')
-  return body ? `${label}：${body}` : label
-}
-
-// ---------- 工具函数：恶意信号类型中文（与后端 agent2_tools 映射一致） ----------
-const MALICIOUS_SIGNAL_TYPE_CN = {
-  fake_evidence: '疑似虚假凭证（硬规则）',
-  abuse_refund_only: '滥用仅退款',
-  batch_malicious_orders: '批量恶意下单',
-  freight_insurance_abuse: '疑似骗取运费险',
-  swap_or_missing_items: '退货调包/少件',
-  abnormal_return_address: '退货地址异常',
-  related_accounts: '关联账户异常',
-  review_blackmail: '差评/投诉勒索',
-  identity_impersonation: '冒充身份施压',
-  evidence_contradiction: '话术与证据矛盾',
-  professional_claim_pattern: '职业索赔话术',
-  fake_credential_web_image: '举证疑似网图/非实拍',
-  abuse_refund_intent_chat: '聊天暴露套利/仅退意图',
-}
-
-function malicious_signal_label(type) {
-  const key = String(type || '').trim()
-  return MALICIOUS_SIGNAL_TYPE_CN[key] || key.replace(/_/g, ' ')
-}
-
-// ---------- 工具函数：恶意信号来源展示文案 ----------
-function signal_source_label(source) {
-  if (source === 'llm_semantic') return '语义层'
-  if (source === 'hard_rule') return '硬规则'
-  return source || '未知'
 }
 
 // ---------- 派生状态：恶意风险提示聚合（新字段优先，兼容旧报告） ----------
@@ -287,34 +248,19 @@ const confidence_percent = computed(() => {
 // ---------- 派生状态：疑点列表（来自 Agent1 事实） ----------
 const red_flag_items = computed(() => {
   const raw_flags = Array.isArray(props.facts?.red_flags) ? props.facts.red_flags : []
-  const normalized = raw_flags.map((item) => format_red_flag_item(item)).filter((item) => Boolean(item))
+  const normalized = raw_flags.map((item) => formatRedFlagItem(item)).filter((item) => Boolean(item))
   return [...new Set(normalized)]
 })
-
-// ---------- 工具函数：平台规则展示文案（去条号/章节/内部 doc 引用） ----------
-function polish_rule_line(text) {
-  const raw = String(text || '').trim()
-  if (!raw) return ''
-  return raw
-    .replace(/第[一二三四五六七八九十百千零\d]+条/g, '')
-    .replace(/第[一二三四五六七八九十]+节[^，。；]*/g, '')
-    .replace(/特殊品类争议处理_[^:：]+::/g, '')
-    .replace(/争议处理基本规则_[^:：]+::/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function format_rule_for_merchant(rule) {
-  return polish_rule_line(rule?.rule_summary)
-}
 
 // ---------- 派生状态：平台规则依据展示行（优先 strategy.platform_rule_basis） ----------
 const platform_rule_lines = computed(() => {
   const from_strategy = props.strategy?.platform_rule_basis
   if (Array.isArray(from_strategy) && from_strategy.length > 0) {
-    return from_strategy.map((item) => polish_rule_line(item)).filter(Boolean)
+    return from_strategy.map((item) => polishRuleLine(item)).filter(Boolean)
   }
-  return matched_rules_list.value.map((rule) => format_rule_for_merchant(rule)).filter(Boolean)
+  return matched_rules_list.value
+    .map((rule) => polishRuleLine(rule?.rule_summary))
+    .filter(Boolean)
 })
 
 // ---------- 派生状态：前端代表规则（后端 display_rules 已做争点过滤，此处仅排序展示） ----------
