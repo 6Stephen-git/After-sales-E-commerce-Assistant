@@ -252,7 +252,7 @@ const red_flag_items = computed(() => {
   return [...new Set(normalized)]
 })
 
-// ---------- 派生状态：平台规则依据展示行（优先 strategy.platform_rule_basis） ----------
+// ---------- 派生状态：平台规则依据（仅法条摘要；优先 strategy.platform_rule_basis，否则 matched_rules） ----------
 const platform_rule_lines = computed(() => {
   const from_strategy = props.strategy?.platform_rule_basis
   if (Array.isArray(from_strategy) && from_strategy.length > 0) {

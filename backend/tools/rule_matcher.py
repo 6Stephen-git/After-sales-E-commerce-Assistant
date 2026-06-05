@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from backend.db.connection import get_engine
 from backend.db.models import PlatformRule
-from backend.tools.rule_lexicon import get_doc_by_id, is_category_doc
+from backend.tools.rule_lexicon import CE_CONFIDENCE_THRESHOLD, get_doc_by_id
 from schemas import (
     RULE_RELEVANCE_MUST,
     RULE_RELEVANCE_SHOULD,
@@ -24,8 +24,18 @@ from schemas import (
     RULE_STANCE_BUYER,
     RULE_STANCE_MERCHANT,
     RULE_STANCE_NEUTRAL,
+    RULE_CONSTRAINT_APPLIES,
+    RULE_CONSTRAINT_EVIDENCE,
+    RULE_CONSTRAINT_MISSING_FACT,
+    RULE_CONSTRAINT_NO_PROMISE,
+    RULE_CONSTRAINT_OTHER,
+    RULE_CONSTRAINT_PROCESS,
+    RULE_CONSTRAINT_RATIO_LIMIT,
+    RULE_CONSTRAINT_TIMING,
+    RULE_CONSTRAINT_VIOLATED,
     FactOutput,
     MatchedRule,
+    RuleConstraint,
     RuleBrief,
     RuleMatchPlan,
     RuleMatchResult,
@@ -53,7 +63,6 @@ GENERIC_ARTICLE_TITLES = frozenset(
 GENERIC_WEAK_ONLY_TERMS = frozenset(
     {"举证", "初步凭证", "商品质量问题", "表面不一致", "签收", "确认收货", "处理标准", "举证要求"}
 )
-
 
 def _format_merchant_rule_text(article: dict[str, Any]) -> str:
     """
@@ -115,15 +124,10 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
         section_map=section_map,
         terms=plan.search_terms,
     )
-    if len(llm_candidates) <= RULE_MATCH_LITERAL_ONLY_MAX:
-        logger.info(
-            "%s 候选≤%s，跳过条文 LLM，走字面降级",
-            LOG_PREFIX,
-            RULE_MATCH_LITERAL_ONLY_MAX,
-        )
-        llm_result = None
-    else:
-        llm_result = llm_match_articles(facts=facts, candidates=llm_candidates)
+    if not llm_candidates:
+        logger.warning("%s 无 LLM 候选条文，跳过匹配", LOG_PREFIX)
+        return RuleMatchResult()
+    llm_result = llm_match_articles(facts=facts, candidates=llm_candidates)
     if llm_result is None:
         logger.warning("%s LLM 条文匹配失败，回退字面检索", LOG_PREFIX)
         terms = plan.search_terms
@@ -138,6 +142,20 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
     else:
         llm_display_ids = llm_result.display_rule_ids
         pool = _sort_pool_category_first(llm_result.matched_rules[:MATCH_POOL_CAP])
+        pool, supplemented_ids = _ensure_explicit_priority_doc_coverage(
+            pool=pool,
+            documents=documents,
+            section_map=section_map,
+            terms=plan.search_terms,
+            category_confidence=plan.category_confidence,
+            service_confidence=plan.service_confidence,
+        )
+        if supplemented_ids:
+            llm_display_ids = list(llm_display_ids or [])
+            for rule_id in supplemented_ids:
+                if rule_id not in llm_display_ids:
+                    llm_display_ids.append(rule_id)
+    constraints = _build_rule_constraints(pool, facts)
     briefs = _build_briefs(pool)
     display = _resolve_display_rules(
         pool,
@@ -151,7 +169,12 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
         len(briefs),
         len(display),
     )
-    return RuleMatchResult(matched_rules=pool, rule_briefs=briefs, display_rules=display)
+    return RuleMatchResult(
+        matched_rules=pool,
+        rule_briefs=briefs,
+        display_rules=display,
+        rule_constraints=constraints,
+    )
 
 
 def _parse_rule_document_payload(doc_id: str, rule_content: str | None) -> dict[str, Any] | None:
@@ -314,18 +337,45 @@ def _literal_article_score(article: dict[str, Any], terms: RuleSearchTerms) -> i
     return score
 
 
+def _doc_lane(doc_id: str) -> str:
+    """读取规则文档所属通道，未知时返回空字符串。"""
+    doc = get_doc_by_id(doc_id)
+    return str((doc or {}).get("lane", "") or "").strip()
+
+
+def _doc_name(doc_id: str) -> str:
+    """读取规则文档名称，供 LLM 区分品类、服务与通用规则。"""
+    doc = get_doc_by_id(doc_id)
+    return str((doc or {}).get("doc_name", "") or doc_id).strip()
+
+
+def _is_priority_lane_doc(doc_id: str) -> bool:
+    """C 品类与 E 服务为贴案优先通道，候选与展示均优先处理。"""
+    return _doc_lane(doc_id) in {"C", "E"}
+
+
+def _lane_rank(doc_id: str) -> int:
+    """规则展示排序：品类/服务优先，通用规则靠后。"""
+    lane = _doc_lane(doc_id)
+    if lane in {"C", "E"}:
+        return 0
+    if lane == "A":
+        return 2
+    return 1
+
+
 def prepare_llm_candidates(
     documents: dict[str, dict[str, Any]],
     section_map: dict[str, list[str] | None],
     terms: RuleSearchTerms,
 ) -> list[dict[str, Any]]:
     """
-    收集条文匹配 LLM 候选：C 通道 doc 全保留，非 C doc 按字面分 cap 后合并。
+    收集条文匹配 LLM 候选：C/E 贴案通道全保留，通用/其它通道按字面分 cap 后合并。
     """
     candidates: list[dict[str, Any]] = []
     for doc_id, doc in documents.items():
         articles = _filter_articles_by_sections(doc, section_map.get(doc_id))
-        if is_category_doc(doc_id):
+        if _is_priority_lane_doc(doc_id):
             selected = articles
         else:
             ranked = sorted(
@@ -342,6 +392,8 @@ def prepare_llm_candidates(
             candidates.append(
                 {
                     "doc_id": doc_id,
+                    "doc_name": _doc_name(doc_id),
+                    "lane": _doc_lane(doc_id),
                     "article_no": article_no,
                     "article_title": str(article.get("article_title", "") or "").strip(),
                     "content": str(article.get("content", "") or "").strip(),
@@ -491,21 +543,73 @@ BASE_BRIEF_CAP_WHEN_CATEGORY = 5
 
 def _sort_pool_category_first(pool: list[MatchedRule]) -> list[MatchedRule]:
     """
-    命中池排序：品类专项（C）must/should 在前；有品类时基本规则（A）最多保留 BASE_BRIEF_CAP_WHEN_CATEGORY 条。
+    命中池排序：品类/服务（C/E）must/should 在前；有贴案通道时基本规则（A）最多保留少量补充。
     供 rule_briefs（策略 LLM）与 display_rules 共用。
     """
-    category_must = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST and is_category_doc(r.doc_id)]
-    category_should = [r for r in pool if r.relevance == RULE_RELEVANCE_SHOULD and is_category_doc(r.doc_id)]
-    base_must = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST and not is_category_doc(r.doc_id)]
-    base_should = [r for r in pool if r.relevance == RULE_RELEVANCE_SHOULD and not is_category_doc(r.doc_id)]
-
-    ordered: list[MatchedRule] = list(category_must) + list(category_should)
-    if ordered:
-        base_slice = (base_must + base_should)[:BASE_BRIEF_CAP_WHEN_CATEGORY]
-        ordered.extend(base_slice)
-    else:
-        ordered = base_must + base_should
+    ordered = sorted(
+        pool,
+        key=lambda rule: (_lane_rank(rule.doc_id), _relevance_rank(rule.relevance)),
+    )
+    if any(_is_priority_lane_doc(rule.doc_id) for rule in ordered):
+        priority = [rule for rule in ordered if _is_priority_lane_doc(rule.doc_id)]
+        non_priority = [rule for rule in ordered if not _is_priority_lane_doc(rule.doc_id)]
+        ordered = priority + non_priority[:BASE_BRIEF_CAP_WHEN_CATEGORY]
     return ordered[:MATCH_POOL_CAP]
+
+
+def _ensure_explicit_priority_doc_coverage(
+    *,
+    pool: list[MatchedRule],
+    documents: dict[str, dict[str, Any]],
+    section_map: dict[str, list[str] | None],
+    terms: RuleSearchTerms,
+    category_confidence: float,
+    service_confidence: float,
+) -> tuple[list[MatchedRule], list[str]]:
+    """
+    显式 C/E 通道保底：LLM 选条不得把已锁定的品类/服务规则整份漏掉。
+
+    参数:
+        pool: LLM 已选中的规则池。
+        documents: 本轮已加载的候选规则文档。
+        section_map: Agent1 选中的节。
+        terms: 规则检索词。
+        category_confidence: 品类通道置信度。
+        service_confidence: 服务通道置信度。
+
+    返回:
+        (补齐后的 pool, 新增展示 rule_id 列表)。
+    """
+    existing_doc_ids = {rule.doc_id for rule in pool}
+    supplemented: list[MatchedRule] = []
+    supplemented_ids: list[str] = []
+    for doc_id, doc in documents.items():
+        lane = _doc_lane(doc_id)
+        if lane == "C" and category_confidence < CE_CONFIDENCE_THRESHOLD:
+            continue
+        if lane == "E" and service_confidence < CE_CONFIDENCE_THRESHOLD:
+            continue
+        if lane not in {"C", "E"} or doc_id in existing_doc_ids:
+            continue
+
+        scored: list[MatchedRule] = []
+        for article in _filter_articles_by_sections(doc, section_map.get(doc_id)):
+            rule = _score_article(doc_id, doc, article, terms)
+            if rule is None:
+                continue
+            rule.condition_result = f"{rule.condition_result}；显式{lane}通道补回：LLM未选中已锁定规则文档"
+            scored.append(rule)
+        scored.sort(key=lambda rule: (_relevance_rank(rule.relevance), -len(rule.rule_summary)))
+        if not scored:
+            continue
+        picked = scored[0]
+        supplemented.append(picked)
+        supplemented_ids.append(picked.rule_id)
+
+    if not supplemented:
+        return pool, []
+    merged = _sort_pool_category_first(pool + supplemented)
+    return merged, supplemented_ids
 
 
 def _build_briefs(pool: list[MatchedRule]) -> list[RuleBrief]:
@@ -520,9 +624,167 @@ def _build_briefs(pool: list[MatchedRule]) -> list[RuleBrief]:
                 brief=rule.rule_summary[:RULE_BRIEF_MAX_LEN],
                 relevance=rule.relevance,
                 stance_hint=rule.stance_hint,
+                strategy_constraints=list(rule.strategy_constraints or []),
             )
         )
     return briefs
+
+
+def _facts_rule_context(facts: FactOutput) -> dict[str, Any]:
+    """读取 Agent1 attributes.rule_context 中的规则判定上下文。"""
+    attrs = facts.attributes if isinstance(facts.attributes, dict) else {}
+    context = attrs.get("rule_context")
+    return context if isinstance(context, dict) else {}
+
+
+def _coerce_float(value: Any) -> float | None:
+    """安全转换浮点数；失败返回 None。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_ratio(value: float) -> str:
+    """将 0~1 比例转成中文百分比文本。"""
+    if 0 <= value <= 1:
+        return f"{value * 100:.0f}%"
+    return f"{value:.0f}%"
+
+
+def _append_constraint(
+    constraints: list[RuleConstraint],
+    *,
+    constraint_type: str,
+    text: str,
+    status: str,
+    source_rule_id: str,
+    confidence: float = 0.8,
+) -> None:
+    """去重追加结构化规则约束。"""
+    normalized = text.strip()
+    if not normalized:
+        return
+    key = (constraint_type, status, normalized, source_rule_id)
+    existing = {
+        (item.constraint_type, item.status, item.text, item.source_rule_id)
+        for item in constraints
+    }
+    if key in existing:
+        return
+    constraints.append(
+        RuleConstraint(
+            constraint_type=constraint_type,
+            text=normalized,
+            status=status,
+            source_rule_id=source_rule_id,
+            confidence=confidence,
+        )
+    )
+
+
+def _extract_rule_threshold_hours(text: str) -> int | None:
+    """从规则文本中提取「签收/服务申请」相关小时阈值。"""
+    patterns = (
+        r"签收[^。；，,]{0,24}?(\d{1,3})\s*小时内",
+        r"签收商品之时起\s*(\d{1,3})\s*小时内",
+        r"收到商品[^。；，,]{0,24}?(\d{1,3})\s*小时内",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[RuleConstraint]:
+    """
+    从匹配规则与事实上下文生成可执行约束，供策略层优先消费。
+    """
+    constraints: list[RuleConstraint] = []
+    context = _facts_rule_context(facts)
+    time_since_delivery = _coerce_float(context.get("time_since_delivery_hours"))
+    ratio_cap = _coerce_float(context.get("compensation_ratio_cap"))
+    policy_limits = context.get("policy_limits")
+    if ratio_cap is None and isinstance(policy_limits, dict):
+        ratio_cap = _coerce_float(policy_limits.get("compensation_ratio_cap"))
+
+    for rule in pool:
+        source_rule_id = rule.rule_id
+        for text in rule.strategy_constraints or []:
+            _append_constraint(
+                constraints,
+                constraint_type=_infer_constraint_type_from_text(text),
+                text=text,
+                status=RULE_CONSTRAINT_APPLIES,
+                source_rule_id=source_rule_id,
+                confidence=0.85,
+            )
+
+        rule_text = " ".join(
+            str(item)
+            for item in [
+                rule.rule_summary,
+                rule.condition_result,
+                " ".join(rule.matched_conditions or []),
+                " ".join(rule.violated_or_missing_conditions or []),
+            ]
+            if item
+        )
+        if time_since_delivery is not None:
+            threshold = _extract_rule_threshold_hours(rule_text)
+            if threshold is not None:
+                if time_since_delivery >= threshold:
+                    status = RULE_CONSTRAINT_VIOLATED if time_since_delivery > threshold else RULE_CONSTRAINT_MISSING_FACT
+                    text = (
+                        f"本案售后发生在签收后约{time_since_delivery:g}小时，需先核验并说明是否超过规则要求的{threshold}小时内申请/举证时效"
+                    )
+                else:
+                    status = RULE_CONSTRAINT_APPLIES
+                    text = f"本案仍在签收后{threshold}小时规则时效内，后续处理仍需按举证和比例规则执行"
+                _append_constraint(
+                    constraints,
+                    constraint_type=RULE_CONSTRAINT_TIMING,
+                    text=text,
+                    status=status,
+                    source_rule_id=source_rule_id,
+                    confidence=0.9,
+                )
+        if "举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text:
+            _append_constraint(
+                constraints,
+                constraint_type=RULE_CONSTRAINT_EVIDENCE,
+                text="处理退款或补偿前，应先核验买家举证是否满足规则要求，并固定商品照片、视频、快递单和聊天记录",
+                status=RULE_CONSTRAINT_APPLIES,
+                source_rule_id=source_rule_id,
+                confidence=0.8,
+            )
+
+    if ratio_cap is not None:
+        _append_constraint(
+            constraints,
+            constraint_type=RULE_CONSTRAINT_RATIO_LIMIT,
+            text=f"补偿或让步金额不得超过本单金额的{_format_ratio(ratio_cap)}，超出需人工确认",
+            status=RULE_CONSTRAINT_APPLIES,
+            source_rule_id="policy_limits",
+            confidence=1.0,
+        )
+    return constraints
+
+
+def _infer_constraint_type_from_text(text: str) -> str:
+    """按关键词归类 LLM 或本地提取出的策略约束。"""
+    if any(keyword in text for keyword in ("小时", "时效", "期限", "签收")):
+        return RULE_CONSTRAINT_TIMING
+    if any(keyword in text for keyword in ("举证", "凭证", "照片", "视频", "核验")):
+        return RULE_CONSTRAINT_EVIDENCE
+    if any(keyword in text for keyword in ("比例", "上限", "%", "百分之", "金额")):
+        return RULE_CONSTRAINT_RATIO_LIMIT
+    if any(keyword in text for keyword in ("不承诺", "不得", "禁止")):
+        return RULE_CONSTRAINT_NO_PROMISE
+    if any(keyword in text for keyword in ("流程", "验收", "协商", "申请")):
+        return RULE_CONSTRAINT_PROCESS
+    return RULE_CONSTRAINT_OTHER
 
 
 def _resolve_display_rules(
@@ -540,7 +802,7 @@ def _resolve_display_rules(
             return []
         id_order = {rid: index for index, rid in enumerate(llm_display_ids)}
         picked = [rule for rule in pool if rule.rule_id in id_order]
-        picked.sort(key=lambda rule: id_order.get(rule.rule_id, 999))
+        picked.sort(key=lambda rule: (_lane_rank(rule.doc_id), id_order.get(rule.rule_id, 999)))
         logger.info("%s 展示规则使用条文匹配 LLM display_rule_ids count=%s", LOG_PREFIX, len(picked))
         return picked
 
@@ -549,7 +811,7 @@ def _resolve_display_rules(
 
 def _pick_display_rules(pool: list[MatchedRule]) -> list[MatchedRule]:
     """
-    字面降级展示：优先 case 争点命中条，其次品类 must；不强制凑满条数。
+    字面降级展示：优先 case 争点命中条，其次品类/服务 must；不强制凑满条数。
     """
     if not pool:
         return []
@@ -560,11 +822,13 @@ def _pick_display_rules(pool: list[MatchedRule]) -> list[MatchedRule]:
         if "case:" in r.condition_result and r.relevance in (RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD)
     ]
     if case_hit:
-        return _dedupe_rules(case_hit)
+        return _dedupe_rules(sorted(case_hit, key=lambda rule: _lane_rank(rule.doc_id)))
 
-    category_must = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST and is_category_doc(r.doc_id)]
-    if category_must:
-        return _dedupe_rules(category_must)
+    priority_must = [
+        r for r in pool if r.relevance == RULE_RELEVANCE_MUST and _is_priority_lane_doc(r.doc_id)
+    ]
+    if priority_must:
+        return _dedupe_rules(priority_must)
 
     must_rules = [r for r in pool if r.relevance == RULE_RELEVANCE_MUST]
     if must_rules:

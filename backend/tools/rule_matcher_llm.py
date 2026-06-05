@@ -78,7 +78,7 @@ def _build_dispute_context(facts: FactOutput) -> str:
     if facts.issue_summary:
         parts.append(f"诉求摘要：{facts.issue_summary}")
     if facts.defect_type:
-        parts.append(f"瑕疵类型：{facts.defect_type}")
+        parts.append(f"瑕疵/问题类型：{facts.defect_type}")
     if facts.intent_tags:
         parts.append(f"诉求标签：{', '.join(facts.intent_tags)}")
     if facts.goods_received is not None:
@@ -93,6 +93,10 @@ def _build_dispute_context(facts: FactOutput) -> str:
         parts.append(f"疑点：{'、'.join(str(x) for x in facts.red_flags[:4])}")
     if facts.visual_observations:
         parts.append(f"视觉观察：{'、'.join(str(x) for x in facts.visual_observations[:3])}")
+    if isinstance(facts.attributes, dict):
+        rule_context = facts.attributes.get("rule_context")
+        if isinstance(rule_context, dict) and rule_context:
+            parts.append(f"规则判定上下文：{json.dumps(rule_context, ensure_ascii=False)}")
     return "\n".join(parts) if parts else "（案情信息有限）"
 
 
@@ -104,21 +108,34 @@ def _build_article_match_system_prompt() -> str:
         "你是淘宝平台规则匹配专家。任务：在给定候选条文中，选出与当前纠纷事实、诉求直接相关的条款。\n"
         "要求：\n"
         "1) 只输出 JSON，不要解释性段落；\n"
-        "2) matched_articles 仅包含 candidate_index（整数，从 0 起）与 relevance（must/should）；"
+        "2) matched_articles 至少包含 candidate_index（整数，从 0 起）与 relevance（must/should）；"
         "禁止输出候选集外的条号；无贴合条文时输出空数组；\n"
+        "每个命中项还应输出 applicability(applies/violated/missing_fact/conflict)、matched_conditions、"
+        "violated_or_missing_conditions、strategy_constraints；这些字段必须来自候选条文与案情，不得编造规则。\n"
         "3) 买家口语与规则用语不等价时，按规则语义判断（如破洞/撕裂/勾丝可适用「破损/质量问题」条）；"
         "争点未涉及的条文类型一律排除（如划痕/花屏案不选参数不符、改装条）；\n"
         "4) matched_articles 条数由案情决定，禁止为凑数纳入无关条；"
-        "品类专项与基本规则可同时命中，但每条须有明确争点关联；\n"
+        "品类专项(C)与服务保障(E)是贴案优先通道：若候选中存在与当前品类或服务标直接对应的 C/E 条文，"
+        "应先判断并输出这些条文；基本规则(A)仅作为程序性或举证责任补充；\n"
         "5) reason 用中文一句话说明为何适用（≤40字）；\n"
         "6) display_rule_ids 必填：从 matched_articles 的 rule_id 中挑出与本案争点直接相关的子集供前端展示，"
-        "可为 0 条（无贴合）或多条（均相关）；"
-        "排除泛化程序条（如举证责任分配原则、运费风险归属），除非案情明确涉及。\n"
+        "可为 0 条（无贴合）或多条（均相关）；展示顺序应优先 C/E，再展示 A 或其它通用条；"
+        "排除泛化程序条（如举证责任分配原则、运费风险归属），除非案情明确涉及；"
+        "若案情为七天无理由/无理由退货，退货运费、验收失败后的寄回风险与商品完好标准同属直接相关争点；"
+        "若候选已锁定某一品类 doc（lane=C），display_rule_ids 不得从其它品类 doc 选条。\n"
         "示例1（服饰破损）：候选含服饰「破损/质量问题」条 + 基本规则「初步凭证」条 → 两条均输出，品类 must、基本 should；"
         "display_rule_ids 取品类质量条 + 初步凭证条。\n"
         "示例2（手机划痕）：候选含手机「商品质量问题」「参数不符」「改装」条 + 基本规则条 → "
         "matched_articles 仅输出质量问题条 must；display_rule_ids 仅含该质量问题 rule_id，"
-        "参数/改装/基本规则均不输出。"
+        "参数/改装/基本规则均不输出。\n"
+        "示例3（生鲜腐烂+坏单包退）：案情为签收后水果发霉腐烂、主张服务标退款 → "
+        "必须选生鲜腐烂/举证时效条与服务标腐烂比例条（C/E）；"
+        "禁止选食品规范中「重量/产地/保质期/标签描述不符」类条文；"
+        "display_rule_ids 仅含腐烂/服务标相关 rule_id，不得含描述不符专节。\n"
+        "示例4（宠物死亡+伤亡大病包退）：案情为小狗死亡要求退款 → "
+        "必须选宠物规范死亡/伤残举证条与服务标相关条；"
+        "禁止选生鲜腐烂/食品描述不符条；"
+        "display_rule_ids 不得含 fresh/food 品类 doc 的 rule_id。"
     )
 
 
@@ -144,14 +161,19 @@ def _build_article_match_user_prompt(
         content = item.get("content", "")
         excerpt = content[:LLM_ARTICLE_EXCERPT_MAX] + ("…" if len(content) > LLM_ARTICLE_EXCERPT_MAX else "")
         rule_id = f"{item.get('doc_id')}::{item.get('article_no')}"
+        lane = item.get("lane", "")
+        doc_name = item.get("doc_name", "")
         lines.append(
-            f"- index={index} rule_id={rule_id} title={title} excerpt={excerpt}"
+            f"- index={index} lane={lane} doc={doc_name} rule_id={rule_id} "
+            f"title={title} excerpt={excerpt}"
         )
     lines.extend(
         [
             "",
             "输出 JSON：",
-            '{"matched_articles":[{"candidate_index":0,"relevance":"must","reason":"..."}],'
+            '{"matched_articles":[{"candidate_index":0,"relevance":"must","applicability":"applies",'
+            '"matched_conditions":["..."],"violated_or_missing_conditions":["..."],'
+            '"strategy_constraints":["..."],"reason":"..."}],'
             '"display_rule_ids":["doc_id::article_no"]}',
         ]
     )
@@ -189,6 +211,23 @@ def _normalize_relevance(raw: Any) -> str:
     if value == RULE_RELEVANCE_WEAK:
         return RULE_RELEVANCE_SHOULD
     return RULE_RELEVANCE_SHOULD
+
+
+def _as_short_text_list(raw: Any, *, limit: int = 5, item_max_len: int = 160) -> list[str]:
+    """
+    将 LLM 输出的列表字段规范为短文本列表。
+    """
+    if not isinstance(raw, list):
+        return []
+    result: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        result.append(text[:item_max_len])
+        if len(result) >= limit:
+            break
+    return result
 
 
 def llm_match_articles(
@@ -256,7 +295,18 @@ def llm_match_articles(
         summary = _format_merchant_rule_text(candidate)
         section_key = _resolve_section_key(doc_id, article_no)
         stance = _infer_stance(content)
-        condition = f"LLM判定：{reason or '适用当前案情'}；分级：{relevance}"
+        applicability = str(item.get("applicability") or "").strip()
+        matched_conditions = _as_short_text_list(item.get("matched_conditions"))
+        missing_conditions = _as_short_text_list(item.get("violated_or_missing_conditions"))
+        strategy_constraints = _as_short_text_list(item.get("strategy_constraints"))
+        condition_parts = [f"LLM判定：{reason or '适用当前案情'}", f"分级：{relevance}"]
+        if applicability:
+            condition_parts.append(f"适用状态：{applicability}")
+        if matched_conditions:
+            condition_parts.append("满足条件：" + "；".join(matched_conditions[:3]))
+        if missing_conditions:
+            condition_parts.append("未满足/待核验：" + "；".join(missing_conditions[:3]))
+        condition = "；".join(condition_parts)
         matched_rules.append(
             MatchedRule(
                 rule_id=f"{doc_id}::{article_no}",
@@ -267,6 +317,9 @@ def llm_match_articles(
                 section_key=section_key,
                 article_no=article_no,
                 stance_hint=stance,
+                matched_conditions=matched_conditions,
+                violated_or_missing_conditions=missing_conditions,
+                strategy_constraints=strategy_constraints,
             )
         )
 

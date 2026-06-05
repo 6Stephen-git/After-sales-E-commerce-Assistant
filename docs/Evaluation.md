@@ -26,3 +26,65 @@
 ## 前端验收
 - 辅助模式：聊天窗口与侧边栏布局正确，按钮触发分析，话术可填充至输入框。
 - 模式切换：设置页可切换模式
+
+## LLM 情景评测（主路径）
+
+流程：**情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM**。
+
+### 1. 写情景
+
+复制 `tests/scenarios/scenario_template.md` 到 `tests/scenarios/case/<名称>.md`，按 **6 段 + 其他说明** 填写。
+
+| 段落 | 写什么 |
+|------|--------|
+| 背景 | 品类、金额、签收、服务标（lexicon 短名） |
+| 买家 | 表格 +「特殊说明」；`return_rate` / `refund_only_rate` 分开 |
+| 争议 | 买家诉求 + 关键聊天 |
+| 事实证据 | 同 case2 bullet → `evidence_facts`（不传 URL） |
+| 参考 | 判例或「无」 |
+| 期望与禁忌 | 期望策略 + **禁止**逐条 |
+| 其他说明 | 老客价值/赔偿/恶意规则自然语言 → `test_overrides` 数字键 |
+
+### 2. 生成用例并跑链路
+
+```bash
+python tests/scenario_gen.py --input tests/scenarios/case/case3.md --run -v
+```
+
+产出（均在 `tests/output/`，已 gitignore）：
+
+| 路径 | 内容 |
+|------|------|
+| `tests/output/scenarios/<slug>/` | `REVIEW.md`、`spec.json`、`fixture.json` |
+| `tests/output/manual_reports/` | `SCENARIO-001.md` / `.json`（全链路报告） |
+
+生成后核对 `fixture.json` 中 `platform_service_tags`、`product_category_slug`。仅重跑链路：
+
+```bash
+python tests/scenario_gen.py --spec tests/output/scenarios/<slug>/spec.json --run -v
+```
+
+### 3. Judge 评测
+
+```bash
+python tests/judge_cases.py \
+  --scenario-output tests/output/scenarios/<slug> \
+  --report tests/output/manual_reports/SCENARIO-001.json \
+  -v
+```
+
+产出：`tests/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
+
+### 评测相关代码（保留）
+
+| 路径 | 作用 |
+|------|------|
+| `tests/scenarios/` | 情景 Markdown（`scenario_template.md`、`case/*.md`） |
+| `tests/scenario_gen.py` | 情景 → spec/fixture → 调跑批 |
+| `tests/spec_to_fixture.py` | spec → fixture（无 LLM） |
+| `tests/scenario_spec.py` / `scenario_llm_utils.py` | spec 结构与 LLM 调用 |
+| `tests/run_manual_cases.py` | 跑批引擎（读 fixture.json） |
+| `tests/judge_cases.py` / `judge_models.py` | Judge 跑批 |
+| `tests/prompts/` | `scenario_gen_system.md`、`judge_system.md`、JSON Schema |
+
+单元测试：`test_spec_to_fixture.py`、`test_scenario_llm_json.py`、`test_run_manual_cases.py`、`test_judge_cases.py` 覆盖上述链路；Agent/Controller 单测仍在 `tests/test_agent*.py` 等，与情景评测并行。

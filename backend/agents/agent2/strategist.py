@@ -13,9 +13,25 @@ import re
 import time
 
 from schemas import (
+    ACTION_DEFEND_PREPARE,
+    ACTION_EVIDENCE_REQUEST,
+    ACTION_MERCHANT_REMEDY,
+    ACTION_MONETARY_SETTLE,
+    ACTION_RETURN_INSPECTION,
+    ACTION_RULE_EXPLAIN,
+    COMPENSATION_POLICY_EXPLICIT_AMOUNT,
+    COMPENSATION_POLICY_FORBID,
+    COMPENSATION_POLICY_NONE,
+    COMPENSATION_POLICY_SOFT_NO_AMOUNT,
     DialogueContext,
     MaliciousDetectionOutput,
     CustomerValueOutput,
+    RULE_CONSTRAINT_APPLIES,
+    RULE_CONSTRAINT_EVIDENCE,
+    RULE_CONSTRAINT_MISSING_FACT,
+    RULE_CONSTRAINT_RATIO_LIMIT,
+    RULE_CONSTRAINT_TIMING,
+    RULE_CONSTRAINT_VIOLATED,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
@@ -54,7 +70,12 @@ def _polish_merchant_facing_text(text: str) -> str:
 
 
 def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
-    """从条文匹配 display_rules 提取与争点贴合的规则要点；无贴合时不回退 brief 凑数。"""
+    """
+    平台规则依据：仅展示条文匹配结果中的法条摘要（matched_rules.rule_summary）。
+
+    不写入 rule_constraints（举证模板、LLM strategy_constraints 短句等执行约束），避免与法条混排。
+    无命中展示条时返回空列表，不回退 brief 或策略 LLM 自造要点。
+    """
     lines: List[str] = []
     seen: set[str] = set()
     for rule in input_data.matched_rules or []:
@@ -63,6 +84,125 @@ def _build_platform_rule_basis(input_data: StrategyInput) -> List[str]:
             seen.add(text)
             lines.append(text)
     return lines
+
+
+def _build_rule_constraints(input_data: StrategyInput) -> List[str]:
+    """
+    将命中的规则摘要提炼为 Agent3 必须遵守的边界。
+
+    这里不生成固定话术，只把已命中的规则要点作为约束传下去。
+    """
+    constraints: List[str] = []
+    seen: set[str] = set()
+    for item in input_data.rule_constraints or []:
+        text = _polish_merchant_facing_text(str(item.text or "").strip())
+        if text and text not in seen:
+            seen.add(text)
+            constraints.append(text)
+    source_items = list(input_data.rule_briefs or []) + list(input_data.matched_rules or [])
+    for item in source_items:
+        raw = str(getattr(item, "brief", "") or getattr(item, "rule_summary", "") or "").strip()
+        text = _polish_merchant_facing_text(raw)
+        if text and text not in seen:
+            seen.add(text)
+            constraints.append(text)
+        for rule_text in getattr(item, "strategy_constraints", []) or []:
+            polished = _polish_merchant_facing_text(str(rule_text or "").strip())
+            if polished and polished not in seen:
+                seen.add(polished)
+                constraints.append(polished)
+    for text in _derive_return_rule_risk_constraints(input_data, constraints):
+        if text and text not in seen:
+            seen.add(text)
+            constraints.append(text)
+    return constraints
+
+
+def _has_structured_constraint(
+    input_data: StrategyInput,
+    *,
+    constraint_type: str | None = None,
+    statuses: set[str] | None = None,
+) -> bool:
+    """判断是否存在指定类型/状态的结构化规则约束。"""
+    for item in input_data.rule_constraints or []:
+        if constraint_type and item.constraint_type != constraint_type:
+            continue
+        if statuses and item.status not in statuses:
+            continue
+        return True
+    return False
+
+
+def _structured_constraint_texts(
+    input_data: StrategyInput,
+    *,
+    constraint_type: str | None = None,
+    statuses: set[str] | None = None,
+    limit: int = 3,
+) -> List[str]:
+    """提取结构化约束文本，供 next_step 与 prompt 使用。"""
+    texts: List[str] = []
+    for item in input_data.rule_constraints or []:
+        if constraint_type and item.constraint_type != constraint_type:
+            continue
+        if statuses and item.status not in statuses:
+            continue
+        text = _polish_merchant_facing_text(str(item.text or "").strip())
+        if text and text not in texts:
+            texts.append(text)
+        if len(texts) >= limit:
+            break
+    return texts
+
+
+def _primary_timing_constraint_text(input_data: StrategyInput) -> str:
+    """优先取已违反的时效约束，其次取待核验约束，避免策略动作重复罗列多个时效。"""
+    violated = _structured_constraint_texts(
+        input_data,
+        constraint_type=RULE_CONSTRAINT_TIMING,
+        statuses={RULE_CONSTRAINT_VIOLATED},
+        limit=1,
+    )
+    if violated:
+        return violated[0]
+    missing = _structured_constraint_texts(
+        input_data,
+        constraint_type=RULE_CONSTRAINT_TIMING,
+        statuses={RULE_CONSTRAINT_MISSING_FACT},
+        limit=1,
+    )
+    return missing[0] if missing else ""
+
+
+def _derive_return_rule_risk_constraints(input_data: StrategyInput, base_constraints: List[str]) -> List[str]:
+    """
+    从七天无理由/完好争议中提炼风险边界。
+
+    规则库常只命中「商品应当完好」这种上位表述，这里将其转成可执行
+    的话术约束：验收、二次销售、使用痕迹、退款和运费风险。
+    """
+    facts = input_data.facts
+    corpus = " ".join(
+        str(item)
+        for item in [
+            facts.issue_summary or "",
+            " ".join(facts.intent_tags or []),
+            " ".join(input_data.chat_history or []),
+            " ".join(turn.content for turn in (input_data.chat_turns or [])),
+            " ".join(base_constraints),
+        ]
+        if item
+    )
+    has_no_reason_return = _text_has_any(corpus, ("七天无理由", "7天无理由", "无理由退货"))
+    has_intact_dispute = _text_has_any(corpus, ("完好", "不影响二次销售", "二次销售", "试穿", "使用痕迹", "验收"))
+    if not (has_no_reason_return and has_intact_dispute):
+        return []
+    return [
+        "七天无理由退货成立前提是商品完好且不影响二次销售，商家收到退货后需严格验收",
+        "如退回商品存在使用痕迹、污损异味、吊牌包装异常或其他影响二次销售情形，可按规则不予退款",
+        "七天无理由退货的退回运费，以及验收不通过后可能产生的寄回运费和商品风险，应提前向买家说明并按平台规则或订单约定承担",
+    ]
 
 
 def _analyze_rule_stance(input_data: StrategyInput) -> tuple[List[str], str, int]:
@@ -119,10 +259,24 @@ def _value_risks_from_result(customer_value: CustomerValueOutput) -> List[str]:
     """
     layer_risks: List[str] = []
     if customer_value.channel == "long_term":
-        layer_risks.append("[客户价值层] 触发长期优待通道，优先协商维护关系")
+        layer_risks.append("[客户价值层] 触发长期优待通道，可在规则内兼顾关系维护，但不得跳过事实核验")
     elif customer_value.channel == "order":
-        layer_risks.append("[客户价值层] 触发本单重点处理，建议快速协商收敛纠纷")
+        layer_risks.append("[客户价值层] 触发本单重点处理，需快速响应并优先核实事实、控制损失")
     return layer_risks
+
+
+def _has_defect_claim(defect_type: str | None) -> bool:
+    """
+    判断事实层是否真的声明了质量/瑕疵问题。
+
+    Agent1/测试用例会用「无」「暂无」「无质量问题」等自然语言表示
+    没有瑕疵；这些都不应触发质量瑕疵补证阶段。
+    """
+    normalized = str(defect_type or "").strip()
+    if not normalized:
+        return False
+    negative_values = {"无", "暂无", "无瑕疵", "无质量问题", "无明显瑕疵", "没有瑕疵"}
+    return normalized not in negative_values
 
 
 def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
@@ -165,7 +319,7 @@ def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
 
     summary = (facts.issue_summary or "") + " " + " ".join(str(t) for t in (facts.intent_tags or []))
     has_settlement_demand = any(keyword in summary for keyword in ("退款", "赔偿", "赔付", "退换", "仅退"))
-    defect_claimed = bool(facts.defect_type and facts.defect_type != "无瑕疵") or any(
+    defect_claimed = _has_defect_claim(facts.defect_type) or any(
         keyword in summary for keyword in ("质量", "瑕疵", "破损", "划痕", "损坏", "故障")
     )
     evidence_quality = (facts.evidence_quality or "").strip().lower()
@@ -200,6 +354,138 @@ def _infer_strategy_stage(
     if disposition == DISPOSITION_DEFEND:
         return "defend_platform"
     return "negotiate_settle"
+
+
+def _text_has_any(text: str, keywords: tuple[str, ...]) -> bool:
+    """简单语义锚点判断，仅用于跨品类动作分流。"""
+    return any(keyword in text for keyword in keywords)
+
+
+def _compose_evidence_first_next_step(input_data: StrategyInput) -> str:
+    """
+    生成举证优先阶段的下一步。
+
+    该文案只围绕事实疑点和缺证推进，不预设最终退款、补偿或拒赔结论。
+    """
+    facts = input_data.facts
+    red_flags = [str(item).strip() for item in (facts.red_flags or []) if str(item).strip()]
+    missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
+    parts: list[str] = []
+    if red_flags:
+        parts.append(f"先围绕“{red_flags[0]}”核验关键事实")
+    else:
+        parts.append("先把当前关键事实核验清楚")
+    if missing:
+        parts.append(f"请买家补充{ '、'.join(missing[:3]) }")
+    else:
+        parts.append("请买家补充可核实责任归属的材料")
+    parts.append("商家同步固定发货、聊天和已有举证记录，事实闭环后再判断是否退款、补偿或抗辩")
+    return "，".join(parts)
+
+
+def _infer_action_contract(
+    input_data: StrategyInput,
+    *,
+    disposition: str,
+    strategy_stage: str,
+    rule_stance: str,
+    merchant_fault_signal: bool,
+    rule_constraints: List[str],
+    malicious_result: MaliciousDetectionOutput,
+) -> dict[str, Any]:
+    """
+    将粗粒度处置方向细化为 Agent3 可执行的当前动作契约。
+    """
+    facts = input_data.facts
+    context_text = " ".join(
+        str(item)
+        for item in [
+            facts.issue_summary or "",
+            " ".join(facts.intent_tags or []),
+            " ".join(rule_constraints),
+            " ".join(input_data.chat_history or []),
+            " ".join(turn.content for turn in (input_data.chat_turns or [])),
+        ]
+        if item
+    )
+
+    timing_not_satisfied = _has_structured_constraint(
+        input_data,
+        constraint_type=RULE_CONSTRAINT_TIMING,
+        statuses={RULE_CONSTRAINT_VIOLATED, RULE_CONSTRAINT_MISSING_FACT},
+    )
+    evidence_constraint = _has_structured_constraint(
+        input_data,
+        constraint_type=RULE_CONSTRAINT_EVIDENCE,
+        statuses={RULE_CONSTRAINT_APPLIES, RULE_CONSTRAINT_MISSING_FACT},
+    )
+    ratio_limit_texts = _structured_constraint_texts(
+        input_data,
+        constraint_type=RULE_CONSTRAINT_RATIO_LIMIT,
+        statuses={RULE_CONSTRAINT_APPLIES},
+        limit=2,
+    )
+
+    if timing_not_satisfied:
+        action_type = ACTION_RULE_EXPLAIN
+        compensation_policy = COMPENSATION_POLICY_NONE
+        timing_text = _primary_timing_constraint_text(input_data)
+        next_step = timing_text or "先向买家说明规则时效与处理边界，再核验保存方式和举证材料"
+    elif strategy_stage == STRATEGY_STAGE_EVIDENCE_FIRST:
+        action_type = ACTION_EVIDENCE_REQUEST
+        compensation_policy = COMPENSATION_POLICY_FORBID
+        next_step = _compose_evidence_first_next_step(input_data)
+    elif disposition == DISPOSITION_COMPENSATE and merchant_fault_signal:
+        action_type = ACTION_MERCHANT_REMEDY
+        compensation_policy = COMPENSATION_POLICY_EXPLICIT_AMOUNT
+        next_step = "商家给出明确的退款、退货、换货、补发或补偿处理方案，并请买家确认"
+    elif disposition == DISPOSITION_DEFEND or (malicious_result.risk_level or "").lower() == "high":
+        action_type = ACTION_DEFEND_PREPARE
+        compensation_policy = COMPENSATION_POLICY_NONE
+        next_step = "按规则说明当前不满足直接退款或补偿条件，并整理聊天、订单、物流和举证材料以备平台介入"
+    elif rule_constraints and (
+        rule_stance in {"neutral", "merchant"}
+        or _text_has_any(context_text, ("规则", "七天无理由", "退货", "完好", "验收", "运费", "时效", "不影响二次销售"))
+        or evidence_constraint
+    ):
+        if _text_has_any(context_text, ("退货", "寄回", "验收")):
+            action_type = ACTION_RULE_EXPLAIN
+            if _text_has_any(context_text, ("七天无理由", "完好", "二次销售", "使用痕迹", "运费")):
+                next_step = "引导买家按退货流程寄回，商家收到后严格验收，并提前告知验收不通过和运费风险"
+            else:
+                next_step = "引导买家按退货流程寄回，商家收到后按规则验收并根据结果处理"
+        else:
+            action_type = ACTION_RULE_EXPLAIN
+            next_step = "先向买家说明规则边界和处理流程，再根据买家反馈进入补证、验收或协商"
+        compensation_policy = COMPENSATION_POLICY_NONE
+    elif disposition == DISPOSITION_NEGOTIATE:
+        action_type = ACTION_MONETARY_SETTLE
+        compensation_policy = COMPENSATION_POLICY_EXPLICIT_AMOUNT
+        next_step = "在规则允许范围内给出明确金额或具体方案，并征求买家是否接受"
+    else:
+        action_type = ACTION_RETURN_INSPECTION
+        compensation_policy = COMPENSATION_POLICY_SOFT_NO_AMOUNT
+        next_step = "按退回验收流程推进，结果确认前不承诺最终退款或补偿"
+
+    resolved_constraints = list(rule_constraints)
+    for ratio_text in ratio_limit_texts:
+        if ratio_text not in resolved_constraints:
+            resolved_constraints.append(ratio_text)
+    if action_type in {ACTION_RULE_EXPLAIN, ACTION_RETURN_INSPECTION}:
+        no_promise = "未达到规则前提或完成验收前，不承诺退款或补偿"
+        if no_promise not in resolved_constraints:
+            resolved_constraints.append(no_promise)
+    if action_type == ACTION_EVIDENCE_REQUEST:
+        no_promise = "举证未闭环前，不承诺退款、补偿、优惠券或换新"
+        if no_promise not in resolved_constraints:
+            resolved_constraints.append(no_promise)
+
+    return {
+        "action_type": action_type,
+        "compensation_policy": compensation_policy,
+        "rule_constraints": resolved_constraints,
+        "next_step": next_step,
+    }
 
 
 def _determine_disposition(
@@ -460,6 +746,27 @@ def _compose_strategy_direction_summary(*, disposition: str, input_data: Strateg
     return "给出一条双方可接受的协商口径（如部分退款或换货），并明确需买家确认或补证后再执行。"
 
 
+def _compose_action_direction_summary(action_contract: dict[str, Any], fallback: str) -> str:
+    """
+    用动作契约修正兜底策略方向，避免 rule_explain 被泛化成金额协商。
+    """
+    action_type = str(action_contract.get("action_type") or "").strip()
+    next_step = str(action_contract.get("next_step") or "").strip()
+    if action_type == ACTION_RULE_EXPLAIN:
+        return next_step or "先向买家说明规则前提和处理流程，后续按买家反馈进入补证、验收或协商。"
+    if action_type == ACTION_RETURN_INSPECTION:
+        return next_step or "先按退回验收流程推进，确认结果前不承诺最终退款或补偿。"
+    if action_type == ACTION_EVIDENCE_REQUEST:
+        return next_step or "先要求买家补证并补齐关键举证，材料闭环前不承诺退款或补偿。"
+    if action_type == ACTION_DEFEND_PREPARE:
+        return next_step or "按规则说明当前不支持直接退款或补偿，同步整理证据准备平台介入。"
+    if action_type == ACTION_MERCHANT_REMEDY:
+        return next_step or "商责已基本明确，给出一条可执行的善后处理方案并请买家确认。"
+    if action_type == ACTION_MONETARY_SETTLE:
+        return fallback
+    return fallback
+
+
 
 def _compose_strategy_direction_rationale(
     *,
@@ -575,7 +882,12 @@ def _build_strategy_json_system_prompt() -> str:
         '    "fallback_script": "话术 LLM 失败时的 1~3 句备用话术"\n'
         "  }\n"
         "}\n"
+        "系统会在输入中提供 action_type、compensation_policy、rule_constraints、next_step；"
+        "structured_rule_constraints 是已校验的规则条件约束，优先级高于 rule_briefs 摘要；"
+        "你的策略说明必须与这些动作契约一致，不得把 rule_explain / return_inspection / evidence_request 写成金额和解。"
+        "strategy_direction_summary 只能写面向商家的当前处理方向，禁止粘贴 rule_constraints 或平台规则全文。"
         "若 strategy_stage=evidence_first：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
+        "若 compensation_policy=none/forbid/soft_no_amount：不得建议报具体补偿金额。"
         "若 dialogue_context.blocked_evidence_requests 非空：不得再要求其中任何一项。"
         "若 recent_turns 非空：须承接对话，禁止重复商家已提且买家已拒的举证要求。"
         "禁止罗列多套备选方案。"
@@ -694,6 +1006,7 @@ def _build_strategy_rule_briefs_payload(input_data: StrategyInput) -> list[dict[
                 "brief": item.brief,
                 "relevance": item.relevance,
                 "stance_hint": item.stance_hint,
+                "strategy_constraints": list(item.strategy_constraints or []),
             }
         )
     return briefs
@@ -704,6 +1017,9 @@ def _build_strategy_prompt_payload(
     disposition: str,
     strategy_stage: str,
     compensation_policy: str,
+    action_type: str = "",
+    rule_constraints: List[str] | None = None,
+    next_step: str = "",
     evidence_incomplete: bool,
     merchant_fault_signal: bool,
     input_data: StrategyInput,
@@ -716,7 +1032,13 @@ def _build_strategy_prompt_payload(
     payload: dict[str, Any] = {
         "disposition": disposition,
         "strategy_stage": strategy_stage,
+        "action_type": action_type,
         "compensation_policy": compensation_policy,
+        "rule_constraints": list(rule_constraints or []),
+        "structured_rule_constraints": [
+            item.model_dump() for item in (input_data.rule_constraints or [])
+        ],
+        "next_step": next_step,
         "evidence_incomplete": evidence_incomplete,
         "merchant_fault_clear": merchant_fault_signal,
         "facts": _build_strategy_facts_summary(input_data),
@@ -741,6 +1063,7 @@ def _llm_generate_strategy(
     risk_factors: List[str],
     estimated_win_rate: float | None,
     strategy_stage: str,
+    action_contract: dict[str, Any],
     malicious_result: MaliciousDetectionOutput,
     customer_value: CustomerValueOutput,
     merchant_fault_signal: bool,
@@ -750,11 +1073,13 @@ def _llm_generate_strategy(
     """
     输出结构化策略 JSON（固定使用 AGENT2_LLM_MODEL_STRATEGY）。
     """
-    compensation_policy = "forbid" if (input_data.facts.missing_evidence or []) else "negotiate_soft"
     prompt_payload = _build_strategy_prompt_payload(
         disposition=disposition,
         strategy_stage=strategy_stage,
-        compensation_policy=compensation_policy,
+        action_type=str(action_contract.get("action_type") or ""),
+        compensation_policy=str(action_contract.get("compensation_policy") or ""),
+        rule_constraints=list(action_contract.get("rule_constraints") or []),
+        next_step=str(action_contract.get("next_step") or ""),
         evidence_incomplete=_is_evidence_insufficient_for_decision(input_data),
         merchant_fault_signal=merchant_fault_signal,
         input_data=input_data,
@@ -846,6 +1171,17 @@ def recommend(
     if strategy_stage == "evidence_first":
         risk_factors.append("[策略阶段] 举证未闭环：当前建议先补证并固定证据链，再进入协商/善后/拒赔决策")
 
+    rule_constraints = _build_rule_constraints(input_data)
+    action_contract = _infer_action_contract(
+        input_data,
+        disposition=disposition,
+        strategy_stage=strategy_stage,
+        rule_stance=rule_stance,
+        merchant_fault_signal=merchant_fault_signal,
+        rule_constraints=rule_constraints,
+        malicious_result=malicious_result,
+    )
+
     estimated_win_rate = _estimate_win_rate(
         input_data,
         disposition=disposition,
@@ -866,6 +1202,7 @@ def recommend(
         risk_factors=risk_factors,
         estimated_win_rate=estimated_win_rate,
         strategy_stage=strategy_stage,
+        action_contract=action_contract,
         malicious_result=malicious_result,
         customer_value=customer_value,
         merchant_fault_signal=merchant_fault_signal,
@@ -880,6 +1217,10 @@ def recommend(
         strategy_direction_summary = _polish_merchant_facing_text(
             str(strategy_json.get("strategy_direction_summary") or "").strip()
         ) or _compose_strategy_direction_summary(disposition=disposition, input_data=input_data)
+        strategy_direction_summary = _compose_action_direction_summary(
+            action_contract,
+            strategy_direction_summary,
+        )
         strategy_direction_rationale = _polish_merchant_facing_text(
             str(strategy_json.get("strategy_direction_rationale") or "").strip()
         ) or _compose_strategy_direction_rationale(
@@ -914,6 +1255,10 @@ def recommend(
             disposition=disposition,
             input_data=input_data,
         )
+        strategy_direction_summary = _compose_action_direction_summary(
+            action_contract,
+            strategy_direction_summary,
+        )
         strategy_direction_rationale = _compose_strategy_direction_rationale(
             disposition=disposition,
             input_data=input_data,
@@ -938,6 +1283,11 @@ def recommend(
         risk_factors=dedup_risks,
         confidence=confidence,
         strategy_stage=strategy_stage,
+        action_type=str(action_contract.get("action_type") or ""),
+        compensation_policy=str(action_contract.get("compensation_policy") or ""),
+        rule_constraints=list(action_contract.get("rule_constraints") or []),
+        structured_rule_constraints=list(input_data.rule_constraints or []),
+        next_step=str(action_contract.get("next_step") or ""),
         customer_value=customer_value,
         malicious_detection=malicious_result,
         dialogue_context=dialogue_context,

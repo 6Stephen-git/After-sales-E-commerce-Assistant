@@ -213,8 +213,78 @@ class TestAgent3Generate:
         assert "烂" not in output.script
         assert "明显" not in output.script
 
-    def test_generate_should_pass_customer_value_to_script_llm(self, monkeypatch):
-        """客户价值字段应注入话术 LLM payload，供语气与补偿弹性调节。"""
+    def test_rule_explain_should_not_require_stated_compensation_amount_flag(self, monkeypatch):
+        """规则解释动作：即使沿用 negotiate_settle 阶段，也不应要求报具体金额。"""
+        captured: dict = {}
+
+        def _capture_script(payload):
+            captured.update(payload)
+            return "七天无理由可以申请，但退回商品需要保持完好，我们收到后会按规则验收。"
+
+        monkeypatch.setattr(script_generator_module, "generate_buyer_script", _capture_script)
+        input_data = ScriptInput(
+            strategy_output=StrategyOutput(
+                disposition=DISPOSITION_NEGOTIATE,
+                strategy_stage=STRATEGY_STAGE_NEGOTIATE_SETTLE,
+                action_type="rule_explain",
+                compensation_policy="none",
+                rule_constraints=[
+                    "七天无理由成立前提是商品完好且不影响二次销售",
+                    "退回验收发现使用痕迹或影响二次销售的，不予退款",
+                    "七天无理由退货的退回运费及验收不通过后的寄回风险需由买家知晓",
+                    "未验收前不承诺退款或补偿",
+                ],
+                next_step="引导买家按退货流程寄回，商家收到后严格验收，并提前告知验收不通过和运费风险",
+                customer_value=CustomerValueOutput(
+                    channel="long_term",
+                    tone_suggestion="语气可稍暖，体现重视老客",
+                    compensation_uplift="可在规则内略增5%补偿弹性",
+                ),
+                dialogue_context=_minimal_dialogue_context(),
+            ),
+            facts=FactOutput(issue_summary="买家主张七天无理由应直接退货"),
+            order_id="ORDER-A3-RULE",
+            order_amount=2400.0,
+        )
+
+        generate(input_data)
+
+        assert captured.get("action_type") == "rule_explain"
+        assert captured.get("compensation_policy") == "none"
+        assert captured.get("must_state_compensation_amount") is False
+        assert "compensation_uplift" not in captured
+        assert any("完好" in item for item in captured.get("rule_constraints", []))
+        assert any("使用痕迹" in item for item in captured.get("rule_constraints", []))
+        assert any("运费" in item for item in captured.get("rule_constraints", []))
+        assert "验收" in captured.get("next_step", "")
+
+    def test_monetary_settle_should_require_stated_compensation_amount_flag(self, monkeypatch):
+        """金额和解动作：payload 应要求 LLM 报具体金额并征求同意。"""
+        captured: dict = {}
+
+        def _capture_script(payload):
+            captured.update(payload)
+            return "给您退 8 元，您看是否可以接受？"
+
+        monkeypatch.setattr(script_generator_module, "generate_buyer_script", _capture_script)
+        input_data = ScriptInput(
+            strategy_output=StrategyOutput(
+                disposition=DISPOSITION_NEGOTIATE,
+                strategy_stage=STRATEGY_STAGE_NEGOTIATE_SETTLE,
+                action_type="monetary_settle",
+                compensation_policy="explicit_amount",
+                dialogue_context=_minimal_dialogue_context(),
+            ),
+            facts=FactOutput(issue_summary="买家反馈划痕", evidence_quality=EVIDENCE_HIGH),
+            order_id="ORDER-A3-AMT",
+            order_amount=30.0,
+        )
+
+        generate(input_data)
+        assert captured.get("must_state_compensation_amount") is True
+
+    def test_generate_should_pass_customer_value_to_script_llm_only_when_amount_allowed(self, monkeypatch):
+        """进入金额动作时才注入补偿弹性；客户价值不能越过补偿门禁。"""
         captured: dict = {}
 
         def _capture_script(payload):
@@ -226,6 +296,8 @@ class TestAgent3Generate:
             strategy_output=StrategyOutput(
                 disposition=DISPOSITION_NEGOTIATE,
                 strategy_stage=STRATEGY_STAGE_NEGOTIATE_SETTLE,
+                action_type="monetary_settle",
+                compensation_policy="explicit_amount",
                 customer_value=CustomerValueOutput(
                     channel="long_term",
                     long_term_triggered=True,

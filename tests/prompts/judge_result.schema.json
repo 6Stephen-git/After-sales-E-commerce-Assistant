@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "required": [
+    "case_id",
+    "pass",
+    "overall_score",
+    "hard_failures",
+    "scores",
+    "fail_reasons",
+    "warnings",
+    "suggested_fix_area",
+    "judge_summary"
+  ],
+  "properties": {
+    "case_id": { "type": "string" },
+    "pass": { "type": "boolean" },
+    "overall_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "hard_failures": { "type": "array", "items": { "type": "string" } },
+    "scores": {
+      "type": "object",
+      "required": [
+        "expectation_alignment",
+        "forbidden_output_safety",
+        "rule_understanding",
+        "evidence_handling",
+        "merchant_interest",
+        "buyer_communication",
+        "script_safety",
+        "report_readability"
+      ],
+      "properties": {
+        "expectation_alignment": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "forbidden_output_safety": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "rule_understanding": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "evidence_handling": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "merchant_interest": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "buyer_communication": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "script_safety": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "report_readability": { "type": "integer", "minimum": 1, "maximum": 5 }
+      }
+    },
+    "fail_reasons": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "suggested_fix_area": { "type": "string" },
+    "judge_summary": { "type": "string" }
+  }
+}

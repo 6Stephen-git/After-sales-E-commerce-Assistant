@@ -47,6 +47,38 @@ VALID_STRATEGY_STAGES = [
     STRATEGY_STAGE_DEFEND_PLATFORM,
 ]
 
+# 当前动作类型（Agent 2 输出，Agent 3 严格执行）
+ACTION_CLARIFY_INTENT = "clarify_intent"
+ACTION_RULE_EXPLAIN = "rule_explain"
+ACTION_EVIDENCE_REQUEST = "evidence_request"
+ACTION_RETURN_INSPECTION = "return_inspection"
+ACTION_MERCHANT_REMEDY = "merchant_remedy"
+ACTION_MONETARY_SETTLE = "monetary_settle"
+ACTION_DEFEND_PREPARE = "defend_prepare"
+ACTION_ESCALATION_CONTROL = "escalation_control"
+VALID_ACTION_TYPES = [
+    ACTION_CLARIFY_INTENT,
+    ACTION_RULE_EXPLAIN,
+    ACTION_EVIDENCE_REQUEST,
+    ACTION_RETURN_INSPECTION,
+    ACTION_MERCHANT_REMEDY,
+    ACTION_MONETARY_SETTLE,
+    ACTION_DEFEND_PREPARE,
+    ACTION_ESCALATION_CONTROL,
+]
+
+# 补偿门禁（Agent 2 输出，Agent 3 使用）
+COMPENSATION_POLICY_FORBID = "forbid"
+COMPENSATION_POLICY_NONE = "none"
+COMPENSATION_POLICY_SOFT_NO_AMOUNT = "soft_no_amount"
+COMPENSATION_POLICY_EXPLICIT_AMOUNT = "explicit_amount"
+VALID_COMPENSATION_POLICIES = [
+    COMPENSATION_POLICY_FORBID,
+    COMPENSATION_POLICY_NONE,
+    COMPENSATION_POLICY_SOFT_NO_AMOUNT,
+    COMPENSATION_POLICY_EXPLICIT_AMOUNT,
+]
+
 
 # ============================================================
 # 二、共享数据结构
@@ -82,6 +114,32 @@ VALID_RULE_RELEVANCE = [RULE_RELEVANCE_MUST, RULE_RELEVANCE_SHOULD, RULE_RELEVAN
 RULE_STANCE_MERCHANT = "merchant"
 RULE_STANCE_BUYER = "buyer"
 RULE_STANCE_NEUTRAL = "neutral"
+
+RULE_CONSTRAINT_TIMING = "timing"
+RULE_CONSTRAINT_EVIDENCE = "evidence"
+RULE_CONSTRAINT_RATIO_LIMIT = "ratio_limit"
+RULE_CONSTRAINT_PROCESS = "process"
+RULE_CONSTRAINT_NO_PROMISE = "no_promise"
+RULE_CONSTRAINT_OTHER = "other"
+VALID_RULE_CONSTRAINT_TYPES = [
+    RULE_CONSTRAINT_TIMING,
+    RULE_CONSTRAINT_EVIDENCE,
+    RULE_CONSTRAINT_RATIO_LIMIT,
+    RULE_CONSTRAINT_PROCESS,
+    RULE_CONSTRAINT_NO_PROMISE,
+    RULE_CONSTRAINT_OTHER,
+]
+
+RULE_CONSTRAINT_APPLIES = "applies"
+RULE_CONSTRAINT_VIOLATED = "violated"
+RULE_CONSTRAINT_MISSING_FACT = "missing_fact"
+RULE_CONSTRAINT_CONFLICT = "conflict"
+VALID_RULE_CONSTRAINT_STATUSES = [
+    RULE_CONSTRAINT_APPLIES,
+    RULE_CONSTRAINT_VIOLATED,
+    RULE_CONSTRAINT_MISSING_FACT,
+    RULE_CONSTRAINT_CONFLICT,
+]
 
 
 # ============================================================
@@ -158,6 +216,24 @@ class MatchedRule(BaseModel):
     section_key: str = Field(default="", description="来源节 section_key")
     article_no: str = Field(default="", description="条号")
     stance_hint: str = Field(default=RULE_STANCE_NEUTRAL, description="merchant/buyer/neutral")
+    matched_conditions: List[str] = Field(default_factory=list, description="已满足或直接命中的规则条件")
+    violated_or_missing_conditions: List[str] = Field(default_factory=list, description="未满足或仍缺事实核验的规则条件")
+    strategy_constraints: List[str] = Field(default_factory=list, description="由该条规则推导出的策略硬约束")
+
+
+class RuleConstraint(BaseModel):
+    """规则匹配后传递给策略/话术的结构化约束"""
+    constraint_type: str = Field(
+        default=RULE_CONSTRAINT_OTHER,
+        description=f"约束类型：{'/'.join(VALID_RULE_CONSTRAINT_TYPES)}",
+    )
+    text: str = Field(default="", description="面向策略和话术的可执行约束文本")
+    status: str = Field(
+        default=RULE_CONSTRAINT_APPLIES,
+        description=f"约束状态：{'/'.join(VALID_RULE_CONSTRAINT_STATUSES)}",
+    )
+    source_rule_id: str = Field(default="", description="来源规则 rule_id")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="约束提取置信度")
 
 
 class RuleBrief(BaseModel):
@@ -166,6 +242,7 @@ class RuleBrief(BaseModel):
     brief: str = Field(..., description="1～2 句要点")
     relevance: str = Field(default=RULE_RELEVANCE_SHOULD, description="must/should")
     stance_hint: str = Field(default=RULE_STANCE_NEUTRAL, description="merchant/buyer/neutral")
+    strategy_constraints: List[str] = Field(default_factory=list, description="该 brief 对应的策略约束")
 
 
 class RuleMatchResult(BaseModel):
@@ -173,6 +250,7 @@ class RuleMatchResult(BaseModel):
     matched_rules: List[MatchedRule] = Field(default_factory=list, description="命中池（最多 cap）")
     rule_briefs: List[RuleBrief] = Field(default_factory=list, description="策略 LLM 用 brief 列表")
     display_rules: List[MatchedRule] = Field(default_factory=list, description="前端代表条 3～5 条")
+    rule_constraints: List[RuleConstraint] = Field(default_factory=list, description="结构化规则约束，供策略与话术执行")
 
 
 class SimilarCase(BaseModel):
@@ -210,6 +288,7 @@ class StrategyInput(BaseModel):
     buyer_profile: BuyerProfile = Field(..., description="买家画像")
     matched_rules: List[MatchedRule] = Field(default_factory=list, description="匹配到的规则（代表条或全量）")
     rule_briefs: List[RuleBrief] = Field(default_factory=list, description="规则 brief，供策略 LLM")
+    rule_constraints: List[RuleConstraint] = Field(default_factory=list, description="结构化规则约束，优先于文本摘要驱动策略")
     similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例")
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
     chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表（用于语义分析）")
@@ -328,7 +407,7 @@ class StrategyOutput(BaseModel):
     )
     platform_rule_basis: List[str] = Field(
         default_factory=list,
-        description="平台规则依据：面向商家的规则要点列表（无条号/章节，供前端直接展示）",
+        description="平台规则依据：仅条文匹配 display_rules 的法条摘要列表（无条号/章节，不含程序性约束句）",
     )
     reasoning: str = Field(default="", description="完整策略说明（含客户意图/风险点/建议动作/推理理由四段，供流式与话术引用）")
     risk_factors: List[str] = Field(default_factory=list, description="风险因素列表")
@@ -337,6 +416,23 @@ class StrategyOutput(BaseModel):
         default=STRATEGY_STAGE_NEGOTIATE_SETTLE,
         description=f"策略阶段：{'/'.join(VALID_STRATEGY_STAGES)}",
     )
+    action_type: str = Field(
+        default=ACTION_CLARIFY_INTENT,
+        description=f"当前动作类型：{'/'.join(VALID_ACTION_TYPES)}",
+    )
+    compensation_policy: str = Field(
+        default=COMPENSATION_POLICY_NONE,
+        description=f"补偿门禁：{'/'.join(VALID_COMPENSATION_POLICIES)}",
+    )
+    rule_constraints: List[str] = Field(
+        default_factory=list,
+        description="话术必须遵守的规则边界，例如未验收前不承诺退款或补偿",
+    )
+    structured_rule_constraints: List[RuleConstraint] = Field(
+        default_factory=list,
+        description="策略采用的结构化规则约束，供调试和下游消费",
+    )
+    next_step: str = Field(default="", description="买家或商家的下一步动作")
     customer_value: Optional[CustomerValueOutput] = Field(default=None, description="客户价值评估结果")
     malicious_detection: Optional[MaliciousDetectionOutput] = Field(default=None, description="恶意行为检测结果")
     dialogue_context: Optional[DialogueContext] = Field(

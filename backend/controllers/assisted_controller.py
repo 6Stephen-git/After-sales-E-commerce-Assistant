@@ -402,6 +402,7 @@ def run_with_events(
 
         matched_rules = rule_result.display_rules
         rule_briefs = rule_result.rule_briefs
+        rule_constraints = rule_result.rule_constraints
         tools_elapsed = _elapsed_ms(tools_start)
         _emit_event(
             emit_event,
@@ -435,6 +436,7 @@ def run_with_events(
             buyer_profile=buyer_profile,
             matched_rules=matched_rules,
             rule_briefs=rule_briefs,
+            rule_constraints=rule_constraints,
             similar_cases=similar_cases,
             order_amount=order_amount,
             chat_history=chat_history_texts,

@@ -10,10 +10,15 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from backend.agents.agent1.rule_plan import (
-    _intent_suggests_category_dispute,
     merge_llm_rule_plan,
 )
-from backend.tools.rule_lexicon import get_category_doc_id, is_category_doc, resolve_doc_id_reference, validate_category_slug
+from backend.tools.rule_lexicon import (
+    get_category_doc_id,
+    is_category_doc,
+    resolve_doc_id_reference,
+    should_infer_category_slug,
+    validate_category_slug,
+)
 
 
 PHONE_DOC_ID = "特殊品类争议处理_淘宝平台手机类商品争议处理规范_1155_11003755"
@@ -106,13 +111,13 @@ class TestLexiconSearchEnrichment:
 
 
 class TestCategorySlugInferenceGate:
-    def test_quality_intent_triggers_category_dispute_gate(self):
-        """质量类争点应通过品类争点门控。"""
-        assert _intent_suggests_category_dispute(["质量问题"], "商品有划痕")
+    def test_category_context_triggers_semantic_inference_gate(self):
+        """有聊天或品类描述时应具备语义推断上下文。"""
+        assert should_infer_category_slug({"category": "宠物"}, "小狗死亡")
 
-    def test_logistics_intent_skips_category_dispute_gate(self):
-        """纯物流争点不应触发品类争点门控。"""
-        assert not _intent_suggests_category_dispute(["物流异常"], "快递一直不到")
+    def test_empty_context_skips_semantic_inference_gate(self):
+        """无品类、无聊天时不启动语义推断。"""
+        assert not should_infer_category_slug({}, "")
 
     def test_merge_should_skip_category_llm_when_vision_slug_present(self, monkeypatch):
         """上游已有视觉 slug 时不应再调品类推断 LLM。"""
@@ -123,7 +128,7 @@ class TestCategorySlugInferenceGate:
             return None, 0.0
 
         monkeypatch.setattr(
-            "backend.agents.agent1.rule_plan.infer_category_slug_llm",
+            "backend.tools.rule_lexicon.infer_category_slug_llm",
             _should_not_infer,
         )
         plan = merge_llm_rule_plan(

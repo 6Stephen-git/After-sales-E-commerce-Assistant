@@ -13,12 +13,14 @@ from backend.tools.rule_lexicon import (
     expand_doc_ids_by_lanes,
     get_category_doc_id,
     get_doc_by_id,
-    infer_category_slug_llm,
+    infer_category_slug_from_materials,
     infer_lanes_from_intent,
     is_category_doc,
+    resolve_category_slug,
     resolve_doc_id_reference,
     resolve_doc_ids_from_materials,
     resolve_hint_section_keys,
+    should_infer_category_slug,
     validate_category_slug,
     validate_section_keys,
 )
@@ -35,25 +37,6 @@ COLLOQUIAL_MUST_BLOCKLIST = frozenset(
     {"开箱视频", "没录", "未录", "视频", "聊天记录", "截图"}
 )
 
-# 质量/描述类争点关键词：无 slug 时才条件触发品类推断 LLM
-_CATEGORY_DISPUTE_KEYWORDS = (
-    "质量",
-    "瑕疵",
-    "破损",
-    "描述不符",
-    "不一致",
-    "腐烂",
-    "变质",
-    "划痕",
-    "假货",
-    "缺件",
-    "少件",
-    "损坏",
-    "功能异常",
-    "发霉",
-    "过期",
-)
-
 
 def merge_llm_rule_plan(
     materials: dict[str, Any],
@@ -62,6 +45,7 @@ def merge_llm_rule_plan(
     text_context: str = "",
     issue_summary: str | None = None,
     category_slugs: list[str] | None = None,
+    defect_type: str | None = None,
 ) -> RuleMatchPlan:
     """
     由 API 标、品类 slug、intent 与 lexicon 确定性生成 rule_match_plan。
@@ -71,21 +55,31 @@ def merge_llm_rule_plan(
     api_doc_ids, api_lanes = resolve_doc_ids_from_materials(materials)
     normalized_slugs = _normalize_category_slugs(category_slugs, materials)
 
-    if (
-        not normalized_slugs
-        and not str(materials.get("product_category_slug", "") or "").strip()
-        and _intent_suggests_category_dispute(intent_tags, buyer_text)
-    ):
-        inferred_slug, inferred_conf = infer_category_slug_llm(buyer_text, materials)
-        if inferred_slug:
-            normalized_slugs.append(inferred_slug)
-            plan.category_confidence = max(plan.category_confidence, inferred_conf)
-            logger.info(
-                "%s 质量类争点且无 slug，品类 LLM 兜底 slug=%s confidence=%.2f",
-                LOG_PREFIX,
-                inferred_slug,
-                inferred_conf,
+    if not normalized_slugs and not _materials_has_valid_category_slug(materials):
+        resolved_defect = str(defect_type or materials.get("defect_type") or "").strip() or None
+        if should_infer_category_slug(
+            materials,
+            buyer_text,
+            issue_summary=issue_summary,
+            defect_type=resolved_defect,
+        ):
+            inferred_slug, inferred_conf, source = resolve_category_slug(
+                materials,
+                buyer_text,
+                issue_summary=issue_summary,
+                defect_type=resolved_defect,
             )
+            if inferred_slug:
+                normalized_slugs.append(inferred_slug)
+                plan.category_confidence = max(plan.category_confidence, inferred_conf)
+                materials["product_category_slug"] = inferred_slug
+                logger.info(
+                    "%s 品类语义推断 slug=%s confidence=%.2f source=%s",
+                    LOG_PREFIX,
+                    inferred_slug,
+                    inferred_conf,
+                    source,
+                )
 
     plan = _sanitize_target_doc_ids(plan)
 
@@ -162,15 +156,28 @@ def _is_category_lane_locked(
     return False
 
 
+def _materials_has_valid_category_slug(materials: dict[str, Any]) -> bool:
+    """materials 中是否已有通过 lexicon 校验的品类 slug（无效占位如 fruit 视为未提供）。"""
+    from backend.tools.rule_lexicon import validate_category_slug
+
+    for key in ("product_category_slug", "category_slug"):
+        if validate_category_slug(str(materials.get(key, "") or "").strip() or None):
+            return True
+    return False
+
+
 def _normalize_category_slugs(
     category_slugs: list[str] | None,
     materials: dict[str, Any],
 ) -> list[str]:
-    """合并 API slug 与上游事实 LLM category_slug，去重保序。"""
+    """合并 API/上游 slug 字段与事实 LLM 输出的合法 slug，去重保序；不做中文标签硬匹配。"""
     slugs: list[str] = []
     api_slug = validate_category_slug(str(materials.get("product_category_slug", "") or "").strip() or None)
     if api_slug:
         slugs.append(api_slug)
+    material_slug = infer_category_slug_from_materials(materials)
+    if material_slug and material_slug not in slugs:
+        slugs.append(material_slug)
     for item in category_slugs or []:
         validated = validate_category_slug(item)
         if validated and validated not in slugs:
@@ -322,12 +329,6 @@ def _enrich_search_terms(
                     bucket.append(item)
     plan.search_terms = terms
     return plan
-
-
-def _intent_suggests_category_dispute(intent_tags: list[str], buyer_text: str) -> bool:
-    """判断是否为可能需 C 通道专项规范的质量/描述类争点。"""
-    blob = f"{' '.join(intent_tags)} {buyer_text}"
-    return any(keyword in blob for keyword in _CATEGORY_DISPUTE_KEYWORDS)
 
 
 def _merge_buyer_text(

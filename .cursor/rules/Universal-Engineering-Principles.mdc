@@ -1,0 +1,16 @@
+---
+alwaysApply: true
+---
+
+- Understand the relevant context before changing code. Read the surrounding architecture, data flow, and call chain instead of guessing from the immediate symptom.
+- Fix root causes in the right abstraction layer. Prefer correcting the shared source of the issue over adding local patches at each call site.
+- Make general-purpose changes. Avoid hard-coded logic for a single case, special input, temporary example, or narrow execution path unless the domain contract explicitly requires it.
+- Do not add fallback mechanisms just to make code appear safer. A fallback is acceptable only when its trigger condition, business meaning, and failure behavior are clear.
+- Keep the implementation concise but not careless. Simple code must still be complete, maintainable, and aligned with the existing architecture.
+- Replace old logic when introducing a new path. Remove obsolete code, duplicated branches, unused files, and dead configuration once the replacement is in place.
+- Do not deliver minimum-runnable or demo-grade core logic. Production-facing changes should be high-quality on the first version, especially in decision, matching, routing, data, or AI-related modules.
+- Keep file responsibilities explicit. Each source file should have a clear top-level description of its role when the language and project style allow it.
+- Document functions at the function level. Comments should explain purpose, inputs, outputs, important assumptions, and non-obvious behavior; update comments when code changes.
+- Preserve a clear verification loop. After changing code, validate the behavior with relevant tests, reproduction steps, logs, or static checks whenever practical.
+
+When User Rules conflict with project or workspace rules, Universal Engineering Principles and the engineering principles in this User Rules section take precedence. The user may temporarily override this priority only when they explicitly request it in the current conversation.

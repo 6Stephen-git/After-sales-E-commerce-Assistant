@@ -118,6 +118,43 @@ def _collect_text(materials: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+RULE_CONTEXT_MATERIAL_KEYS = (
+    "platform_service_tags",
+    "service_tags",
+    "after_sale_timing",
+    "time_since_delivery_hours",
+    "application_reason",
+    "refund_reason",
+    "policy_limits",
+    "compensation_ratio_cap",
+)
+
+
+def _merge_rule_context_attributes(attributes: dict[str, Any], materials: dict[str, Any]) -> dict[str, Any]:
+    """
+    将材料中的通用规则判定上下文写入 attributes.rule_context。
+
+    参数:
+        attributes: Agent1 已抽取的扩展属性。
+        materials: Controller 传入的原始材料，可能包含服务标、售后时效、申请原因等。
+
+    返回:
+        合并后的 attributes；不把规则上下文字段散落成 FactOutput 顶层字段。
+    """
+    merged = dict(attributes or {})
+    rule_context = dict(merged.get("rule_context") or {})
+    for key in RULE_CONTEXT_MATERIAL_KEYS:
+        if key not in materials:
+            continue
+        value = materials.get(key)
+        if value in (None, "", [], {}):
+            continue
+        rule_context[key] = value
+    if rule_context:
+        merged["rule_context"] = rule_context
+    return merged
+
+
 # ---------- 通用解析：模型 JSON、布尔、列表与浮点 ----------
 def _parse_json_text(raw_text: str) -> dict[str, Any] | None:
     """
@@ -315,7 +352,7 @@ def _collect_category_slugs(
     """
     slugs: list[str] = []
     if isinstance(issue_result, dict):
-        text_slug = validate_category_slug(issue_result.get("category_slug"))
+        text_slug = validate_category_slug(str(issue_result.get("category_slug", "") or "").strip() or None)
         if text_slug:
             slugs.append(text_slug)
     if vision_category_slug:
@@ -554,6 +591,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         text_context=text_context,
         issue_summary=issue_summary,
         category_slugs=category_slugs,
+        defect_type=defect_type,
     )
     if not rule_match_plan.target_doc_ids:
         from backend.tools.rule_matcher import build_fallback_plan_from_materials
@@ -568,6 +606,8 @@ def extract(materials: dict[str, Any]) -> FactOutput:
             ),
         )
         logger.warning("%s rule_match_plan 为空，已启用 materials 兜底导航", LOG_PREFIX)
+
+    attributes = _merge_rule_context_attributes(attributes, materials)
 
     return FactOutput(
         issue_summary=issue_summary,

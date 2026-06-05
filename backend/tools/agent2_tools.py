@@ -64,17 +64,41 @@ def match_rules_full(facts: FactOutput) -> "RuleMatchResult":
         raise RuntimeError(f"规则匹配失败：{exc}") from exc
 
 
+def _rule_plan_has_category_or_service_lane(facts: FactOutput) -> bool:
+    """
+    判定 Agent1 导航是否已锁定特殊品类（C）或专项服务（E）通道。
+
+    只要 plan 中激活了 C/E 或 target_doc_ids 含对应专项 doc，即应跑条文匹配。
+    """
+    plan = facts.rule_match_plan
+    activated = set(plan.activated_lanes or [])
+    if "C" in activated or "E" in activated:
+        return True
+
+    from backend.tools.rule_lexicon import is_category_doc, load_lexicon
+
+    service_doc_ids = set(
+        ((load_lexicon().get("lanes") or {}).get("E_service_tag_to_doc_id") or {}).values()
+    )
+    for doc_id in plan.target_doc_ids or []:
+        if is_category_doc(doc_id) or doc_id in service_doc_ids:
+            return True
+    return False
+
+
 def needs_rule_match(
     facts: FactOutput,
     malicious_result: MaliciousDetectionOutput,
     customer_value: CustomerValueOutput,
 ) -> bool:
     """
-    判定是否启动条文匹配：仅复杂/高风险案调用条文 LLM；简单案由策略 LLM 基于事实处理。
+    判定是否启动条文匹配。
 
-    触发：恶意 medium+、价值通道、多诉求标签、恶意与商责信号冲突。
+    触发：特殊品类/专项服务通道已锁定；恶意 medium+；价值通道；多诉求标签。
     不含举证未闭环（补证属流程动作，不必查平台条文）。
     """
+    if _rule_plan_has_category_or_service_lane(facts):
+        return True
     if malicious_result.risk_level in {"medium", "high"}:
         return True
     if customer_value.channel in {"long_term", "order"}:
@@ -194,6 +218,7 @@ def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]
 # ---------- 客户价值：视觉损失暴露 + 双维评分（无专用 LLM） ----------
 ORDER_VALUE_SCORE_THRESHOLD = 60
 ORDER_VALUE_AMOUNT_ONLY_THRESHOLD = 500.0
+LONG_TERM_VALUE_AMOUNT_THRESHOLD: float | None = None
 
 
 def _facts_has_visual_loss_exposure(facts: FactOutput) -> bool:
@@ -362,6 +387,8 @@ def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutp
 
     # ----- 通道触发与建议输出 -----
     long_term_triggered = long_term_score >= ORDER_VALUE_SCORE_THRESHOLD
+    if LONG_TERM_VALUE_AMOUNT_THRESHOLD is not None and total_spend >= LONG_TERM_VALUE_AMOUNT_THRESHOLD:
+        long_term_triggered = True
     if input_data.block_order_channel:
         order_triggered = False
     elif order_score >= ORDER_VALUE_SCORE_THRESHOLD:
@@ -380,8 +407,8 @@ def evaluate_customer_value(input_data: CustomerValueInput) -> CustomerValueOutp
         tone_suggestion = "偏暖，珍惜老客"
     elif order_triggered:
         channel = "order"
-        compensation_uplift = "+10%~20%"
-        tone_suggestion = "快速响应，妥善处理"
+        compensation_uplift = None
+        tone_suggestion = "快速响应，先核实事实并控制本单损失"
     else:
         channel = "none"
         compensation_uplift = None
@@ -416,7 +443,26 @@ def run_customer_value_analysis(input_data: StrategyInput) -> CustomerValueOutpu
     return evaluate_customer_value(customer_value_input)
 
 
-# ---------- 恶意行为检测：第一层硬规则 + 第二层语义分析 ----------
+# ---------- 恶意评分与分级常量（分数展示 + 信号下限双轨） ----------
+HARD_RULE_SCORE = 20
+SEMANTIC_SCORE_ALLOWED = frozenset({10, 20, 30})
+RISK_SCORE_CAP = 100
+RISK_LEVEL_SCORE_MEDIUM = 15
+RISK_LEVEL_SCORE_HIGH = 35
+STRONG_MALICIOUS_SIGNAL_TYPES = frozenset(
+    {
+        "fake_evidence",
+        "deceptive_credential",
+        "statement_evidence_mismatch",
+        "review_blackmail",
+        "identity_impersonation",
+        "fake_credential_web_image",
+        "evidence_contradiction",
+    }
+)
+_RISK_LEVEL_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
 def _make_malicious_signal(signal_type: str, description: str, score: int, source: str) -> MaliciousSignal:
     """
     统一构造恶意信号对象，避免不同分支输出字段不一致。
@@ -427,6 +473,13 @@ def _make_malicious_signal(signal_type: str, description: str, score: int, sourc
         score=max(0, score),
         source=source,
     )
+
+
+def _facts_has_statement_contradiction_clues(facts: FactOutput) -> bool:
+    """硬规则仅处理结构化物流/收货状态冲突，事实语义矛盾交由语义层判断。"""
+    if facts.logistics_normal is False and facts.goods_received is True:
+        return True
+    return False
 
 
 def _run_hard_rules(
@@ -453,7 +506,7 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="fake_evidence",
                 description="证据质量低且存在疑点，疑似虚假凭证骗退款",
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -469,7 +522,7 @@ def _run_hard_rules(
                     f"仅退款频次或退货率异常（仅退款{input_data.recent_refund_only_count}次，"
                     f"退货率{profile.return_rate:.2f}，类目均值{category_avg:.2f}）"
                 ),
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -479,7 +532,7 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="batch_malicious_orders",
                 description="购买频次高且纠纷率异常，疑似批量恶意下单",
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -489,7 +542,7 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="freight_insurance_abuse",
                 description="运费险使用与高退货率叠加，疑似骗取运费险",
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -499,7 +552,7 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="swap_or_missing_items",
                 description=f"历史调包/少件标记达到{input_data.swap_flag_count}次",
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -509,7 +562,7 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="abnormal_return_address",
                 description="存在地址信息且物流状态异常，疑似退货地址异常",
-                score=20,
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -519,7 +572,28 @@ def _run_hard_rules(
             _make_malicious_signal(
                 signal_type="related_accounts",
                 description=f"关联账号数量达到{input_data.related_account_count}，疑似多账号协同",
-                score=20,
+                score=HARD_RULE_SCORE,
+                source="hard_rule",
+            )
+        )
+
+    # 本单举证欺骗硬规则：不依赖历史画像，覆盖新号以网图/AI图/遮挡伪造举证的场景。
+    if _facts_anchor_supports_deceptive_credential(facts):
+        signals.append(
+            _make_malicious_signal(
+                signal_type="deceptive_credential",
+                description="事实层已记载举证明显存在网图、AI生图、非实拍或刻意遮挡伪造等欺骗线索",
+                score=HARD_RULE_SCORE,
+                source="hard_rule",
+            )
+        )
+
+    if _facts_has_statement_contradiction_clues(facts):
+        signals.append(
+            _make_malicious_signal(
+                signal_type="statement_evidence_mismatch",
+                description="事实层存在陈述与物流/收货/举证结论不一致线索",
+                score=HARD_RULE_SCORE,
                 source="hard_rule",
             )
         )
@@ -539,6 +613,8 @@ def _build_hard_rule_summary(hard_signals: List[MaliciousSignal]) -> str:
 # ---------- 恶意信号类型 → 中文短名（风险提示区与日志可读性） ----------
 _MALICIOUS_SIGNAL_TYPE_CN: dict[str, str] = {
     "fake_evidence": "疑似虚假凭证（硬规则）",
+    "deceptive_credential": "举证存在欺骗线索（本单事实）",
+    "statement_evidence_mismatch": "陈述与事实矛盾（本单）",
     "abuse_refund_only": "滥用仅退款",
     "batch_malicious_orders": "批量恶意下单",
     "freight_insurance_abuse": "疑似骗取运费险",
@@ -552,7 +628,6 @@ _MALICIOUS_SIGNAL_TYPE_CN: dict[str, str] = {
     "fake_credential_web_image": "举证疑似网图/非实拍",
     "abuse_refund_intent_chat": "聊天暴露高频套利/仅退意图",
 }
-
 
 def _format_malicious_risk_hints(signals: List[MaliciousSignal]) -> str:
     """
@@ -580,9 +655,29 @@ MALICIOUS_SEMANTIC_CHAT_MIN_CHARS = 12
 MALICIOUS_FACT_RED_FLAGS_MAX = 4
 MALICIOUS_FACT_VISUAL_OBS_MAX = 3
 
-_VISUAL_SUSPICION_KEYWORDS = (
+_DECEPTIVE_CREDENTIAL_KEYWORDS = (
     "水印",
     "网图",
+    "ai生成",
+    "ai生图",
+    "ai 图",
+    "ai图片",
+    "生成图",
+    "生成式",
+    "疑似ai",
+    "疑似 AI",
+    "p图",
+    "修图",
+    "合成",
+    "伪造",
+    "造假",
+    "遮挡",
+    "涂抹",
+    "马赛克",
+    "裁剪",
+    "篡改",
+    "隐瞒",
+    "刻意",
     "网址",
     "域名",
     "截屏",
@@ -594,6 +689,9 @@ _VISUAL_SUSPICION_KEYWORDS = (
     ".com",
     ".cn",
     "http",
+)
+
+_VISUAL_SUSPICION_KEYWORDS = _DECEPTIVE_CREDENTIAL_KEYWORDS + (
     "矛盾",
     "不符",
 )
@@ -627,7 +725,7 @@ def _should_skip_malicious_semantic_llm(
     hard_signals: List[MaliciousSignal],
 ) -> bool:
     """
-    低材料 case 跳过语义 LLM：硬规则未命中、无 red_flags、无视觉可疑、聊天空或过短。
+    低材料 case 跳过语义 LLM：无硬规则、无事实疑点、且无足够聊天文本时跳过。
     """
     if hard_signals:
         return False
@@ -636,11 +734,15 @@ def _should_skip_malicious_semantic_llm(
         return False
     if _visual_observations_suspicious(facts):
         return False
+    if _facts_has_statement_contradiction_clues(facts):
+        return False
     chat_lines = [str(item).strip() for item in (input_data.chat_history or []) if str(item).strip()]
     if not chat_lines:
         return True
     merged = " ".join(chat_lines)
-    return len(merged) < MALICIOUS_SEMANTIC_CHAT_MIN_CHARS
+    if len(merged) >= MALICIOUS_SEMANTIC_CHAT_MIN_CHARS:
+        return False
+    return True
 
 
 def _strip_markdown_json(text: str) -> str:
@@ -664,7 +766,7 @@ def _build_malicious_semantic_messages(
     """
     taxonomy_block = (
         "【恶意类型参考（判断边界，全品类适用）】\n"
-        "A. 利用规则/凭证获利：滥用仅退款、虚假或网络图片举证、运费险套利、恶意差价退款、知假买假式高额索赔。\n"
+        "A. 利用规则/凭证获利：滥用仅退款、虚假或网络图片/AI生成图举证、运费险套利、恶意差价退款、知假买假式高额索赔。\n"
         "B. 退货欺诈：调包、买真退假、少件、恶意拒收等。\n"
         "C. 攻击店铺运营：差评/投诉要挟赔偿、炸店、有组织差评退款。\n"
         "D. 黑灰产：多账号薅羊毛、职业索赔模板化话术、骗取补贴等。\n"
@@ -678,12 +780,13 @@ def _build_malicious_semantic_messages(
         "- identity_impersonation：冒充平台/执法/鉴定身份施压。\n"
         "- evidence_contradiction：买家陈述与 facts 中已确认事实或视觉结论明显矛盾。\n"
         "- professional_claim_pattern：大量法条/规则编号式模板话术，明显非普通消费者表达。\n"
-        "- fake_credential_web_image：仅当 facts.red_flags 或 visual_observations 已明确记载水印/网图/非实拍/域名截屏等客观线索时才可输出；"
+        "- fake_credential_web_image：仅当 facts.red_flags 或 visual_observations 已明确记载水印/网图/AI生图/非实拍/域名截屏/遮挡篡改等客观线索时才可输出；"
         "禁止凭聊天臆测或套用示例中的水印描述；无事实锚定则返回 []。\n"
         "- abuse_refund_intent_chat：聊天中自认高频退款、薅运费险、套利、组织化分工等（需有明确语义，不得凭单句情绪定罪）。\n"
         "负例：仅表达不满或「会考虑投诉平台、请尽快处理」，无条件交换，必须返回 []，不得输出 review_blackmail。\n"
         "输出必须是 JSON 数组，每项字段：signal_type, description, score, source；source 固定为 llm_semantic；"
-        "score 仅允许 5、10、15 三档（5=弱信号，10=中等，15=强信号）；无命中返回 []。\n"
+        "score 仅允许 10、20、30 三档（10=弱信号，20=中等，30=强信号）；无命中返回 []。\n"
+        "若 hard_rule_summary 已覆盖同一事实，只补充新的、更具体的语义事实，禁止重复输出同义信号。\n"
         "description 必须用中文面向商家可读，不得输出内部字段名堆砌。"
     )
     example_user_blackmail = (
@@ -691,22 +794,22 @@ def _build_malicious_semantic_messages(
         "'facts':{'evidence_quality':'medium','defect_type':'污渍'},'emotion_note':'买家情绪激动'}"
     )
     example_assistant_blackmail = (
-        '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":10,"source":"llm_semantic"}]'
+        '[{"signal_type":"review_blackmail","description":"出现差评与12315投诉要挟索赔","score":20,"source":"llm_semantic"}]'
     )
     example_user_professional = (
         "输入：{'hard_rule_summary':'related_accounts:关联账号异常','chat_history':['依据平台规则第32条第2款，你必须退一赔三，这是固定模板'],"
         "'facts':{'evidence_quality':'medium','defect_type':'色差'},'emotion_note':null}"
     )
     example_assistant_professional = (
-        '[{"signal_type":"professional_claim_pattern","description":"大量规则术语与模板化表达，疑似职业索赔话术","score":10,"source":"llm_semantic"}]'
+        '[{"signal_type":"professional_claim_pattern","description":"大量规则术语与模板化表达，疑似职业索赔话术","score":20,"source":"llm_semantic"}]'
     )
     example_user_web_image = (
         "输入：{'hard_rule_summary':'硬规则层未命中异常项','chat_history':['电热水壶底座开裂要求退货退款'],"
         "'facts':{'evidence_quality':'high','defect_type':'破损','issue_summary':'小家电外壳裂纹',"
-        "'visual_observations':['图片角落可见1688.com批发图水印，疑似网图'],'red_flags':['图文来源可疑']},'emotion_note':null}"
+        "'visual_observations':['图片角落可见1688.com批发图水印，疑似网图或非本单实拍'],'red_flags':['图文来源可疑']},'emotion_note':null}"
     )
     example_assistant_web_image = (
-        '[{"signal_type":"fake_credential_web_image","description":"买家称底座开裂，但举证图带批发站水印，疑似网图而非本单实拍","score":15,"source":"llm_semantic"}]'
+        '[{"signal_type":"fake_credential_web_image","description":"买家称底座开裂，但举证图带批发站水印，疑似网图而非本单实拍","score":30,"source":"llm_semantic"}]'
     )
 
     chat_lines = [str(item).strip() for item in (input_data.chat_history or []) if str(item).strip()]
@@ -735,17 +838,17 @@ def _build_malicious_semantic_messages(
     ]
 
 
-def _facts_anchor_supports_web_image_suspicion(facts) -> bool:
+def _facts_anchor_supports_deceptive_credential(facts) -> bool:
     """
-    校验 Agent1 事实中是否已有「网图/水印/非实拍」类客观线索，供语义层 fake_credential 锚定。
+    校验 Agent1 事实中是否已有「网图/AI生图/遮挡伪造/非实拍」类客观线索。
 
     参数:
         facts: FactOutput 或等价 dict。
 
     返回:
-        True 表示事实层已记载可疑图源，语义层方可输出 fake_credential_web_image。
+        True 表示事实层已记载明显欺骗线索，可作为恶意举证信号。
     """
-    anchor_keywords = _VISUAL_SUSPICION_KEYWORDS
+    anchor_keywords = _DECEPTIVE_CREDENTIAL_KEYWORDS
 
     def _iter_text_blobs() -> List[str]:
         blobs: List[str] = []
@@ -762,7 +865,12 @@ def _facts_anchor_supports_web_image_suspicion(facts) -> bool:
         return blobs
 
     corpus = " ".join(_iter_text_blobs()).lower()
-    return any(keyword in corpus for keyword in anchor_keywords)
+    return any(keyword.lower() in corpus for keyword in anchor_keywords)
+
+
+def _facts_anchor_supports_web_image_suspicion(facts) -> bool:
+    """兼容语义层命名：网图/AI图/遮挡伪造均属于虚假举证锚定。"""
+    return _facts_anchor_supports_deceptive_credential(facts)
 
 
 def _is_review_blackmail_chat(chat_history: List[str]) -> bool:
@@ -864,8 +972,8 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
             score = int(score_raw)
         except Exception:  # noqa: BLE001
             continue
-        if score not in {5, 10, 15}:
-            logger.info("%s 语义层忽略非法 score=%s（仅允许 5/10/15）", AGENT2_LOG_PREFIX, score_raw)
+        if score not in SEMANTIC_SCORE_ALLOWED:
+            logger.info("%s 语义层忽略非法 score=%s（仅允许 10/20/30）", AGENT2_LOG_PREFIX, score_raw)
             continue
         if signal_type == "review_blackmail" and not _is_review_blackmail_chat(input_data.chat_history):
             logger.info("%s review_blackmail 未通过双条件校验，按情绪激动处理，不计入恶意分", AGENT2_LOG_PREFIX)
@@ -892,13 +1000,64 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
 
 def _risk_level_from_score(risk_score: int) -> str:
     """
-    根据综合分映射风险等级。
+    根据综合分映射风险等级（分数轨）。
     """
-    if risk_score >= 60:
+    if risk_score >= RISK_LEVEL_SCORE_HIGH:
         return "high"
-    if risk_score >= 30:
+    if risk_score >= RISK_LEVEL_SCORE_MEDIUM:
         return "medium"
     return "low"
+
+
+def _max_risk_level(level_a: str, level_b: str) -> str:
+    """取两等级中较高者。"""
+    if _RISK_LEVEL_ORDER.get(level_a, 0) >= _RISK_LEVEL_ORDER.get(level_b, 0):
+        return level_a
+    return level_b
+
+
+def _risk_level_floor_from_signals(signals: List[MaliciousSignal]) -> str:
+    """
+    信号轨：强恶意类型命中时抬高等级下限，避免「单条满分仍 low」。
+    """
+    if not signals:
+        return "low"
+
+    def _max_score_for(signal_type: str) -> int:
+        return max((item.score for item in signals if item.signal_type == signal_type), default=0)
+
+    strong_hits = [
+        item
+        for item in signals
+        if item.signal_type in STRONG_MALICIOUS_SIGNAL_TYPES and item.score >= 10
+    ]
+    very_strong_hits = [item for item in strong_hits if item.score >= 20]
+
+    if _max_score_for("identity_impersonation") >= 10:
+        return "high"
+    if len(very_strong_hits) >= 2:
+        return "high"
+    if _max_score_for("review_blackmail") >= 20:
+        return "high"
+    if _max_score_for("fake_credential_web_image") >= 20:
+        return "high"
+    if _max_score_for("deceptive_credential") >= HARD_RULE_SCORE:
+        return "high"
+    if any(item.score >= 30 for item in strong_hits):
+        return "high"
+
+    if strong_hits:
+        return "medium"
+    if _max_score_for("professional_claim_pattern") >= 20:
+        return "medium"
+    if _max_score_for("abuse_refund_intent_chat") >= 20:
+        return "medium"
+    return "low"
+
+
+def _resolve_risk_level(risk_score: int, signals: List[MaliciousSignal]) -> str:
+    """综合分轨与信号轨取较高等级。"""
+    return _max_risk_level(_risk_level_from_score(risk_score), _risk_level_floor_from_signals(signals))
 
 
 def _disposition_advice_from_level(risk_level: str) -> str:
@@ -921,8 +1080,8 @@ def detect_malicious_behavior(input_data: MaliciousDetectionInput) -> MaliciousD
     semantic_signals = _run_llm_semantic(input_data=input_data, hard_signals=hard_signals)
     all_signals = hard_signals + semantic_signals
 
-    risk_total_score = min(100, sum(signal.score for signal in all_signals))
-    risk_level = _risk_level_from_score(risk_total_score)
+    risk_total_score = min(RISK_SCORE_CAP, sum(signal.score for signal in all_signals))
+    risk_level = _resolve_risk_level(risk_total_score, all_signals)
     hard_rule_summary = _build_hard_rule_summary(hard_signals)
     malicious_risk_hints = _format_malicious_risk_hints(all_signals)
     disposition_advice = _disposition_advice_from_level(risk_level)

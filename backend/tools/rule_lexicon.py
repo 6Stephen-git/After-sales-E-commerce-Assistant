@@ -32,26 +32,6 @@ INTENT_TO_FACETS: dict[str, tuple[str, ...]] = {
     "假冒": ("counterfeit",),
 }
 
-# 聊天文本推断品类 slug 的补充关键词（slug 主键来自 lexicon category_slug）
-CATEGORY_TEXT_EXTRA_HINTS: dict[str, tuple[str, ...]] = {
-    "phone": ("iphone", "ipad", "智能手机", "安卓机"),
-    "footwear": ("球鞋", "运动鞋", "皮鞋"),
-    "apparel": ("T恤", "外套", "连衣裙"),
-    "major_appliance": ("冰箱", "洗衣机", "空调"),
-    "fresh": (
-        "香蕉", "苹果", "橙子", "柑橘", "草莓", "葡萄", "榴莲", "芒果", "水果",
-        "海鲜", "虾", "蟹", "鱼", "牛肉", "猪肉", "鸡肉", "生鲜", "蔬果", "果蔬",
-        "腐烂", "变质", "不新鲜", "发臭", "发霉",
-    ),
-    "food": (
-        "零食", "坚果", "特产", "粮油", "速食", "干货", "烘焙", "茶叶", "咖啡",
-        "麦片", "冲饮", "奶粉", "保质期", "生产日期", "食品",
-    ),
-}
-
-# 聊天中出现下列词且伴随生鲜/食品语境时，优先推断为 fresh
-FRESH_ISSUE_TERMS: tuple[str, ...] = ("坏了", "烂了", "吃", "腐", "臭", "霉")
-
 @lru_cache(maxsize=1)
 def load_lexicon() -> dict[str, Any]:
     """
@@ -299,6 +279,125 @@ def validate_category_slug(slug: str | None) -> str | None:
     return text
 
 
+def infer_category_slug_from_materials(materials: dict[str, Any]) -> str | None:
+    """
+    从 materials 读取已通过 lexicon 校验的 slug 字段；不做中文标签硬匹配。
+
+    中文品类描述须走 resolve_category_slug 的语义推断路径。
+    """
+    for key in ("product_category_slug", "category_slug"):
+        value = materials.get(key)
+        if isinstance(value, str) and value.strip():
+            validated = validate_category_slug(value.strip())
+            if validated:
+                return validated
+    return None
+
+
+def _extract_category_label_text(materials: dict[str, Any]) -> str:
+    """合并 materials 中的中文品类描述字段。"""
+    parts: list[str] = []
+    for key in ("category", "product_category", "category_name"):
+        value = materials.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return " / ".join(dict.fromkeys(parts))
+
+
+def _format_service_tags_for_prompt(materials: dict[str, Any]) -> str:
+    """将平台服务标格式化为 prompt 辅助线索。"""
+    tags = materials.get("platform_service_tags")
+    if not isinstance(tags, list):
+        return "无"
+    cleaned = [str(item).strip() for item in tags if str(item or "").strip()]
+    return "、".join(cleaned) if cleaned else "无"
+
+
+def _build_category_inference_blob(
+    materials: dict[str, Any],
+    text_context: str,
+    *,
+    issue_summary: str | None = None,
+    defect_type: str | None = None,
+) -> str:
+    """拼装供品类 LLM 理解的案情与材料摘要。"""
+    parts: list[str] = []
+    label = _extract_category_label_text(materials)
+    if label:
+        parts.append(f"商品品类（材料）：{label}")
+    if defect_type and str(defect_type).strip():
+        parts.append(f"瑕疵类型：{str(defect_type).strip()}")
+    if issue_summary and str(issue_summary).strip():
+        parts.append(f"诉求摘要：{str(issue_summary).strip()}")
+    service_tags = _format_service_tags_for_prompt(materials)
+    if service_tags != "无":
+        parts.append(f"平台服务标：{service_tags}")
+    if text_context.strip():
+        parts.append(f"买家描述与聊天：\n{text_context.strip()}")
+    return "\n".join(parts)
+
+
+def should_infer_category_slug(
+    materials: dict[str, Any],
+    text_context: str,
+    *,
+    issue_summary: str | None = None,
+    defect_type: str | None = None,
+) -> bool:
+    """
+    判断是否具备足够上下文启动品类语义推断（无合法 slug 时）。
+
+    不依赖争点关键词表；有品类描述、聊天、服务标或瑕疵摘要即可。
+    """
+    if infer_category_slug_from_materials(materials):
+        return False
+    if _extract_category_label_text(materials):
+        return True
+    if str(issue_summary or "").strip():
+        return True
+    if str(defect_type or "").strip():
+        return True
+    if _format_service_tags_for_prompt(materials) != "无":
+        return True
+    return bool(str(text_context or "").strip())
+
+
+def resolve_category_slug(
+    materials: dict[str, Any],
+    text_context: str = "",
+    *,
+    issue_summary: str | None = None,
+    defect_type: str | None = None,
+) -> tuple[str | None, float, str]:
+    """
+    品类 slug 单一路径：校验 slug 字段 → 语义 LLM → 无则放弃。
+
+    返回 (slug, confidence, source)，source 为 api / llm / none。
+    """
+    existing = infer_category_slug_from_materials(materials)
+    if existing:
+        return existing, 1.0, "api"
+
+    if not should_infer_category_slug(
+        materials,
+        text_context,
+        issue_summary=issue_summary,
+        defect_type=defect_type,
+    ):
+        return None, 0.0, "none"
+
+    blob = _build_category_inference_blob(
+        materials,
+        text_context,
+        issue_summary=issue_summary,
+        defect_type=defect_type,
+    )
+    slug, confidence = infer_category_slug_llm(blob, materials)
+    if slug:
+        return slug, confidence, "llm"
+    return None, 0.0, "none"
+
+
 def format_category_slug_catalog_lines() -> str:
     """
     生成写入 LLM prompt 的可选 slug 列表文本。
@@ -339,17 +438,13 @@ def _parse_category_llm_json(raw_text: str) -> tuple[str | None, float]:
             return None, 0.0
     if not isinstance(payload, dict):
         return None, 0.0
-    slug = str(payload.get("category_slug", "") or "").strip()
-    if slug.lower() in {"none", "null", "unknown", ""}:
-        return None, 0.0
     try:
         confidence = float(payload.get("confidence", 0.0))
     except (TypeError, ValueError):
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
-    valid_slugs = {item["slug"] for item in build_category_slug_catalog()}
-    if slug not in valid_slugs:
-        logger.warning("%s LLM 返回未知 category_slug=%s，已忽略", LOG_PREFIX, slug)
+    slug = validate_category_slug(str(payload.get("category_slug", "") or "").strip() or None)
+    if not slug:
         return None, 0.0
     return slug, confidence
 
@@ -360,7 +455,7 @@ def infer_category_slug_llm(text: str, materials: dict[str, Any] | None = None) 
     """
     from backend.tools.llm_client import chat_completion
 
-    api_slug = str((materials or {}).get("product_category_slug", "") or "").strip()
+    api_slug = validate_category_slug(str((materials or {}).get("product_category_slug", "") or "").strip() or None)
     if api_slug and get_category_doc_id(api_slug):
         return api_slug, 1.0
 
@@ -374,17 +469,28 @@ def infer_category_slug_llm(text: str, materials: dict[str, Any] | None = None) 
 
     catalog_lines = "\n".join(f"- slug={item['slug']} doc={item['doc_name']}" for item in catalog)
     system_prompt = (
-        "你是电商纠纷品类分类助手。根据买家描述，从给定 slug 枚举中选择最匹配的特殊品类；"
-        "无法判断则 category_slug 填 null。\n"
-        "只输出 JSON：{\"category_slug\":\"apparel或null\",\"confidence\":0.0~1.0}\n"
-        "示例1：「衣服袖子破洞」→ apparel, 0.92\n"
-        "示例2：「手机屏幕划痕」→ phone, 0.95\n"
-        "示例3：「香蕉收到就烂了」→ fresh, 0.9"
+        "你是电商纠纷品类分类助手。根据「卖的是什么商品」与纠纷争点，从给定 slug 枚举中选择最匹配的特殊品类规范；"
+        "无法判断则 category_slug 填 null。只输出 JSON："
+        "{\"category_slug\":\"slug或null\",\"confidence\":0.0~1.0}\n"
+        "规则：\n"
+        "1) 必须从枚举中选择，禁止自造 slug；\n"
+        "2) 先判断商品品类（宠物/水果生鲜/包装食品/服饰/手机等），再参考争点；"
+        "禁止仅因「呕吐、死亡、坏了、烂了」等症状词就选 fresh；\n"
+        "3) 活体宠物、猫狗鸟等 → pet；伤亡大病包退等服务标仅作辅助，不能单独决定 slug；\n"
+        "4) 需保鲜且易腐的生鲜（水果/海鲜/肉类腐烂变质）→ fresh，勿用 food 替代；\n"
+        "5) 包装零食、粮油干货、冲饮奶粉、保质期/标签描述不符 → food；\n"
+        "6) 服饰破损/划痕 → apparel；手机/平板功能或外观 → phone。\n"
+        "示例：「小狗死亡要求退款」→ pet；「葡萄发霉仅退款」→ fresh；"
+        "「零食保质期与页面不符」→ food；「T恤破洞」→ apparel。"
     )
+    category_label = _extract_category_label_text(materials or {})
+    service_tags = _format_service_tags_for_prompt(materials or {})
     user_prompt = (
         f"可选 slug 列表：\n{catalog_lines}\n\n"
         f"product_category_slug(API)={api_slug or '无'}\n"
-        f"买家描述：\n{blob}"
+        f"商品品类（材料）={category_label or '无'}\n"
+        f"平台服务标={service_tags}\n"
+        f"案情：\n{blob}"
     )
     llm_text = chat_completion(
         messages=[
@@ -426,6 +532,8 @@ def collect_lexicon_search_hints(
     should: list[str] = []
     case: list[str] = []
     blob = str(buyer_text or "")
+    intent_blob = " ".join(str(item) for item in (intent_tags or []))
+    combined_blob = f"{blob} {intent_blob}"
     intent_facets = set(infer_facets_from_intent(intent_tags or []))
 
     for sec in doc.get("sections", []) or []:
@@ -470,6 +578,13 @@ def collect_lexicon_search_hints(
             if colloquial and colloquial in blob:
                 _extend_unique(case, [colloquial])
                 _extend_unique(must, mapped if isinstance(mapped, list) else [])
+
+    if any(k in combined_blob for k in ("七天无理由", "7天无理由", "无理由退货")):
+        _extend_unique(must, ["七天无理由", "商品完好", "退货申请"])
+        _extend_unique(should, ["不影响二次销售", "使用痕迹", "退货运费", "运费", "买家承担", "验收"])
+        if "批量" in combined_blob or "试穿" in combined_blob:
+            _extend_unique(case, ["批量试穿", "试穿"])
+            _extend_unique(should, ["使用痕迹", "影响二次销售"])
 
     return must, should, case
 

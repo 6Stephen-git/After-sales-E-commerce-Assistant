@@ -41,6 +41,7 @@ from backend.tools.agent2_tools import (
 )
 from schemas import (
     BuyerProfile,
+    ChatTurn,
     CustomerValueInput,
     CustomerValueOutput,
     FactOutput,
@@ -48,10 +49,18 @@ from schemas import (
     MaliciousSignal,
     MaliciousDetectionInput,
     MatchedRule,
+    RuleConstraint,
+    RuleBrief,
     StrategyInput,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
+    RULE_CONSTRAINT_APPLIES,
+    RULE_CONSTRAINT_EVIDENCE,
+    RULE_CONSTRAINT_OTHER,
+    RULE_CONSTRAINT_MISSING_FACT,
+    RULE_CONSTRAINT_RATIO_LIMIT,
+    RULE_CONSTRAINT_TIMING,
     RULE_RELEVANCE_MUST,
 )
 
@@ -193,6 +202,113 @@ class TestAgent2Recommend:
         assert output.disposition == DISPOSITION_NEGOTIATE
         assert any("策略阶段" in item for item in output.risk_factors)
         assert "补证" in output.strategy_direction_summary or "举证" in output.strategy_direction_summary
+
+    def test_no_quality_problem_return_request_should_not_enter_evidence_first(self, monkeypatch):
+        """七天无理由/完好争议不是质量瑕疵举证，不应因 defect_type=无 进入补证阶段。"""
+        self._mock_strategy_llm(monkeypatch)
+        facts = FactOutput(
+            issue_summary="买家主张本单适用七天无理由退货，要求直接办理退货；争议焦点是批量试穿30件后是否仍满足商品完好。",
+            intent_tags=["七天无理由退货", "退款诉求", "商品完好争议", "批量试穿"],
+            goods_received=True,
+            defect_type="无",
+            evidence_quality="medium",
+            missing_evidence=[],
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_new", purchase_count=1, dispute_rate=0),
+            order_amount=2400.0,
+            chat_history=["颜色不喜欢，买了七天无理由，麻烦尽快处理退货申请。"],
+            chat_turns=[
+                ChatTurn(role="buyer", content="颜色不喜欢，买了七天无理由，麻烦尽快处理退货申请。")
+            ],
+        )
+
+        output = recommend(_with_precomputed(input_data))
+
+        assert output.strategy_stage != "evidence_first"
+
+    def test_rule_based_return_dispute_should_output_rule_explain_contract(self, monkeypatch):
+        """七天无理由+商品完好争议：当前动作应讲规则和验收流程，不进入金额和解契约。"""
+        self._mock_strategy_llm(monkeypatch)
+        facts = FactOutput(
+            issue_summary="买家主张七天无理由应直接退货退款，商家关注30件批量试穿后是否仍完好。",
+            intent_tags=["七天无理由退货", "退款诉求", "商品完好争议", "批量试穿"],
+            goods_received=True,
+            defect_type="无",
+            evidence_quality="medium",
+            missing_evidence=[],
+        )
+        rule = MatchedRule(
+            rule_id="return::intact",
+            rule_summary="七天无理由退货以商品完好、不影响二次销售为前提，退回后商家可按规则验收。",
+            condition_result="命中服务规则边界",
+            relevance=RULE_RELEVANCE_MUST,
+            stance_hint="neutral",
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_7day", purchase_count=1),
+            matched_rules=[rule],
+            rule_briefs=[
+                RuleBrief(
+                    article_ref="七天无理由规则",
+                    brief="七天无理由退货成立前提是商品完好且不影响二次销售，退回商品需验收。",
+                    relevance=RULE_RELEVANCE_MUST,
+                    stance_hint="neutral",
+                )
+            ],
+            order_amount=2400.0,
+            chat_turns=[ChatTurn(role="buyer", content="我买了七天无理由，为什么不能直接退？")],
+        )
+
+        output = recommend(_with_precomputed(input_data))
+
+        assert output.action_type == "rule_explain"
+        assert output.compensation_policy == "none"
+        assert any("完好" in item for item in output.rule_constraints)
+        assert any("验收" in item for item in output.rule_constraints)
+        constraints_text = "；".join(output.rule_constraints)
+        assert "影响二次销售" in constraints_text
+        assert "使用痕迹" in constraints_text
+        assert "不予退款" in constraints_text or "无法退款" in constraints_text
+        assert "运费" in constraints_text
+        assert "金额" not in output.strategy_direction_summary
+        assert "补偿" not in output.strategy_direction_summary
+        assert "验收" in output.strategy_direction_summary or "规则" in output.strategy_direction_summary
+        assert "金额" not in output.next_step
+
+    def test_clear_merchant_fault_should_output_remedy_contract(self, monkeypatch):
+        """商责明确时应进入善后动作契约，允许明确处理方案。"""
+        self._mock_strategy_llm(monkeypatch)
+        facts = FactOutput(
+            issue_summary="买家收到商品破损，已提供清晰图片，要求退款。",
+            intent_tags=["质量问题", "退款诉求"],
+            goods_received=True,
+            defect_type="破损",
+            evidence_quality="high",
+            missing_evidence=[],
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_fault"),
+            matched_rules=[
+                MatchedRule(
+                    rule_id="quality::refund",
+                    rule_summary="买家举证有效证明商品存在质量问题时，平台倾向支持退货退款。",
+                    condition_result="规则条件全部满足；建议策略:compensate",
+                    relevance=RULE_RELEVANCE_MUST,
+                    stance_hint="buyer",
+                )
+            ],
+            order_amount=128.0,
+        )
+
+        output = recommend(_with_precomputed(input_data))
+
+        assert output.action_type == "merchant_remedy"
+        assert output.compensation_policy == "explicit_amount"
+        assert "退" in output.next_step or "补" in output.next_step
 
     def test_recommend_negotiate_for_medium_evidence_color_diff(self, monkeypatch):
         """色差且证据中等，倾向协商。"""
@@ -391,6 +507,46 @@ class TestAgent2Recommend:
         output = recommend(_with_precomputed(input_data))
         assert "大数据" not in " ".join(output.platform_rule_basis)
         assert any("划痕" in line for line in output.platform_rule_basis)
+
+    def test_platform_rule_basis_only_statute_summaries_not_constraints(self):
+        """平台规则依据仅收录 matched_rules 法条摘要，不混入 rule_constraints 程序句。"""
+        evidence_template = (
+            "处理退款或补偿前，应先核验买家举证是否满足规则要求，"
+            "并固定商品照片、视频、快递单和聊天记录"
+        )
+        statute_line = "生鲜类商品存在腐烂、变质等情形的，买家需在签收商品之时起48小时内拍照并联系卖家协商"
+        input_data = StrategyInput(
+            facts=FactOutput(defect_type="腐败变质", evidence_quality="高"),
+            buyer_profile=BuyerProfile(buyer_id="buyer_fresh"),
+            matched_rules=[
+                MatchedRule(
+                    rule_id="fresh::第三条",
+                    rule_summary=statute_line,
+                    condition_result="LLM判定",
+                    relevance=RULE_RELEVANCE_MUST,
+                    doc_id="fresh",
+                    article_no="第三条",
+                )
+            ],
+            rule_constraints=[
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_EVIDENCE,
+                    text=evidence_template,
+                    status=RULE_CONSTRAINT_APPLIES,
+                    source_rule_id="fresh::第三条",
+                ),
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_OTHER,
+                    text="举证要求",
+                    status=RULE_CONSTRAINT_APPLIES,
+                    source_rule_id="fresh::第三条",
+                ),
+            ],
+        )
+        basis = strategist_module._build_platform_rule_basis(input_data)
+        assert basis == [statute_line]
+        assert evidence_template not in " ".join(basis)
+        assert "举证要求" not in basis
 
     def test_recommend_should_surface_precomputed_malicious_layer(self, monkeypatch):
         """分层编排后，应透传 Controller 预计算的恶意检测并写入风险提示。"""
@@ -683,6 +839,23 @@ class TestAgent2Tools:
         assert result.channel == "long_term"
         assert result.compensation_uplift == "+10%~20%"
 
+    def test_customer_value_can_use_lifetime_amount_threshold(self, monkeypatch):
+        """测试场景可按累计消费金额阈值触发长期客户通道。"""
+        monkeypatch.setattr(agent2_tools_module, "LONG_TERM_VALUE_AMOUNT_THRESHOLD", 100.0)
+        profile = BuyerProfile(
+            buyer_id="buyer_ltv",
+            purchase_count=5,
+            avg_order_value=30,
+            dispute_rate=0.4,
+            return_rate=0.4,
+            positive_review_count=3,
+        )
+        result = evaluate_customer_value(CustomerValueInput(buyer_profile=profile, order_amount=50))
+
+        assert result.long_term_score == 41
+        assert result.long_term_triggered is True
+        assert result.channel == "long_term"
+
     def test_evaluate_customer_value_should_score_recoverability_as_higher_when_worse(self):
         """商品越不可挽回，本单得分应越高。"""
         profile = BuyerProfile(buyer_id="buyer_case")
@@ -798,7 +971,7 @@ class TestAgent2Tools:
             agent2_tools_module,
             "chat_completion",
             lambda **kwargs: (
-                '[{"signal_type":"review_blackmail","description":"出现差评勒索语义","score":10,"source":"llm_semantic"}]'
+                '[{"signal_type":"review_blackmail","description":"出现差评勒索语义","score":20,"source":"llm_semantic"}]'
             ),
         )
         input_data = MaliciousDetectionInput(
@@ -808,8 +981,46 @@ class TestAgent2Tools:
             chat_history=["不给赔偿我就差评并投诉你们店"],
         )
         result = detect_malicious_behavior(input_data)
-        assert result.risk_score >= 10
+        assert result.risk_score >= 20
+        assert result.risk_level == "high"
         assert any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
+
+    def test_detect_malicious_deceptive_credential_should_be_high(self, monkeypatch):
+        """本单举证存在网图/非实拍欺骗线索时，应直接命中恶意举证硬规则。"""
+        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_new", purchase_count=0, return_rate=0.0),
+            facts=FactOutput(
+                evidence_quality="medium",
+                issue_summary="电热水壶底座开裂",
+                red_flags=["图文来源可疑"],
+                visual_observations=["图片角落可见1688.com批发图水印"],
+            ),
+            order_amount=199.0,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
+        assert result.risk_score >= 20
+        assert result.risk_level == "high"
+
+    def test_detect_malicious_ai_generated_credential_should_be_high(self, monkeypatch):
+        """事实层明确 AI 生图/伪造举证时，应按明显欺骗类恶意处理。"""
+        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_ai", purchase_count=0, return_rate=0.0),
+            facts=FactOutput(
+                evidence_quality="medium",
+                issue_summary="买家称商品外壳破裂",
+                red_flags=["举证图疑似AI生成，纹理和阴影不符合实拍"],
+                visual_observations=["图片存在AI生图痕迹，破损边缘形态不自然"],
+            ),
+            order_amount=299.0,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
+        assert result.risk_level == "high"
 
     def test_detect_malicious_behavior_should_reject_fake_credential_without_fact_anchor(self, monkeypatch):
         """语义层输出网图信号但 facts 无锚定时，应丢弃以防幻觉渗入。"""
@@ -880,6 +1091,25 @@ class TestAgent2Tools:
 
 
 class TestMaliciousSemanticOptimization:
+    def test_should_call_semantic_llm_when_chat_substantive_without_flags(self, monkeypatch):
+        """有足够聊天文本时，即使无 red_flags 也应调用语义 LLM。"""
+        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
+        called = {"count": 0}
+
+        def _mock_call(**_kwargs):
+            called["count"] += 1
+            return "[]"
+
+        monkeypatch.setattr(agent2_tools_module, "chat_completion", _mock_call)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_chat", purchase_count=0, return_rate=0.0),
+            facts=FactOutput(evidence_quality="high", issue_summary="商品破损"),
+            order_amount=88.0,
+            chat_history=["商品收到就裂了，你们必须今天内给我处理退款，不然我天天来问"],
+        )
+        detect_malicious_behavior(input_data)
+        assert called["count"] == 1
+
     def test_should_skip_semantic_llm_on_low_material_case(self, monkeypatch):
         """无硬规则、无疑点、无聊天时不调语义 LLM。"""
         monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
@@ -995,14 +1225,36 @@ class TestStrategyPromptPayload:
         assert "article_ref" not in payload["rule_briefs"][0]
 
     def test_needs_rule_match_gate(self):
-        """简单案跳过条文匹配；恶意/价值/多诉求标签触发。"""
+        """简单案跳过条文匹配；C/E 通道、恶意/价值/多诉求标签触发。"""
         from backend.tools.agent2_tools import needs_rule_match
-        from schemas import CustomerValueOutput, FactOutput, MaliciousDetectionOutput
+        from schemas import CustomerValueOutput, FactOutput, MaliciousDetectionOutput, RuleMatchPlan
 
         base_facts = FactOutput(issue_summary="屏幕划痕", intent_tags=["质量问题"], evidence_quality="high")
         base_malicious = MaliciousDetectionOutput(risk_level="low")
         base_value = CustomerValueOutput(channel="none")
         assert not needs_rule_match(base_facts, base_malicious, base_value)
+
+        category_facts = FactOutput(
+            issue_summary="批量试穿后要求退货",
+            intent_tags=["七天无理由退货"],
+            evidence_quality="medium",
+            rule_match_plan=RuleMatchPlan(
+                activated_lanes=["A", "C"],
+                target_doc_ids=["特殊品类争议处理_淘宝平台服饰类商品争议处理规范_1155_11003625"],
+            ),
+        )
+        assert needs_rule_match(category_facts, base_malicious, base_value)
+
+        service_facts = FactOutput(
+            issue_summary="七天无理由完好争议",
+            intent_tags=["七天无理由退货"],
+            evidence_quality="medium",
+            rule_match_plan=RuleMatchPlan(
+                activated_lanes=["A", "E"],
+                target_doc_ids=["服务保障_淘宝网七天无理由退货规范_1150_5507"],
+            ),
+        )
+        assert needs_rule_match(service_facts, base_malicious, base_value)
 
         assert needs_rule_match(
             base_facts,
@@ -1027,6 +1279,124 @@ class TestStrategyPromptPayload:
 
 
 class TestRuleMatcherInfra:
+    def test_facts_overlay_should_preserve_rule_context(self):
+        """facts_override 未知规则字段应进入 attributes.rule_context。"""
+        from tests.run_manual_cases import _normalize_facts_overlay_for_model
+
+        normalized = _normalize_facts_overlay_for_model(
+            {
+                "issue_summary": "葡萄霉变",
+                "is_received": True,
+                "time_since_delivery_hours": 49,
+                "compensation_ratio_cap": 0.3,
+            }
+        )
+        facts = FactOutput.model_validate(normalized)
+        assert facts.goods_received is True
+        assert facts.attributes["rule_context"]["time_since_delivery_hours"] == 49
+        assert facts.attributes["rule_context"]["compensation_ratio_cap"] == 0.3
+
+    def test_rule_constraints_should_capture_timing_and_ratio_limit(self):
+        """规则匹配应把时效与补偿比例转成结构化约束。"""
+        from backend.tools.rule_matcher import _build_rule_constraints
+
+        rule = MatchedRule(
+            rule_id="fresh::第三条",
+            rule_summary="生鲜类商品存在腐烂、变质等情形的，买家需在签收商品之时起48小时内拍照并联系卖家协商。",
+            condition_result="",
+            relevance=RULE_RELEVANCE_MUST,
+            doc_id="fresh",
+            article_no="第三条",
+        )
+        facts = FactOutput(
+            evidence_quality="high",
+            attributes={
+                "rule_context": {
+                    "time_since_delivery_hours": 49,
+                    "compensation_ratio_cap": 0.3,
+                }
+            },
+        )
+        constraints = _build_rule_constraints([rule], facts)
+        assert any(
+            item.constraint_type == RULE_CONSTRAINT_TIMING
+            and item.status == "violated"
+            and "48小时" in item.text
+            for item in constraints
+        )
+        assert any(
+            item.constraint_type == RULE_CONSTRAINT_RATIO_LIMIT and "30%" in item.text
+            for item in constraints
+        )
+
+    def test_category_label_without_slug_should_not_hard_match_fresh(self):
+        """中文品类标签不再硬匹配 slug，须走语义推断或留空。"""
+        from backend.tools.rule_lexicon import infer_category_slug_from_materials
+
+        assert infer_category_slug_from_materials({"category": "水果"}) is None
+        assert infer_category_slug_from_materials({"product_category_slug": "fresh"}) == "fresh"
+
+    def test_strategy_should_prioritize_timing_constraint(self, monkeypatch):
+        """时效未满足时，策略动作应先解释规则边界而非金额和解。"""
+        monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **_kwargs: None)
+        input_data = StrategyInput(
+            facts=FactOutput(issue_summary="葡萄霉变，申请仅退款", evidence_quality="high"),
+            buyer_profile=BuyerProfile(buyer_id="buyer_timing", purchase_count=5),
+            matched_rules=[],
+            rule_briefs=[],
+            rule_constraints=[
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_TIMING,
+                    status=RULE_CONSTRAINT_MISSING_FACT,
+                    text="本案售后发生在签收后约48小时，需先核验并说明是否超过规则要求的48小时内申请/举证时效",
+                    source_rule_id="fresh::第三条",
+                )
+            ],
+            order_amount=50,
+        )
+        output = recommend(
+            _with_precomputed(
+                input_data,
+                malicious_detection=MaliciousDetectionOutput(risk_level="medium", risk_score=20),
+                customer_value=CustomerValueOutput(channel="none"),
+            )
+        )
+        assert output.action_type == "rule_explain"
+        assert output.compensation_policy == "none"
+        assert "48小时" in output.next_step
+
+    def test_script_payload_should_include_compensation_cap(self):
+        """话术 payload 应根据规则上下文计算最大补偿金额。"""
+        from backend.agents.agent3.script_generator import _build_script_payload
+        from schemas import ScriptInput, StrategyOutput
+
+        strategy = StrategyOutput(
+            disposition=DISPOSITION_NEGOTIATE,
+            rule_constraints=["补偿不得超过本单金额30%"],
+            structured_rule_constraints=[
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_RATIO_LIMIT,
+                    status=RULE_CONSTRAINT_APPLIES,
+                    text="补偿或让步金额不得超过本单金额的30%",
+                    source_rule_id="policy_limits",
+                )
+            ],
+        )
+        input_data = ScriptInput(
+            strategy_output=strategy,
+            facts=FactOutput(attributes={"rule_context": {"compensation_ratio_cap": 0.3}}),
+            order_id="order-1",
+            order_amount=50,
+        )
+        payload = _build_script_payload(
+            input_data,
+            response_mode="neutral_negotiate",
+            compensation_policy="explicit_amount",
+            dialogue_context=strategy.dialogue_context or strategist_module.DialogueContext(),
+            must_state_compensation_amount=True,
+        )
+        assert payload["max_compensation_amount"] == 15
+
     def test_load_documents_should_batch_fetch_uncached_doc_ids(self, monkeypatch):
         """未命中缓存的 doc 应一次批量查询 MySQL。"""
         from backend.tools import rule_matcher as rule_matcher_module

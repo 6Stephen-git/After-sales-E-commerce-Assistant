@@ -1,0 +1,79 @@
+{
+  "type": "object",
+  "required": ["meta", "human_review", "expectation", "taxonomy", "materials", "buyer_profile"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["case_id", "title"],
+      "properties": {
+        "case_id": { "type": "string" },
+        "title": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "scenario_narrative": { "type": "string" },
+    "human_review": {
+      "type": "object",
+      "required": ["scenario_restated", "fixture_focus", "checks_before_run"],
+      "properties": {
+        "scenario_restated": { "type": "string" },
+        "fixture_focus": { "type": "string" },
+        "checks_before_run": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
+    "expectation": {
+      "type": "object",
+      "properties": {
+        "intent_summary": { "type": "string" },
+        "acceptable_dispositions": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["defend", "negotiate", "compensate"] }
+        },
+        "forbidden_outputs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "taxonomy": {
+      "type": "object",
+      "properties": {
+        "primary_axis": {
+          "type": "string",
+          "enum": ["rule", "malicious", "value", "precedent", "conflict"]
+        },
+        "evidence_level": { "type": "string", "enum": ["high", "medium", "low"] },
+        "buyer_risk": { "type": "string", "enum": ["low", "medium", "high"] },
+        "order_amount_band": { "type": "string", "enum": ["low", "medium", "high"] },
+        "complexity": { "type": "string", "enum": ["simple", "conflict"] }
+      }
+    },
+    "materials": { "type": "object" },
+    "buyer_profile": { "type": "object" },
+    "similar_cases": { "type": "array" },
+    "test_overrides": { "type": "object" },
+    "evidence_facts": {
+      "type": "object",
+      "properties": {
+        "issue_summary": { "type": "string" },
+        "defect_type": { "type": "string" },
+        "evidence_quality": { "type": "string" },
+        "visual_observations": { "type": "array", "items": { "type": "string" } },
+        "visual_defect_severity": { "type": "string" },
+        "visual_goods_recoverability": { "type": "string" },
+        "logistics": {
+          "type": "object",
+          "properties": {
+            "goods_received": { "type": "boolean" },
+            "logistics_normal": { "type": "boolean" },
+            "time_since_delivery_hours": { "type": "number" },
+            "note": { "type": "string" }
+          }
+        },
+        "missing_evidence": { "type": "array", "items": { "type": "string" } },
+        "red_flags": { "type": "array", "items": { "type": "string" } },
+        "media_present": { "type": "boolean" }
+      }
+    },
+    "facts_override": { "type": "object" },
+    "malicious_context": { "type": "object" },
+    "steps": { "type": "array" }
+  }
+}
