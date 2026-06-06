@@ -25,6 +25,34 @@ EVIDENCE_MEDIUM = "medium"
 EVIDENCE_LOW = "low"
 VALID_EVIDENCE_QUALITY = [EVIDENCE_HIGH, EVIDENCE_MEDIUM, EVIDENCE_LOW]
 
+# 举证可信度（仅 Agent1 视觉链路写入；下游只读此字段，不再用关键词复判网图）
+CREDENTIAL_TRUST_UNKNOWN = "unknown"
+CREDENTIAL_TRUST_TRUSTED = "trusted"
+CREDENTIAL_TRUST_SUSPECT = "suspect"
+VALID_CREDENTIAL_TRUST = [
+    CREDENTIAL_TRUST_UNKNOWN,
+    CREDENTIAL_TRUST_TRUSTED,
+    CREDENTIAL_TRUST_SUSPECT,
+]
+
+# 争议主框架（Agent1 单点判定，下游只读）
+DISPUTE_FRAME_UNKNOWN = "unknown"
+DISPUTE_FRAME_SEVEN_DAY_RETURN = "seven_day_return"
+DISPUTE_FRAME_QUALITY_DEFECT = "quality_defect"
+DISPUTE_FRAME_DESCRIPTION_MISMATCH = "description_mismatch"
+DISPUTE_FRAME_LOGISTICS = "logistics"
+VALID_DISPUTE_FRAMES = [
+    DISPUTE_FRAME_UNKNOWN,
+    DISPUTE_FRAME_SEVEN_DAY_RETURN,
+    DISPUTE_FRAME_QUALITY_DEFECT,
+    DISPUTE_FRAME_DESCRIPTION_MISMATCH,
+    DISPUTE_FRAME_LOGISTICS,
+]
+
+# 无质量主张时，不因缺证清单直接进入 quality 举证阶段；且非商责时禁止主动金额和解（可扩展）
+FRAMES_SKIP_QUALITY_EVIDENCE_GATE = frozenset({DISPUTE_FRAME_SEVEN_DAY_RETURN})
+FRAMES_NO_MONETARY_SETTLE = FRAMES_SKIP_QUALITY_EVIDENCE_GATE
+
 # 话术应对思想（Agent 3 输出）
 RESPONSE_MODE_MERCHANT_FAULT = "merchant_fault"
 RESPONSE_MODE_MALICIOUS_RISK = "malicious_risk"
@@ -35,7 +63,7 @@ VALID_RESPONSE_MODES = [
     RESPONSE_MODE_NEUTRAL_NEGOTIATE,
 ]
 
-# 策略阶段（Agent 2 输出，Agent 3 用于补偿门禁）
+# 策略阶段（Agent 2 输出；Agent 3 仅用于 usage_tip 与举证阶段金额门禁）
 STRATEGY_STAGE_EVIDENCE_FIRST = "evidence_first"
 STRATEGY_STAGE_NEGOTIATE_SETTLE = "negotiate_settle"
 STRATEGY_STAGE_COMPENSATE_CLOSE = "compensate_close"
@@ -47,27 +75,23 @@ VALID_STRATEGY_STAGES = [
     STRATEGY_STAGE_DEFEND_PLATFORM,
 ]
 
-# 当前动作类型（Agent 2 输出，Agent 3 严格执行）
-ACTION_CLARIFY_INTENT = "clarify_intent"
+# 当前动作类型（Agent 2 _infer_action_contract 产出，Agent 3 严格执行）
 ACTION_RULE_EXPLAIN = "rule_explain"
 ACTION_EVIDENCE_REQUEST = "evidence_request"
 ACTION_RETURN_INSPECTION = "return_inspection"
 ACTION_MERCHANT_REMEDY = "merchant_remedy"
 ACTION_MONETARY_SETTLE = "monetary_settle"
 ACTION_DEFEND_PREPARE = "defend_prepare"
-ACTION_ESCALATION_CONTROL = "escalation_control"
 VALID_ACTION_TYPES = [
-    ACTION_CLARIFY_INTENT,
     ACTION_RULE_EXPLAIN,
     ACTION_EVIDENCE_REQUEST,
     ACTION_RETURN_INSPECTION,
     ACTION_MERCHANT_REMEDY,
     ACTION_MONETARY_SETTLE,
     ACTION_DEFEND_PREPARE,
-    ACTION_ESCALATION_CONTROL,
 ]
 
-# 补偿门禁（Agent 2 输出，Agent 3 使用）
+# 补偿门禁（Agent 2 动作契约产出，Agent 3 直接消费）
 COMPENSATION_POLICY_FORBID = "forbid"
 COMPENSATION_POLICY_NONE = "none"
 COMPENSATION_POLICY_SOFT_NO_AMOUNT = "soft_no_amount"
@@ -197,6 +221,18 @@ class FactOutput(BaseModel):
     logistics_normal: Optional[bool] = Field(default=None, description="物流是否正常")
     missing_evidence: List[str] = Field(default_factory=list, description="缺失的证据项")
     red_flags: List[str] = Field(default_factory=list, description="发现的疑点")
+    credential_trust: str = Field(
+        default=CREDENTIAL_TRUST_UNKNOWN,
+        description="举证图片可信度：unknown 无图或未判；trusted 视觉判定像本单实拍；suspect 视觉判定像网图/非实拍/伪造",
+    )
+    credential_trust_note: Optional[str] = Field(
+        default=None,
+        description="视觉模型对 credential_trust 的一句理由，供商家与策略参考",
+    )
+    primary_dispute_frame: str = Field(
+        default=DISPUTE_FRAME_UNKNOWN,
+        description="主争议框架：seven_day_return/quality_defect/description_mismatch/logistics/unknown",
+    )
     evidence_quality: str = Field(default=EVIDENCE_MEDIUM, description="证据质量：high/medium/low")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="事实提取置信度")
     uncertainty_note: Optional[str] = Field(default=None, description="当某些事实无法确定时，用自然语言说明原因")
@@ -354,7 +390,7 @@ class CustomerValueOutput(BaseModel):
 
 class MaliciousSignal(BaseModel):
     """恶意行为信号分项"""
-    signal_type: str = Field(..., description="信号类型标识，如 fake_evidence / abuse_refund_only")
+    signal_type: str = Field(..., description="信号类型标识，如 deceptive_credential / abuse_refund_only")
     description: str = Field(default="", description="触发描述（面向商家可读）")
     score: int = Field(default=0, description="本信号贡献分值")
     source: str = Field(default="hard_rule", description="信号来源：hard_rule / llm_semantic")
@@ -417,7 +453,7 @@ class StrategyOutput(BaseModel):
         description=f"策略阶段：{'/'.join(VALID_STRATEGY_STAGES)}",
     )
     action_type: str = Field(
-        default=ACTION_CLARIFY_INTENT,
+        default=ACTION_RULE_EXPLAIN,
         description=f"当前动作类型：{'/'.join(VALID_ACTION_TYPES)}",
     )
     compensation_policy: str = Field(

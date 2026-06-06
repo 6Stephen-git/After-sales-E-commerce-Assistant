@@ -38,6 +38,4 @@ data/rule_match_lexicon_review_queue.json
 tests/tmp_*.sqlite3
 
 # 情景跑批与 Judge 产出
-tests/output/manual_reports/
-tests/output/scenarios/
-tests/output/eval_runs/
+eval/output/

@@ -31,7 +31,7 @@ def setup_function() -> None:
     """
     clear_cache()
     reset_redis_client()
-    def _mock_match_rules_full(facts):
+    def _mock_match_rules_from_facts(facts):
         if facts.defect_type == "破洞" and facts.evidence_quality == "high":
             rule = MatchedRule(
                 rule_id="mock::第六十五条",
@@ -44,8 +44,7 @@ def setup_function() -> None:
             return RuleMatchResult(matched_rules=[rule], rule_briefs=[brief], display_rules=[rule])
         return RuleMatchResult()
 
-    agent2_tools_module.match_rules_full = _mock_match_rules_full
-    assisted_controller_module.match_rules_full = _mock_match_rules_full
+    assisted_controller_module.match_rules_from_facts = _mock_match_rules_from_facts
     strategist_module._llm_generate_strategy = lambda **kwargs: None
 
 

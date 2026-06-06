@@ -1,6 +1,8 @@
 """
-Agent2（策略参谋员）模块测试
-覆盖：3 个典型场景 + 1 个边界场景
+Agent2 / agent2_tools 核心契约测试。
+
+原则：保留典型场景 + 边界；单次 bug 修复验证后不单开用例堆积。
+业务回归以 eval.pipeline.scenario_gen + Judge 为准。
 """
 
 import os
@@ -21,7 +23,6 @@ if os.path.exists(TEST_DB_PATH):
     except OSError:
         pass
 os.environ["DB_URL"] = f"sqlite+pysqlite:///{TEST_DB_PATH.replace(os.sep, '/')}"
-os.environ.setdefault("ENABLE_TEST_STUBS", "1")
 
 from backend.db import init_db
 
@@ -34,11 +35,11 @@ import backend.tools.agent2_tools as agent2_tools_module
 from backend.tools.agent2_tools import (
     detect_malicious_behavior,
     evaluate_customer_value,
-    match_rules_full,
     query_buyer_profile,
     run_customer_value_analysis,
     search_similar_cases,
 )
+from backend.tools.rule_matcher import match_rules_from_facts
 from schemas import (
     BuyerProfile,
     ChatTurn,
@@ -203,34 +204,29 @@ class TestAgent2Recommend:
         assert any("策略阶段" in item for item in output.risk_factors)
         assert "补证" in output.strategy_direction_summary or "举证" in output.strategy_direction_summary
 
-    def test_no_quality_problem_return_request_should_not_enter_evidence_first(self, monkeypatch):
-        """七天无理由/完好争议不是质量瑕疵举证，不应因 defect_type=无 进入补证阶段。"""
+    def test_service_return_frame_strategy_contract(self, monkeypatch):
+        """服务退货框架（只读 primary_dispute_frame）：不进质量补证阶段，动作为讲规则/验收。"""
         self._mock_strategy_llm(monkeypatch)
-        facts = FactOutput(
-            issue_summary="买家主张本单适用七天无理由退货，要求直接办理退货；争议焦点是批量试穿30件后是否仍满足商品完好。",
-            intent_tags=["七天无理由退货", "退款诉求", "商品完好争议", "批量试穿"],
+
+        missing_proof_facts = FactOutput(
+            issue_summary="买家主张适用无理由退货；争议焦点为批量试穿后是否仍满足商品完好。",
+            intent_tags=["退款诉求", "商品完好争议", "批量试穿"],
             goods_received=True,
             defect_type="无",
             evidence_quality="medium",
-            missing_evidence=[],
+            missing_evidence=["商品完好验收照片"],
+            primary_dispute_frame="seven_day_return",
         )
-        input_data = StrategyInput(
-            facts=facts,
+        missing_proof_input = StrategyInput(
+            facts=missing_proof_facts,
             buyer_profile=BuyerProfile(buyer_id="buyer_new", purchase_count=1, dispute_rate=0),
             order_amount=2400.0,
-            chat_history=["颜色不喜欢，买了七天无理由，麻烦尽快处理退货申请。"],
-            chat_turns=[
-                ChatTurn(role="buyer", content="颜色不喜欢，买了七天无理由，麻烦尽快处理退货申请。")
-            ],
+            chat_history=["不喜欢颜色，麻烦按无理由退货处理。"],
+            chat_turns=[ChatTurn(role="buyer", content="不喜欢颜色，麻烦按无理由退货处理。")],
         )
+        missing_proof_out = recommend(_with_precomputed(missing_proof_input))
+        assert missing_proof_out.strategy_stage != "evidence_first"
 
-        output = recommend(_with_precomputed(input_data))
-
-        assert output.strategy_stage != "evidence_first"
-
-    def test_rule_based_return_dispute_should_output_rule_explain_contract(self, monkeypatch):
-        """七天无理由+商品完好争议：当前动作应讲规则和验收流程，不进入金额和解契约。"""
-        self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             issue_summary="买家主张七天无理由应直接退货退款，商家关注30件批量试穿后是否仍完好。",
             intent_tags=["七天无理由退货", "退款诉求", "商品完好争议", "批量试穿"],
@@ -238,6 +234,7 @@ class TestAgent2Recommend:
             defect_type="无",
             evidence_quality="medium",
             missing_evidence=[],
+            primary_dispute_frame="seven_day_return",
         )
         rule = MatchedRule(
             rule_id="return::intact",
@@ -261,11 +258,26 @@ class TestAgent2Recommend:
             order_amount=2400.0,
             chat_turns=[ChatTurn(role="buyer", content="我买了七天无理由，为什么不能直接退？")],
         )
-
+        buyer_stance_rule = MatchedRule(
+            rule_id="apparel::quality",
+            rule_summary="买家举证有效证明商品存在质量问题时，平台倾向支持退货退款。",
+            condition_result="建议策略:compensate",
+            relevance=RULE_RELEVANCE_MUST,
+            stance_hint="buyer",
+        )
+        buyer_stance_input = input_data.model_copy(
+            update={
+                "matched_rules": [rule, buyer_stance_rule],
+                "facts": facts.model_copy(update={"evidence_quality": "high"}),
+            }
+        )
         output = recommend(_with_precomputed(input_data))
+        buyer_stance_out = recommend(_with_precomputed(buyer_stance_input))
 
         assert output.action_type == "rule_explain"
         assert output.compensation_policy == "none"
+        assert buyer_stance_out.action_type == "rule_explain"
+        assert buyer_stance_out.compensation_policy == "none"
         assert any("完好" in item for item in output.rule_constraints)
         assert any("验收" in item for item in output.rule_constraints)
         constraints_text = "；".join(output.rule_constraints)
@@ -648,7 +660,7 @@ class TestAgent2Tools:
                 ),
             ),
         )
-        result = match_rules_full(facts)
+        result = match_rules_from_facts(facts)
         assert result.display_rules, "期望有前端代表条"
         ids = " ".join(r.rule_id for r in result.matched_rules)
         assert "第六十五条" in ids or "第四条" in ids
@@ -743,7 +755,7 @@ class TestAgent2Tools:
     def test_match_rules_empty_without_plan(self):
         """无 target_doc_ids 时不应匹配。"""
         facts = FactOutput(goods_received=True, defect_type="破洞", evidence_quality="high")
-        assert match_rules_full(facts).display_rules == []
+        assert match_rules_from_facts(facts).display_rules == []
 
     def test_classify_relevance_should_drop_generic_case_only_hits(self):
         """字面降级：仅命中泛化 case 词时应判 weak 并丢弃。"""
@@ -839,22 +851,22 @@ class TestAgent2Tools:
         assert result.channel == "long_term"
         assert result.compensation_uplift == "+10%~20%"
 
-    def test_customer_value_can_use_lifetime_amount_threshold(self, monkeypatch):
-        """测试场景可按累计消费金额阈值触发长期客户通道。"""
-        monkeypatch.setattr(agent2_tools_module, "LONG_TERM_VALUE_AMOUNT_THRESHOLD", 100.0)
+    def test_customer_value_long_term_requires_score_not_spend_alone(self, monkeypatch):
+        """累计消费高但长期价值分不足时，不得仅凭金额触发老客通道。"""
+        monkeypatch.setattr(agent2_tools_module, "ORDER_VALUE_SCORE_THRESHOLD", 60)
         profile = BuyerProfile(
             buyer_id="buyer_ltv",
-            purchase_count=5,
-            avg_order_value=30,
-            dispute_rate=0.4,
+            purchase_count=2,
+            avg_order_value=80.0,
+            dispute_rate=0.5,
             return_rate=0.4,
-            positive_review_count=3,
+            positive_review_count=0,
         )
         result = evaluate_customer_value(CustomerValueInput(buyer_profile=profile, order_amount=50))
 
-        assert result.long_term_score == 41
-        assert result.long_term_triggered is True
-        assert result.channel == "long_term"
+        assert result.long_term_score < 60
+        assert result.long_term_triggered is False
+        assert result.channel != "long_term"
 
     def test_evaluate_customer_value_should_score_recoverability_as_higher_when_worse(self):
         """商品越不可挽回，本单得分应越高。"""
@@ -964,6 +976,78 @@ class TestAgent2Tools:
         assert result.risk_level == "high"
         assert len(result.triggered_signals) >= 4
 
+    def test_detect_malicious_deceptive_credential_should_be_high(self, monkeypatch):
+        """本单举证存在网图/非实拍欺骗线索时，应直接命中恶意举证硬规则。"""
+        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_new", purchase_count=0, return_rate=0.0),
+            facts=FactOutput(
+                evidence_quality="medium",
+                issue_summary="电热水壶底座开裂",
+                credential_trust="suspect",
+                credential_trust_note="图片角落可见1688.com批发图水印",
+                red_flags=["图文来源可疑"],
+                visual_observations=["图片角落可见1688.com批发图水印"],
+            ),
+            order_amount=199.0,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
+        assert result.risk_score >= 20
+        assert result.risk_level == "high"
+
+    def test_detect_malicious_ai_generated_credential_should_be_high(self, monkeypatch):
+        """事实层明确 AI 生图/伪造举证时，应按明显欺骗类恶意处理。"""
+        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
+        input_data = MaliciousDetectionInput(
+            buyer_profile=BuyerProfile(buyer_id="buyer_ai", purchase_count=0, return_rate=0.0),
+            facts=FactOutput(
+                evidence_quality="medium",
+                issue_summary="买家称商品外壳破裂",
+                credential_trust="suspect",
+                credential_trust_note="举证图疑似AI生成",
+                red_flags=["举证图疑似AI生成，纹理和阴影不符合实拍"],
+                visual_observations=["图片存在AI生图痕迹，破损边缘形态不自然"],
+            ),
+            order_amount=299.0,
+            chat_history=[],
+        )
+        result = detect_malicious_behavior(input_data)
+        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
+        assert result.risk_level == "high"
+
+    def test_deceptive_credential_hard_rule_follows_credential_trust(self, monkeypatch):
+        """虚假举证硬规则只认 Agent1 credential_trust，不认自然语言水印描述。"""
+        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
+        suspect = detect_malicious_behavior(
+            MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="buyer_wm", purchase_count=0, return_rate=0.0),
+                facts=FactOutput(
+                    evidence_quality="medium",
+                    credential_trust="suspect",
+                    visual_observations=["图片角落可见批发图水印"],
+                ),
+                order_amount=199.0,
+                chat_history=[],
+            )
+        )
+        assert any(item.signal_type == "deceptive_credential" for item in suspect.triggered_signals)
+
+        clean = detect_malicious_behavior(
+            MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="buyer_wm2", purchase_count=0, return_rate=0.0),
+                facts=FactOutput(
+                    evidence_quality="medium",
+                    credential_trust="unknown",
+                    visual_observations=["图片角落可见批发图水印"],
+                ),
+                order_amount=199.0,
+                chat_history=[],
+            )
+        )
+        assert not any(item.signal_type == "deceptive_credential" for item in clean.triggered_signals)
+
     def test_detect_malicious_behavior_should_merge_semantic_signals(self, monkeypatch):
         """语义层返回结构化信号时应参与综合评分。"""
         monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
@@ -985,52 +1069,15 @@ class TestAgent2Tools:
         assert result.risk_level == "high"
         assert any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
 
-    def test_detect_malicious_deceptive_credential_should_be_high(self, monkeypatch):
-        """本单举证存在网图/非实拍欺骗线索时，应直接命中恶意举证硬规则。"""
-        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
-        input_data = MaliciousDetectionInput(
-            buyer_profile=BuyerProfile(buyer_id="buyer_new", purchase_count=0, return_rate=0.0),
-            facts=FactOutput(
-                evidence_quality="medium",
-                issue_summary="电热水壶底座开裂",
-                red_flags=["图文来源可疑"],
-                visual_observations=["图片角落可见1688.com批发图水印"],
-            ),
-            order_amount=199.0,
-            chat_history=[],
-        )
-        result = detect_malicious_behavior(input_data)
-        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
-        assert result.risk_score >= 20
-        assert result.risk_level == "high"
-
-    def test_detect_malicious_ai_generated_credential_should_be_high(self, monkeypatch):
-        """事实层明确 AI 生图/伪造举证时，应按明显欺骗类恶意处理。"""
-        monkeypatch.delenv("AGENT2_LLM_MODEL_MALICIOUS", raising=False)
-        input_data = MaliciousDetectionInput(
-            buyer_profile=BuyerProfile(buyer_id="buyer_ai", purchase_count=0, return_rate=0.0),
-            facts=FactOutput(
-                evidence_quality="medium",
-                issue_summary="买家称商品外壳破裂",
-                red_flags=["举证图疑似AI生成，纹理和阴影不符合实拍"],
-                visual_observations=["图片存在AI生图痕迹，破损边缘形态不自然"],
-            ),
-            order_amount=299.0,
-            chat_history=[],
-        )
-        result = detect_malicious_behavior(input_data)
-        assert any(item.signal_type == "deceptive_credential" for item in result.triggered_signals)
-        assert result.risk_level == "high"
-
-    def test_detect_malicious_behavior_should_reject_fake_credential_without_fact_anchor(self, monkeypatch):
-        """语义层输出网图信号但 facts 无锚定时，应丢弃以防幻觉渗入。"""
+    def test_detect_malicious_semantic_ignores_unauthorized_signal_type(self, monkeypatch):
+        """语义层输出未授权 signal_type 时应忽略。"""
         monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
         monkeypatch.setattr(
             agent2_tools_module,
             "chat_completion",
             lambda **kwargs: (
-                '[{"signal_type":"fake_credential_web_image",'
-                '"description":"举证图带门户网站水印，疑似网图","score":10,"source":"llm_semantic"}]'
+                '[{"signal_type":"legacy_fake_credential_web_image",'
+                '"description":"举证图带门户网站水印","score":30,"source":"llm_semantic"}]'
             ),
         )
         input_data = MaliciousDetectionInput(
@@ -1045,8 +1092,7 @@ class TestAgent2Tools:
             chat_history=["给我退款"],
         )
         result = detect_malicious_behavior(input_data)
-        assert result.risk_score == 0
-        assert not any(item.signal_type == "fake_credential_web_image" for item in result.triggered_signals)
+        assert result.triggered_signals == []
 
     def test_detect_malicious_behavior_should_reject_abuse_refund_without_chat_markers(self, monkeypatch):
         """语义层复述 few-shot 套利话术但聊天无对应表述时，应丢弃以防误报。"""
@@ -1091,8 +1137,8 @@ class TestAgent2Tools:
 
 
 class TestMaliciousSemanticOptimization:
-    def test_should_call_semantic_llm_when_chat_substantive_without_flags(self, monkeypatch):
-        """有足够聊天文本时，即使无 red_flags 也应调用语义 LLM。"""
+    def test_malicious_semantic_llm_gate(self, monkeypatch):
+        """语义 LLM 门控：有实质聊天才调；低材料与仅 red_flags 不调。"""
         monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
         called = {"count": 0}
 
@@ -1101,53 +1147,39 @@ class TestMaliciousSemanticOptimization:
             return "[]"
 
         monkeypatch.setattr(agent2_tools_module, "chat_completion", _mock_call)
-        input_data = MaliciousDetectionInput(
-            buyer_profile=BuyerProfile(buyer_id="buyer_chat", purchase_count=0, return_rate=0.0),
-            facts=FactOutput(evidence_quality="high", issue_summary="商品破损"),
-            order_amount=88.0,
-            chat_history=["商品收到就裂了，你们必须今天内给我处理退款，不然我天天来问"],
+
+        detect_malicious_behavior(
+            MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="buyer_chat", purchase_count=0, return_rate=0.0),
+                facts=FactOutput(evidence_quality="high", issue_summary="商品破损"),
+                order_amount=88.0,
+                chat_history=["商品收到就裂了，你们必须今天内给我处理退款，不然我天天来问"],
+            )
         )
-        detect_malicious_behavior(input_data)
         assert called["count"] == 1
 
-    def test_should_skip_semantic_llm_on_low_material_case(self, monkeypatch):
-        """无硬规则、无疑点、无聊天时不调语义 LLM。"""
-        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
-        called = {"count": 0}
-
-        def _should_not_call(**_kwargs):
-            called["count"] += 1
-            return "[]"
-
-        monkeypatch.setattr(agent2_tools_module, "chat_completion", _should_not_call)
-        input_data = MaliciousDetectionInput(
-            buyer_profile=BuyerProfile(buyer_id="buyer_plain", return_rate=0.05),
-            facts=FactOutput(evidence_quality="high", issue_summary="香蕉褐变", defect_type="变质"),
-            order_amount=29.9,
-            chat_history=[],
+        called["count"] = 0
+        low_material = detect_malicious_behavior(
+            MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="buyer_plain", return_rate=0.05),
+                facts=FactOutput(evidence_quality="high", issue_summary="香蕉褐变", defect_type="变质"),
+                order_amount=29.9,
+                chat_history=[],
+            )
         )
-        result = detect_malicious_behavior(input_data)
         assert called["count"] == 0
-        assert result.risk_score == 0
+        assert low_material.risk_score == 0
 
-    def test_should_call_semantic_llm_when_red_flags_present(self, monkeypatch):
-        """有 red_flags 时仍调语义 LLM。"""
-        monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")
-        called = {"count": 0}
-
-        def _mock_call(**_kwargs):
-            called["count"] += 1
-            return "[]"
-
-        monkeypatch.setattr(agent2_tools_module, "chat_completion", _mock_call)
-        input_data = MaliciousDetectionInput(
-            buyer_profile=BuyerProfile(buyer_id="buyer_flag", return_rate=0.05),
-            facts=FactOutput(evidence_quality="high", red_flags=["图片带 sohu 水印"]),
-            order_amount=29.9,
-            chat_history=[],
+        called["count"] = 0
+        detect_malicious_behavior(
+            MaliciousDetectionInput(
+                buyer_profile=BuyerProfile(buyer_id="buyer_flag", return_rate=0.05),
+                facts=FactOutput(evidence_quality="high", red_flags=["图片带 sohu 水印"]),
+                order_amount=29.9,
+                chat_history=[],
+            )
         )
-        detect_malicious_behavior(input_data)
-        assert called["count"] == 1
+        assert called["count"] == 0
 
     def test_malicious_facts_summary_omits_heavy_fields(self):
         from backend.tools.agent2_tools import _build_malicious_facts_summary, _build_malicious_semantic_messages
@@ -1171,7 +1203,7 @@ class TestMaliciousSemanticOptimization:
         user_msg = messages[-1]["content"]
         assert "evidence_items" not in user_msg
         assert messages.count({"role": "user", "content": messages[1]["content"]}) == 1
-        assert len([m for m in messages if m["role"] == "assistant"]) == 3
+        assert len([m for m in messages if m["role"] == "assistant"]) == 2
 
 
 class TestStrategyPromptPayload:
@@ -1281,7 +1313,7 @@ class TestStrategyPromptPayload:
 class TestRuleMatcherInfra:
     def test_facts_overlay_should_preserve_rule_context(self):
         """facts_override 未知规则字段应进入 attributes.rule_context。"""
-        from tests.run_manual_cases import _normalize_facts_overlay_for_model
+        from eval.pipeline.run_manual_cases import _normalize_facts_overlay_for_model
 
         normalized = _normalize_facts_overlay_for_model(
             {
@@ -1390,7 +1422,6 @@ class TestRuleMatcherInfra:
         )
         payload = _build_script_payload(
             input_data,
-            response_mode="neutral_negotiate",
             compensation_policy="explicit_amount",
             dialogue_context=strategy.dialogue_context or strategist_module.DialogueContext(),
             must_state_compensation_amount=True,

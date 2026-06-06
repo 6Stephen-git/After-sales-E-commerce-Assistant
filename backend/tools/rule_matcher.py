@@ -33,6 +33,7 @@ from schemas import (
     RULE_CONSTRAINT_RATIO_LIMIT,
     RULE_CONSTRAINT_TIMING,
     RULE_CONSTRAINT_VIOLATED,
+    FRAMES_SKIP_QUALITY_EVIDENCE_GATE,
     FactOutput,
     MatchedRule,
     RuleConstraint,
@@ -64,6 +65,26 @@ GENERIC_WEAK_ONLY_TERMS = frozenset(
     {"举证", "初步凭证", "商品质量问题", "表面不一致", "签收", "确认收货", "处理标准", "举证要求"}
 )
 
+def _strip_rule_display_appendix(text: str) -> str:
+    """
+    剔除面向商家展示不需要的附录块（规则解读、生效说明等），避免污染报告。
+    """
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return cleaned
+    for marker in ("规则解读：", "规则解读:", "规则解读"):
+        idx = cleaned.find(marker)
+        if idx >= 0:
+            cleaned = cleaned[:idx].strip()
+            break
+    for marker in ("本规范于", "生效时间", "最新修订"):
+        idx = cleaned.find(marker)
+        if idx >= 0:
+            cleaned = cleaned[:idx].strip()
+            break
+    return cleaned
+
+
 def _format_merchant_rule_text(article: dict[str, Any]) -> str:
     """
     将条文转为面向商家展示的通俗要点，不含条号/章节名。
@@ -86,7 +107,8 @@ def _format_merchant_rule_text(article: dict[str, Any]) -> str:
     else:
         base = title or content
 
-    text = re.sub(r"第[一二三四五六七八九十百千零\d]+条", "", base)
+    text = _strip_rule_display_appendix(base)
+    text = re.sub(r"第[一二三四五六七八九十百千零\d]+条", "", text)
     text = re.sub(r"第[一二三四五六七八九十]+节[^，。；]*", "", text)
     text = re.sub(r"\s+", " ", text).strip(" 。；，,")
     if len(text) > RULE_SUMMARY_MAX_LEN:
@@ -127,7 +149,15 @@ def match_rules_from_facts(facts: FactOutput) -> RuleMatchResult:
     if not llm_candidates:
         logger.warning("%s 无 LLM 候选条文，跳过匹配", LOG_PREFIX)
         return RuleMatchResult()
-    llm_result = llm_match_articles(facts=facts, candidates=llm_candidates)
+    if len(llm_candidates) <= RULE_MATCH_LITERAL_ONLY_MAX:
+        logger.info(
+            "%s 候选条文数≤%s，跳过 LLM 条文选型，走字面评分",
+            LOG_PREFIX,
+            RULE_MATCH_LITERAL_ONLY_MAX,
+        )
+        llm_result = None
+    else:
+        llm_result = llm_match_articles(facts=facts, candidates=llm_candidates)
     if llm_result is None:
         logger.warning("%s LLM 条文匹配失败，回退字面检索", LOG_PREFIX)
         terms = plan.search_terms
@@ -249,33 +279,6 @@ def _load_documents(doc_ids: list[str]) -> dict[str, dict[str, Any]]:
         if payload:
             loaded[doc_id] = payload
     return loaded
-
-
-def _load_document_cached(doc_id: str) -> dict[str, Any] | None:
-    """
-    加载单份规则文档（走统一缓存；未命中时单次查询）。
-    """
-    if doc_id in _rule_document_cache:
-        return _rule_document_cache[doc_id]
-
-    engine = get_engine()
-    rule_key = _rule_key_for_doc_id(doc_id)
-    try:
-        with Session(bind=engine) as session:
-            row = session.execute(
-                select(PlatformRule).where(PlatformRule.rule_key == rule_key)
-            ).scalar_one_or_none()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s MySQL 加载规则 doc_id=%s 失败：%s", LOG_PREFIX, doc_id, exc)
-        raise RuntimeError(f"平台规则加载失败：{exc}") from exc
-
-    payload = None
-    if row is not None:
-        payload = _parse_rule_document_payload(doc_id, row.rule_content)
-    else:
-        logger.warning("%s MySQL 未找到规则 doc_id=%s", LOG_PREFIX, doc_id)
-    _store_rule_document_cache(doc_id, payload)
-    return payload
 
 
 def clear_rule_document_cache() -> None:
@@ -750,7 +753,15 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
                     source_rule_id=source_rule_id,
                     confidence=0.9,
                 )
-        if "举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text:
+        from backend.agents.agent1.dispute_frame import is_no_defect_claim
+
+        frame = str(facts.primary_dispute_frame or "").strip()
+        skip_generic_evidence = frame in FRAMES_SKIP_QUALITY_EVIDENCE_GATE and is_no_defect_claim(
+            facts.defect_type
+        )
+        if not skip_generic_evidence and (
+            "举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text
+        ):
             _append_constraint(
                 constraints,
                 constraint_type=RULE_CONSTRAINT_EVIDENCE,
@@ -773,16 +784,19 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
 
 
 def _infer_constraint_type_from_text(text: str) -> str:
-    """按关键词归类 LLM 或本地提取出的策略约束。"""
-    if any(keyword in text for keyword in ("小时", "时效", "期限", "签收")):
+    """按配置化词表将约束文案归类为结构化 constraint_type。"""
+    from backend.tools.text_signals import constraint_type_markers, contains_any
+
+    normalized = str(text or "")
+    if contains_any(normalized, constraint_type_markers("timing")):
         return RULE_CONSTRAINT_TIMING
-    if any(keyword in text for keyword in ("举证", "凭证", "照片", "视频", "核验")):
+    if contains_any(normalized, constraint_type_markers("evidence")):
         return RULE_CONSTRAINT_EVIDENCE
-    if any(keyword in text for keyword in ("比例", "上限", "%", "百分之", "金额")):
+    if contains_any(normalized, constraint_type_markers("ratio_limit")):
         return RULE_CONSTRAINT_RATIO_LIMIT
-    if any(keyword in text for keyword in ("不承诺", "不得", "禁止")):
+    if contains_any(normalized, constraint_type_markers("no_promise")):
         return RULE_CONSTRAINT_NO_PROMISE
-    if any(keyword in text for keyword in ("流程", "验收", "协商", "申请")):
+    if contains_any(normalized, constraint_type_markers("process")):
         return RULE_CONSTRAINT_PROCESS
     return RULE_CONSTRAINT_OTHER
 
@@ -849,56 +863,3 @@ def _dedupe_rules(rules: list[MatchedRule]) -> list[MatchedRule]:
         picked.append(rule)
     return picked
 
-
-def build_fallback_plan_from_materials(materials: dict[str, Any], facts: FactOutput) -> RuleMatchPlan:
-    """
-    当 Agent1 未产出有效 plan 时，用 lexicon + materials 构建最小 plan（兜底）。
-    """
-    from backend.tools.rule_lexicon import (
-        expand_doc_ids_by_lanes,
-        infer_lanes_from_intent,
-        resolve_doc_ids_from_materials,
-    )
-
-    doc_ids, lanes = resolve_doc_ids_from_materials(materials)
-    extra = infer_lanes_from_intent(facts.intent_tags, facts.logistics_normal)
-    if extra:
-        doc_ids = list(dict.fromkeys(doc_ids + expand_doc_ids_by_lanes(extra)))
-
-    terms = RuleSearchTerms(
-        must_terms=["举证", "初步凭证", "商品质量问题", "表面不一致"],
-        should_terms=["退货退款", "签收", "确认收货"],
-        case_terms=[],
-    )
-    if facts.defect_type:
-        terms.case_terms.append(str(facts.defect_type))
-    if facts.issue_summary:
-        for token in re.findall(r"[\u4e00-\u9fff]{2,6}", facts.issue_summary):
-            if token in ("划痕", "破损", "物流", "退款"):
-                terms.case_terms.append(token)
-
-    selections = []
-    for doc_id in doc_ids:
-        doc = get_doc_by_id(doc_id)
-        if doc:
-            selections.append(
-                {
-                    "doc_id": doc_id,
-                    "section_keys": doc.get("default_section_keys", [])[:2],
-                    "confidence": 0.6,
-                    "reason": "规则导航兜底",
-                }
-            )
-
-    from schemas import SectionSelection
-
-    return RuleMatchPlan(
-        activated_lanes=lanes,
-        target_doc_ids=doc_ids,
-        section_selections=[
-            SectionSelection(**s) if isinstance(s, dict) else s for s in selections
-        ],
-        search_terms=terms,
-        category_confidence=1.0 if materials.get("product_category_slug") else 0.0,
-        service_confidence=1.0 if materials.get("platform_service_tags") else 0.0,
-    )

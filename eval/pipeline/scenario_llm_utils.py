@@ -8,19 +8,17 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 from backend.tools.llm_client import chat_completion
 
-TESTS_DIR = Path(__file__).resolve().parent
-PROMPTS_DIR = TESTS_DIR / "prompts"
+from eval.pipeline.paths import PROMPTS_DIR
 LLM_UTILS_LOG_PREFIX = "[ScenarioLLM]"
 logger = logging.getLogger(__name__)
 
 
 def load_prompt(name: str) -> str:
-    """读取 tests/prompts 下 Markdown 提示词。"""
+    """读取 eval/content/prompts 下 Markdown 提示词。"""
     path = PROMPTS_DIR / name
     if not path.is_file():
         raise FileNotFoundError(f"{LLM_UTILS_LOG_PREFIX} 提示词不存在：{path}")
@@ -28,7 +26,7 @@ def load_prompt(name: str) -> str:
 
 
 def load_json_prompt(name: str) -> dict[str, Any]:
-    """读取 tests/prompts 下 JSON 文件。"""
+    """读取 eval/content/prompts 下 JSON 文件。"""
     path = PROMPTS_DIR / name
     if not path.is_file():
         raise FileNotFoundError(f"{LLM_UTILS_LOG_PREFIX} JSON 提示词不存在：{path}")

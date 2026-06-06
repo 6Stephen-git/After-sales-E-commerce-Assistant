@@ -1,5 +1,10 @@
 """
 LLM-as-Judge 跑批评测：读取情景 spec 与售后报告，输出 JSONL 记录和 Markdown 汇总。
+
+用法:
+  python -m eval.pipeline.judge_cases \\
+    --scenario-output eval/output/scenarios/case3 \\
+    --report eval/output/manual_reports/CASE-CASE3.json -v
 """
 
 from __future__ import annotations
@@ -7,34 +12,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-TESTS_DIR = Path(__file__).resolve().parent
-ROOT_DIR = TESTS_DIR.parent
-OUTPUT_DIR = TESTS_DIR / "output" / "eval_runs"
-
-for path in (str(ROOT_DIR), str(TESTS_DIR)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 try:
     from dotenv import load_dotenv
-
-    load_dotenv(ROOT_DIR / ".env")
 except ImportError:
-    pass
+    load_dotenv = None  # type: ignore[misc, assignment]
 
-from judge_models import JudgeRecord, JudgeResult  # noqa: E402
-from scenario_llm_utils import call_llm_json, load_json_prompt, load_prompt  # noqa: E402
+from eval.pipeline.judge_models import JudgeRecord, JudgeResult
+from eval.pipeline.paths import EVAL_RUNS_DIR, ROOT_DIR
+from eval.pipeline.scenario_llm_utils import call_llm_json, load_json_prompt, load_prompt
+
+if load_dotenv is not None:
+    load_dotenv(ROOT_DIR / ".env")
 
 JUDGE_LOG_PREFIX = "[JudgeCases]"
 JUDGE_MODEL_ENV_KEY = "JUDGE_LLM_MODEL"
 JUDGE_FALLBACK_MODEL_ENV_KEY = "AGENT2_LLM_MODEL"
 JUDGE_TEMPERATURE = 0.15
 SUMMARY_SECTION_HEADERS = ("## 核心结论区", "## 关键依据区", "## 话术区")
+OUTPUT_DIR = EVAL_RUNS_DIR
 
 
 def _now_run_id() -> str:

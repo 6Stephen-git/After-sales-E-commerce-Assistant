@@ -12,6 +12,7 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -84,7 +85,7 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
     统一构建控制器所需材料，供普通与流式接口复用。
     """
     return {
-        "merchant_id": _resolve_merchant_id(request.merchant_id),
+        "merchant_id": _resolve_non_empty_id(request.merchant_id, default_merchant_id),
         "order_id": request.order_id.strip(),
         "order_amount": request.order_amount,
         "buyer_id": request.buyer_id.strip(),
@@ -101,20 +102,21 @@ def _build_materials(request: AnalyzeRequest) -> dict[str, Any]:
 
 
 # ---------- 标识占位：前端未传时使用环境变量默认值 ----------
-def _resolve_merchant_id(raw_merchant_id: str) -> str:
+def _resolve_non_empty_id(raw_value: str, fallback: Callable[[], str]) -> str:
     """
-    解析商家编号，空值回退到 DEFAULT_MERCHANT_ID。
+    解析非空业务 ID；空字符串回退到 fallback 提供的默认值。
     """
-    normalized = str(raw_merchant_id or "").strip()
-    return normalized or default_merchant_id()
+    normalized = str(raw_value or "").strip()
+    return normalized or fallback()
 
 
-def _resolve_dispute_id(raw_dispute_id: str) -> str:
+def _prepare_analyze_context(request: AnalyzeRequest) -> tuple[str, dict[str, Any]]:
     """
-    解析纠纷编号，空值回退到 DEFAULT_DISPUTE_ID。
+    解析 dispute_id 并构建控制器材料 dict，供 /analyze 与 /analyze/stream 共用。
     """
-    normalized = str(raw_dispute_id or "").strip()
-    return normalized or default_dispute_id()
+    dispute_id = _resolve_non_empty_id(request.dispute_id, default_dispute_id)
+    materials = _build_materials(request=request)
+    return dispute_id, materials
 
 
 def _sse_pack(event_type: str, payload: dict[str, Any]) -> str:
@@ -131,10 +133,9 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     执行辅助模式分析并返回结构化报告。
     """
     request_start = time.perf_counter()
-    normalized_dispute_id = _resolve_dispute_id(request.dispute_id)
+    normalized_dispute_id, materials = _prepare_analyze_context(request)
     logger.info("%s 开始处理 /analyze 请求，dispute_id=%s", API_LOG_PREFIX, normalized_dispute_id)
     try:
-        materials = _build_materials(request=request)
         report = assisted_run(dispute_id=normalized_dispute_id, new_materials=materials)
         elapsed_ms = int((time.perf_counter() - request_start) * 1000)
         logger.info(
@@ -144,8 +145,6 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             elapsed_ms,
         )
         return report.model_dump()
-    except HTTPException:
-        raise
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.perf_counter() - request_start) * 1000)
         logger.error("%s /analyze 执行失败：dispute_id=%s elapsed_ms=%s 原因=%s", API_LOG_PREFIX, normalized_dispute_id, elapsed_ms, exc)
@@ -160,8 +159,7 @@ def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
     if not _is_enabled("ENABLE_ANALYZE_STREAM", default=False):
         raise HTTPException(status_code=404, detail="流式分析未启用")
 
-    normalized_dispute_id = _resolve_dispute_id(request.dispute_id)
-    materials = _build_materials(request=request)
+    normalized_dispute_id, materials = _prepare_analyze_context(request)
     logger.info("%s 开始处理 /analyze/stream 请求，dispute_id=%s", API_LOG_PREFIX, normalized_dispute_id)
 
     def event_stream():

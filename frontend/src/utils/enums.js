@@ -32,13 +32,13 @@ const RISK_LEVEL_LABEL_MAP = {
 // ---------- 疑点枚举键前缀（与 Agent1 red_flags 约定一致） ----------
 const RED_FLAG_KEY_LABEL_MAP = {
   evidence_contradiction: '证据矛盾',
-  fake_evidence: '疑似虚假举证',
   logistics_mismatch: '物流信息与描述不符'
 }
 
 // ---------- 恶意信号类型（与后端 agent2_tools 映射一致） ----------
 const MALICIOUS_SIGNAL_TYPE_LABEL_MAP = {
-  fake_evidence: '疑似虚假凭证（硬规则）',
+  deceptive_credential: '举证来源可疑（视觉判定）',
+  statement_evidence_mismatch: '陈述与事实矛盾（本单）',
   abuse_refund_only: '滥用仅退款',
   batch_malicious_orders: '批量恶意下单',
   freight_insurance_abuse: '疑似骗取运费险',
@@ -49,7 +49,6 @@ const MALICIOUS_SIGNAL_TYPE_LABEL_MAP = {
   identity_impersonation: '冒充身份施压',
   evidence_contradiction: '话术与证据矛盾',
   professional_claim_pattern: '职业索赔话术',
-  fake_credential_web_image: '举证疑似网图/非实拍',
   abuse_refund_intent_chat: '聊天暴露套利/仅退意图'
 }
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from backend.tools.text_signals import signal_group
 from backend.tools.rule_lexicon import (
     CE_CONFIDENCE_THRESHOLD,
     collect_lexicon_search_hints,
@@ -32,10 +33,8 @@ logger = logging.getLogger(__name__)
 LANE_C = "C"
 LANE_E = "E"
 
-# 买家口语不应作为 must_terms 单独检索规则正文
-COLLOQUIAL_MUST_BLOCKLIST = frozenset(
-    {"开箱视频", "没录", "未录", "视频", "聊天记录", "截图"}
-)
+# 买家口语不应作为 must_terms 单独检索规则正文（配置见 data/text_signals.json）
+COLLOQUIAL_MUST_BLOCKLIST = frozenset(signal_group("colloquial_must_blocklist"))
 
 
 def merge_llm_rule_plan(
@@ -91,11 +90,11 @@ def merge_llm_rule_plan(
         if materials.get("platform_service_tags"):
             plan.service_confidence = 1.0
 
-    inferred = infer_lanes_from_intent(intent_tags, logistics_normal)
-    if inferred:
-        plan.activated_lanes = list(dict.fromkeys(plan.activated_lanes + inferred))
+    inferred_lanes = infer_lanes_from_intent(intent_tags, logistics_normal)
+    if inferred_lanes:
+        plan.activated_lanes = list(dict.fromkeys(plan.activated_lanes + inferred_lanes))
         plan.target_doc_ids = list(
-            dict.fromkeys(plan.target_doc_ids + expand_doc_ids_by_lanes(inferred))
+            dict.fromkeys(plan.target_doc_ids + expand_doc_ids_by_lanes(inferred_lanes))
         )
 
     plan = _ensure_category_lane(plan, materials, buyer_text, normalized_slugs)

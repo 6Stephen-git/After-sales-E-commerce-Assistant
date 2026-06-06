@@ -19,23 +19,34 @@ logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_LEXICON_PATH = ROOT_DIR / "data" / "rule_match_lexicon.json"
+DEFAULT_LEXICON_CONFIG_PATH = ROOT_DIR / "data" / "rule_lexicon_config.json"
 CE_CONFIDENCE_THRESHOLD = 0.75
 
-# 诉求标签 → lexicon facet_tags，用于无 section 选择时推断相关节
-INTENT_TO_FACETS: dict[str, tuple[str, ...]] = {
-    "质量问题": ("quality_claim", "evidence_burden"),
-    "物流异常": ("logistics", "receipt", "shipping"),
-    "退款诉求": ("return_refund",),
-    "描述不符": ("description_mismatch", "evidence_burden"),
-    "七天无理由": ("seven_day_return", "return_refund"),
-    "运费": ("freight", "shipping"),
-    "假冒": ("counterfeit",),
-}
+
+@lru_cache(maxsize=1)
+def load_lexicon_config() -> dict[str, Any]:
+    """
+    加载 rule_lexicon_config.json（intent/facet 检索扩展，与主索引分离便于维护）。
+    """
+    path = Path(os.getenv("RULE_LEXICON_CONFIG_PATH", str(DEFAULT_LEXICON_CONFIG_PATH)))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.error("%s 扩展配置不存在：%s", LOG_PREFIX, path)
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s 读取扩展配置失败：%s", LOG_PREFIX, exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+_load_lexicon_config = load_lexicon_config
+
 
 @lru_cache(maxsize=1)
 def load_lexicon() -> dict[str, Any]:
     """
-    加载 rule_match_lexicon.json；失败时返回空结构并记录日志。
+    加载 rule_match_lexicon.json 并合并 rule_lexicon_config.json。
     """
     path = Path(os.getenv("RULE_MATCH_LEXICON_PATH", str(DEFAULT_LEXICON_PATH)))
     try:
@@ -48,7 +59,28 @@ def load_lexicon() -> dict[str, Any]:
         return {"docs": [], "lanes": {}}
     if not isinstance(payload, dict):
         return {"docs": [], "lanes": {}}
+    config = _load_lexicon_config()
+    for key in (
+        "intent_to_facets",
+        "facet_search_expansions",
+        "intent_search_expansions",
+        "category_slug_search_hints",
+    ):
+        if key in config:
+            payload[key] = config[key]
     return payload
+
+
+def get_intent_to_facets() -> dict[str, tuple[str, ...]]:
+    """从 lexicon 合并配置读取诉求标签 → facet 映射。"""
+    raw = load_lexicon().get("intent_to_facets") or {}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, tuple[str, ...]] = {}
+    for key, value in raw.items():
+        if isinstance(value, list):
+            result[str(key)] = tuple(str(item) for item in value)
+    return result
 
 
 def get_doc_by_id(doc_id: str) -> dict[str, Any] | None:
@@ -88,7 +120,7 @@ def infer_facets_from_intent(intent_tags: list[str]) -> list[str]:
     facets: list[str] = []
     for tag in intent_tags or []:
         text = str(tag or "").strip()
-        for key, mapped in INTENT_TO_FACETS.items():
+        for key, mapped in get_intent_to_facets().items():
             if key in text:
                 for facet in mapped:
                     if facet not in facets:
@@ -467,7 +499,7 @@ def infer_category_slug_llm(text: str, materials: dict[str, Any] | None = None) 
     if not catalog:
         return None, 0.0
 
-    catalog_lines = "\n".join(f"- slug={item['slug']} doc={item['doc_name']}" for item in catalog)
+    catalog_lines = format_category_slug_catalog_lines()
     system_prompt = (
         "你是电商纠纷品类分类助手。根据「卖的是什么商品」与纠纷争点，从给定 slug 枚举中选择最匹配的特殊品类规范；"
         "无法判断则 category_slug 填 null。只输出 JSON："
@@ -544,34 +576,9 @@ def collect_lexicon_search_hints(
             continue
         _extend_unique(must, sec.get("rule_terms"))
         sec_facets = sec.get("facet_tags") or []
-        if "evidence_burden" in sec_facets:
-            _extend_unique(must, ["举证", "初步凭证"])
-        if "quality_claim" in sec_facets:
-            _extend_unique(must, ["商品质量问题", "肉眼可识别", "检测凭证"])
-            _extend_unique(should, ["表面不一致", "描述不当"])
-        if "return_refund" in sec_facets:
-            _extend_unique(should, ["退货退款", "签收"])
-        if "logistics" in sec_facets or "shipping" in sec_facets:
-            _extend_unique(must, ["发货", "物流"])
+        _apply_facet_search_expansions(sec_facets, must, should, case)
         if intent_facets and any(f in sec_facets for f in intent_facets):
             _extend_unique(should, sec.get("rule_terms"))
-
-        slug = str(doc.get("category_slug", "") or "")
-        if slug == "fresh":
-            _extend_unique(must, ["腐烂", "变质", "48小时", "拆包视频"])
-            _extend_unique(should, ["签收", "退货退款"])
-            for colloquial, mapped in {
-                "坏了": ["腐烂", "变质", "质量问题"],
-                "烂了": ["腐烂", "变质"],
-                "香蕉": ["腐烂", "变质"],
-                "不新鲜": ["腐烂", "变质"],
-            }.items():
-                if colloquial in blob:
-                    _extend_unique(case, [colloquial])
-                    _extend_unique(must, mapped)
-        elif slug == "food":
-            _extend_unique(must, ["保质期", "生产日期", "描述不符"])
-            _extend_unique(should, ["退货退款", "运费"])
 
         aliases = sec.get("case_aliases") if isinstance(sec.get("case_aliases"), dict) else {}
         for colloquial, mapped in aliases.items():
@@ -579,14 +586,80 @@ def collect_lexicon_search_hints(
                 _extend_unique(case, [colloquial])
                 _extend_unique(must, mapped if isinstance(mapped, list) else [])
 
-    if any(k in combined_blob for k in ("七天无理由", "7天无理由", "无理由退货")):
-        _extend_unique(must, ["七天无理由", "商品完好", "退货申请"])
-        _extend_unique(should, ["不影响二次销售", "使用痕迹", "退货运费", "运费", "买家承担", "验收"])
-        if "批量" in combined_blob or "试穿" in combined_blob:
-            _extend_unique(case, ["批量试穿", "试穿"])
-            _extend_unique(should, ["使用痕迹", "影响二次销售"])
+    slug = str(doc.get("category_slug", "") or "").strip()
+    if slug:
+        slug_hints = (load_lexicon().get("category_slug_search_hints") or {}).get(slug)
+        if isinstance(slug_hints, dict):
+            _extend_unique(must, slug_hints.get("must"))
+            _extend_unique(should, slug_hints.get("should"))
+
+    _apply_intent_search_expansions(
+        intent_tags=intent_tags or [],
+        combined_blob=combined_blob,
+        must=must,
+        should=should,
+        case=case,
+    )
 
     return must, should, case
+
+
+def _apply_facet_search_expansions(
+    sec_facets: list[Any],
+    must: list[str],
+    should: list[str],
+    case: list[str],
+) -> None:
+    """
+    按节 facet_tags 从配置追加检索词，替代 Python 内 facet 穷举。
+    """
+    expansions = load_lexicon().get("facet_search_expansions") or {}
+    if not isinstance(expansions, dict):
+        return
+    for facet in sec_facets:
+        cfg = expansions.get(str(facet))
+        if not isinstance(cfg, dict):
+            continue
+        _extend_unique(must, cfg.get("must"))
+        _extend_unique(should, cfg.get("should"))
+        _extend_unique(case, cfg.get("case"))
+
+
+def _apply_intent_search_expansions(
+    *,
+    intent_tags: list[str],
+    combined_blob: str,
+    must: list[str],
+    should: list[str],
+    case: list[str],
+) -> None:
+    """
+    当 intent_tags 或案情文本命中配置触发条件时，追加通用检索扩展词。
+    """
+    intent_blob = " ".join(str(item) for item in intent_tags)
+    for expansion in load_lexicon().get("intent_search_expansions") or []:
+        if not isinstance(expansion, dict):
+            continue
+        tag_triggers = [str(item) for item in (expansion.get("intent_tags") or [])]
+        phrase_triggers = [str(item) for item in (expansion.get("trigger_phrases") or [])]
+        triggered = any(tag in intent_blob for tag in tag_triggers) or any(
+            phrase in combined_blob for phrase in phrase_triggers
+        )
+        if not triggered:
+            continue
+        _extend_unique(must, expansion.get("must_terms"))
+        _extend_unique(should, expansion.get("should_terms"))
+        _extend_unique(case, expansion.get("case_terms"))
+        phrase_case = expansion.get("phrase_case_terms") if isinstance(expansion.get("phrase_case_terms"), dict) else {}
+        phrase_should = (
+            expansion.get("phrase_should_terms") if isinstance(expansion.get("phrase_should_terms"), dict) else {}
+        )
+        for phrase, case_items in phrase_case.items():
+            if phrase and phrase in combined_blob:
+                _extend_unique(case, case_items if isinstance(case_items, list) else [case_items])
+        for phrase, should_items in phrase_should.items():
+            if phrase and phrase in combined_blob:
+                _extend_unique(should, should_items if isinstance(should_items, list) else [should_items])
 
 
 def _extend_unique(target: list[str], new_items: Any) -> None:
@@ -649,29 +722,6 @@ def validate_section_keys(doc_id: str, section_keys: list[str]) -> list[str]:
     if dropped:
         logger.warning("%s 丢弃无效 section_key doc_id=%s keys=%s", LOG_PREFIX, doc_id, dropped)
     return kept
-
-
-def build_agent1_lane_hint(materials: dict[str, Any], intent_tags: list[str]) -> str:
-    """
-    为 Agent1 prompt 生成精简的通道与 doc 导航说明（控制 token）。
-    """
-    doc_ids, lanes = resolve_doc_ids_from_materials(materials)
-    extra_lanes = infer_lanes_from_intent(intent_tags, materials.get("_logistics_normal"))
-    for letter in extra_lanes:
-        if letter not in lanes:
-            lanes.append(letter)
-    if "G" in lanes:
-        doc_ids = _dedupe(doc_ids + expand_doc_ids_by_lanes(["G"]))
-
-    lines = [f"已解析通道：{','.join(lanes) or 'A'}", f"候选 doc 数：{len(doc_ids)}"]
-    for doc_id in doc_ids[:6]:
-        doc = get_doc_by_id(doc_id)
-        if not doc:
-            continue
-        secs = list_section_candidates_for_doc(doc_id)
-        sec_labels = [f"{s['section_key']}:{s['label'][:20]}" for s in secs[:8]]
-        lines.append(f"- {doc.get('doc_name','')}: " + "; ".join(sec_labels))
-    return "\n".join(lines)
 
 
 def _dedupe(items: list[str]) -> list[str]:

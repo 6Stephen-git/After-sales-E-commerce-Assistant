@@ -11,12 +11,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from scenario_evidence import (
+from eval.pipeline.scenario_evidence import (
     enrich_materials_logistics,
     evidence_facts_to_facts_override,
     normalize_evidence_quality,
 )
-from scenario_spec import ScenarioSpec, validate_spec_dict
+from eval.pipeline.scenario_spec import ScenarioSpec, validate_spec_dict
 
 FIXTURE_LOG_PREFIX = "[SpecToFixture]"
 _logger = logging.getLogger(__name__)
@@ -159,7 +159,7 @@ def _normalize_service_tags(
     """
     将 scenario 服务标归一为 lexicon 标准名。
 
-    优先解析 materials 字段；其次 meta.tags；仍无命中时从标题/诉求/瑕疵类型补全。
+    优先解析 materials 字段；其次 meta.tags。禁止从标题/诉求/瑕疵叙事推断第二服务标。
     自造 slug 无法命中时不原样透传，避免 E 通道 silent miss。
     """
     svc_map = _load_service_tag_map()
@@ -187,21 +187,6 @@ def _normalize_service_tags(
 
     for item in meta_tags or []:
         _append(_resolve_one_service_tag(str(item or "").strip(), svc_map, aliases))
-
-    if not normalized:
-        focused_blob = " ".join(
-            part for part in (title, issue_summary, defect_type) if str(part or "").strip()
-        )
-        if focused_blob.strip():
-            inferred = _infer_service_tags_from_context(focused_blob, svc_map)
-            for canonical in inferred:
-                _append(canonical)
-            if inferred:
-                _logger.info(
-                    "%s 已从情景摘要补全服务标：%s",
-                    FIXTURE_LOG_PREFIX,
-                    inferred,
-                )
 
     return normalized
 
@@ -323,8 +308,8 @@ def _normalize_test_overrides_keys(overrides: dict[str, Any]) -> dict[str, Any]:
     """
     将情景 LLM 常见别名归一为 run_manual_cases 识别的 test_overrides 键。
 
-    跑批只认：channel_threshold、order_value_amount_only_threshold、
-    order_value_score_threshold、customer_lifetime_value、malicious_hard_rules 等。
+    跑批只认：channel_threshold（兼容别名，映射为 order_value_score_threshold）、
+    order_value_amount_only_threshold、order_value_score_threshold、customer_lifetime_value 等。
     """
     normalized = dict(overrides)
 

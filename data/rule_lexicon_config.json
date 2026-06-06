@@ -1,0 +1,62 @@
+{
+  "intent_to_facets": {
+    "质量问题": ["quality_claim", "evidence_burden"],
+    "物流异常": ["logistics", "receipt", "shipping"],
+    "退款诉求": ["return_refund"],
+    "描述不符": ["description_mismatch", "evidence_burden"],
+    "七天无理由": ["seven_day_return", "return_refund"],
+    "运费": ["freight", "shipping"],
+    "假冒": ["counterfeit"]
+  },
+  "facet_search_expansions": {
+    "evidence_burden": {
+      "must": ["举证", "初步凭证"]
+    },
+    "quality_claim": {
+      "must": ["商品质量问题", "肉眼可识别", "检测凭证"],
+      "should": ["表面不一致", "描述不当"]
+    },
+    "return_refund": {
+      "should": ["退货退款", "签收"]
+    },
+    "logistics": {
+      "must": ["发货", "物流"]
+    },
+    "shipping": {
+      "must": ["发货", "物流"]
+    }
+  },
+  "intent_search_expansions": [
+    {
+      "intent_tags": ["七天无理由"],
+      "trigger_phrases": ["七天无理由", "7天无理由", "无理由退货"],
+      "must_terms": ["七天无理由", "商品完好", "退货申请"],
+      "should_terms": [
+        "不影响二次销售",
+        "使用痕迹",
+        "退货运费",
+        "运费",
+        "买家承担",
+        "验收"
+      ],
+      "phrase_case_terms": {
+        "批量": ["批量试穿", "试穿"],
+        "试穿": ["批量试穿", "试穿"]
+      },
+      "phrase_should_terms": {
+        "批量": ["使用痕迹", "影响二次销售"],
+        "试穿": ["使用痕迹", "影响二次销售"]
+      }
+    }
+  ],
+  "category_slug_search_hints": {
+    "fresh": {
+      "must": ["腐烂", "变质", "48小时", "拆包视频"],
+      "should": ["签收", "退货退款"]
+    },
+    "food": {
+      "must": ["保质期", "生产日期", "描述不符"],
+      "should": ["退货退款", "运费"]
+    }
+  }
+}

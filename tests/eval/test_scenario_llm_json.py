@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scenario_llm_utils import extract_json_object
+from eval.pipeline.scenario_llm_utils import extract_json_object
 
 
 def test_extract_plain_json_object() -> None:

@@ -22,14 +22,15 @@ from backend.cache import (
     save_facts,
     save_report,
 )
+from backend.cache.helpers import as_list
 from backend.tools.agent2_tools import (
     detect_malicious_behavior,
-    match_rules_full,
     needs_rule_match,
     query_buyer_profile,
     run_customer_value_analysis,
     search_similar_cases,
 )
+from backend.tools.rule_matcher import match_rules_from_facts
 from schemas import (
     AnalysisReport,
     ChatTurn,
@@ -47,60 +48,43 @@ logger = logging.getLogger(__name__)
 EventEmitter = Callable[[str, dict[str, Any]], None]
 
 
-# ---------- 列表工具：供 dispute_desc 与 Agent2 输入抽取复用 ----------
-def _to_list(value: Any) -> list[Any]:
+# ---------- 聊天材料：一次遍历产出判例描述、纯文本列表与 ChatTurn ----------
+def _extract_chat_bundle(
+    merged_materials: dict[str, Any],
+) -> tuple[str, list[str], list[ChatTurn]]:
     """
-    将任意值安全转为列表。
-    """
-    if isinstance(value, list):
-        return value
-    return []
+    从合并材料抽取 chat 相关三份输出，避免对 chat_history 重复遍历。
 
-
-# ---------- 判例检索输入：从材料中抽取可读纠纷描述 ----------
-def _build_dispute_desc(merged_materials: dict[str, Any]) -> str:
+    返回:
+        dispute_desc: buyer_text + 各轮 content，空格拼接
+        chat_history_texts: 仅 content，供 Agent2
+        chat_turns: 带 role 的轮次，供 Agent3
     """
-    按约定拼接 dispute_desc：buyer_text + chat_history.content。
-    """
-    parts: list[str] = []
+    desc_parts: list[str] = []
     buyer_text = merged_materials.get("buyer_text")
     if isinstance(buyer_text, str) and buyer_text.strip():
-        parts.append(buyer_text.strip())
+        desc_parts.append(buyer_text.strip())
 
-    for message in _to_list(merged_materials.get("chat_history")):
-        if isinstance(message, dict):
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                parts.append(content.strip())
-        elif isinstance(message, str) and message.strip():
-            parts.append(message.strip())
-
-    return " ".join(parts)
-
-
-def _extract_chat_history_texts(merged_materials: dict[str, Any]) -> list[str]:
-    """
-    提取聊天文本列表，供 Agent2 语义分析使用。
-    """
-    return [turn.content for turn in _extract_chat_turns(merged_materials)]
-
-
-def _extract_chat_turns(merged_materials: dict[str, Any]) -> list[ChatTurn]:
-    """
-    提取带角色的聊天轮次，供 Agent3 话术续写。
-    """
-    turns: list[ChatTurn] = []
-    for message in _to_list(merged_materials.get("chat_history")):
+    chat_history_texts: list[str] = []
+    chat_turns: list[ChatTurn] = []
+    for message in as_list(merged_materials.get("chat_history")):
         if isinstance(message, dict):
             role = str(message.get("role") or "buyer").strip().lower()
             if role not in {"buyer", "merchant"}:
                 role = "buyer"
             content = message.get("content")
             if isinstance(content, str) and content.strip():
-                turns.append(ChatTurn(role=role, content=content.strip()))
+                text = content.strip()
+                desc_parts.append(text)
+                chat_history_texts.append(text)
+                chat_turns.append(ChatTurn(role=role, content=text))
         elif isinstance(message, str) and message.strip():
-            turns.append(ChatTurn(role="buyer", content=message.strip()))
-    return turns
+            text = message.strip()
+            desc_parts.append(text)
+            chat_history_texts.append(text)
+            chat_turns.append(ChatTurn(role="buyer", content=text))
+
+    return " ".join(desc_parts), chat_history_texts, chat_turns
 
 
 # ---------- 金额等标量：容错转换，避免策略/话术链路因脏数据中断 ----------
@@ -130,13 +114,15 @@ def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
 
 
-def _collect_agent2_tool_inputs(merged_materials: dict[str, Any]) -> tuple[str, str, str]:
+def _collect_agent2_tool_inputs(
+    merged_materials: dict[str, Any],
+    dispute_desc: str,
+) -> tuple[str, str, str]:
     """
-    从合并材料中抽取 Agent2 工具调用输入。
+    从合并材料中抽取 Agent2 工具调用输入（dispute_desc 由 _extract_chat_bundle 提供）。
     """
     buyer_id = str(merged_materials.get("buyer_id", "") or "")
     merchant_id = str(merged_materials.get("merchant_id", "") or "")
-    dispute_desc = _build_dispute_desc(merged_materials)
     return buyer_id, merchant_id, dispute_desc
 
 
@@ -283,10 +269,12 @@ def run_with_events(
         )
         return cached_report
 
-    buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(merged_materials=merged_materials)
+    dispute_desc, chat_history_texts, chat_turns = _extract_chat_bundle(merged_materials)
+    buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(
+        merged_materials,
+        dispute_desc=dispute_desc,
+    )
     order_amount = _safe_order_amount(merged_materials.get("order_amount", 0.0))
-    chat_turns = _extract_chat_turns(merged_materials)
-    chat_history_texts = _extract_chat_history_texts(merged_materials)
     emotion_note = merged_materials.get("emotion_note")
 
     # 2) Batch0：Agent1 与画像/判例并行（B 层命中则跳过 Agent1）
@@ -389,7 +377,7 @@ def run_with_events(
             malicious_detection = future_malicious.result()
 
         if needs_rule_match(facts, malicious_detection, customer_value):
-            rule_result = match_rules_full(facts=facts)
+            rule_result = match_rules_from_facts(facts)
             rule_match_skipped = False
         else:
             logger.info(

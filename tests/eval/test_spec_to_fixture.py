@@ -2,7 +2,7 @@
 
 import json
 
-from spec_to_fixture import fixture_from_spec_dict
+from eval.pipeline.spec_to_fixture import fixture_from_spec_dict
 
 
 def _base_spec() -> dict:

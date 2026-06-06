@@ -1,6 +1,7 @@
 # Git 工作流规范
 
 > 本文件为项目的 Git 操作规范。Coding Agent 不直接执行 git 命令。
+
 ## 分支策略
 
 
@@ -39,8 +40,3 @@
 - 与 `Roadmap.md` 中的里程碑对应
 - 示例：`v0.1.0` 初始化完成，`v0.2.1` Agent 1 完成，`v1.0.0` MVP 发布
 
-## 与 Changelog 联动
-
-- 每个功能模块完成并合并到 `dev` 后，在 `Changelog.md` 追加一条记录
-- `Changelog.md` 记录粒度：模块级，非每次 commit
-- 版本号与 Git tag 保持一致

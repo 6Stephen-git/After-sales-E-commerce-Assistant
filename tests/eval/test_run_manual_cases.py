@@ -1,6 +1,10 @@
 """run_manual_cases 的无图事实覆盖与测试阈值行为测试。"""
 
-from run_manual_cases import _build_fact_output_with_overlay, _parse_buyer_profile, _patch_test_overrides
+from eval.pipeline.run_manual_cases import (
+    _build_fact_output_with_overlay,
+    _parse_buyer_profile,
+    _patch_test_overrides,
+)
 import backend.tools.agent2_tools as agent2_tools_module
 from schemas import FactOutput, RuleMatchPlan
 
@@ -41,13 +45,13 @@ def test_customer_lifetime_value_overrides_avg_order_value() -> None:
     assert profile.avg_order_value == 30
 
 
-def test_channel_threshold_overrides_customer_value_threshold() -> None:
-    """情景 channel_threshold 应映射为累计消费触发阈值。"""
-    original = agent2_tools_module.LONG_TERM_VALUE_AMOUNT_THRESHOLD
+def test_channel_threshold_overrides_order_value_score_threshold() -> None:
+    """情景 channel_threshold 兼容键应映射为双维评分触发阈值，不再用累计金额单独开老客通道。"""
+    original = agent2_tools_module.ORDER_VALUE_SCORE_THRESHOLD
     with _patch_test_overrides(
         case_id="CASE-CV",
         test_overrides={"channel_threshold": 40},
         malicious_context=None,
     ):
-        assert agent2_tools_module.LONG_TERM_VALUE_AMOUNT_THRESHOLD == 40
-    assert agent2_tools_module.LONG_TERM_VALUE_AMOUNT_THRESHOLD == original
+        assert agent2_tools_module.ORDER_VALUE_SCORE_THRESHOLD == 40
+    assert agent2_tools_module.ORDER_VALUE_SCORE_THRESHOLD == original

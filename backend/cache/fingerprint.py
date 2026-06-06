@@ -8,6 +8,8 @@ import hashlib
 import json
 from typing import Any
 
+from backend.cache.helpers import as_list
+
 
 # ---------- Agent1 指纹字段（事实还原相关） ----------
 FP_AGENT1_FIELDS = (
@@ -29,15 +31,6 @@ FP_REPORT_EXTRA_FIELDS = (
     "merchant_id",
     "emotion_note",
 )
-
-
-def _to_list(value: Any) -> list[Any]:
-    """
-    将任意值安全转为列表。
-    """
-    if isinstance(value, list):
-        return value
-    return []
 
 
 def _normalize_chat_history(chat_history: list[Any]) -> list[dict[str, str]]:
@@ -67,7 +60,7 @@ def _normalize_image_urls(materials: dict[str, Any]) -> list[str]:
     """
     合并 image_urls 与 evidence_images 并归一化。
     """
-    urls = _to_list(materials.get("image_urls")) + _to_list(materials.get("evidence_images"))
+    urls = as_list(materials.get("image_urls")) + as_list(materials.get("evidence_images"))
     return _normalize_string_list(urls)
 
 
@@ -78,12 +71,12 @@ def _extract_field_values(materials: dict[str, Any], fields: tuple[str, ...]) ->
     payload: dict[str, Any] = {}
     for field in fields:
         if field == "chat_history":
-            payload[field] = _normalize_chat_history(_to_list(materials.get(field)))
+            payload[field] = _normalize_chat_history(as_list(materials.get(field)))
         elif field in {"image_urls", "evidence_images"}:
             if field == "image_urls":
                 payload["image_urls"] = _normalize_image_urls(materials)
         elif field == "platform_service_tags":
-            payload[field] = _normalize_string_list(_to_list(materials.get(field)))
+            payload[field] = _normalize_string_list(as_list(materials.get(field)))
         elif field == "order_amount":
             try:
                 payload[field] = round(max(0.0, float(materials.get(field, 0.0))), 2)

@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from schemas import VALID_CREDENTIAL_TRUST
+
 LOG_PREFIX = "[Agent1工具]"
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,9 @@ _VISION_JSON_SCHEMA_BASE = (
     "- visual_description: 与买家诉求最相关的一两句视觉结论\n"
     "- findings: 字符串数组，2~4 条短句，说明图中哪些内容与诉求对应（可见/不可见/部分可见）\n"
     "- visual_red_flags: 与诉求陈述明显矛盾、或图源可疑（如水印/网图/非实拍环境）；无则 []\n"
+    "- credential_trust: suspect|trusted|unknown — 仅判断本张举证图是否像网图/非本单实拍/明显伪造；"
+    "与商品瑕疵无关；看不清或无法判断填 unknown\n"
+    "- credential_trust_note: 字符串或 null，一句说明 credential_trust 的理由\n"
     "- defect_type: 字符串或 null，诉求所涉问题的客观现象描述\n"
     "- defect_location: 字符串或 null，该现象在图中的位置或区域\n"
     "- visual_defect_severity: minor|moderate|severe|null，据可见损毁判断问题严重程度；看不清填 null\n"
@@ -57,6 +62,7 @@ def _build_vision_json_schema_block() -> str:
 
 VISUAL_DEFECT_SEVERITY_VALUES = frozenset({"minor", "moderate", "severe"})
 VISUAL_GOODS_RECOVERABILITY_VALUES = frozenset({"resalable", "repairable", "unrecoverable"})
+CREDENTIAL_TRUST_VALUES = frozenset(VALID_CREDENTIAL_TRUST)
 
 
 # ---------- 端点识别：阿里云百炼多模态 generation 走专用协议 ----------
@@ -239,6 +245,13 @@ def _normalize_vision_dict(raw: dict[str, Any]) -> dict[str, Any]:
     tag = _coerce_has_tag(raw.get("has_tag"))
     if tag is not None:
         out["has_tag"] = tag
+
+    trust = _coerce_visual_enum(raw.get("credential_trust"), CREDENTIAL_TRUST_VALUES)
+    if trust:
+        out["credential_trust"] = trust
+    trust_note = raw.get("credential_trust_note")
+    if isinstance(trust_note, str) and trust_note.strip():
+        out["credential_trust_note"] = trust_note.strip()
 
     return out
 
@@ -495,4 +508,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
             guidance=guidance,
         )
 
-    return _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)
+    legacy_result = _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)
+    if legacy_result.get("error"):
+        return legacy_result
+    return _normalize_vision_dict(legacy_result)

@@ -2,8 +2,8 @@
 手工全链路用例跑批：读取 scenario_gen 产出的 fixture.json，注入画像与判例 mock，走 AssistedController 并导出报告。
 
 用法（一般由 scenario_gen 调用；也可单独重跑已生成的 fixture）:
-  python tests/scenario_gen.py --input tests/scenarios/case/case3.md --run -v
-  python tests/run_manual_cases.py --file tests/output/scenarios/scenario-001/fixture.json -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
+  python -m eval.pipeline.run_manual_cases --file eval/output/scenarios/case3/fixture.json -v
 
   须配置 .env（LLM、MySQL 平台规则库）；无图用例依赖 facts_override / visual_preset。
 """
@@ -21,10 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
 
-# ---------- 路径：保证可从仓库根导入 backend / schemas ----------
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from eval.pipeline.paths import MANUAL_REPORTS_DIR, ROOT_DIR
 
 os.environ.setdefault("ENABLE_REDIS_CACHE", "0")
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -36,7 +33,7 @@ try:
 except ImportError:
     pass
 
-from schemas import (  # noqa: E402
+from schemas import (
     AnalysisReport,
     BuyerProfile,
     FactOutput,
@@ -45,16 +42,16 @@ from schemas import (  # noqa: E402
     SimilarCase,
 )
 
-import backend.agents.agent1 as agent1_module  # noqa: E402
-import backend.agents.agent1.fact_extractor as fact_extractor_module  # noqa: E402
-import backend.controllers.assisted_controller as assisted_controller_module  # noqa: E402
-import backend.tools.agent2_tools as agent2_tools_module  # noqa: E402
-from backend.controllers.assisted_controller import clear_cache, run  # noqa: E402
+import backend.agents.agent1 as agent1_module
+import backend.agents.agent1.fact_extractor as fact_extractor_module
+import backend.controllers.assisted_controller as assisted_controller_module
+import backend.tools.agent2_tools as agent2_tools_module
+from backend.controllers.assisted_controller import clear_cache, run
 
 RUNNER_LOG_PREFIX = "[ManualCases]"
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "manual_reports"
+OUTPUT_DIR = MANUAL_REPORTS_DIR
 
 DISPOSITION_LABEL = {
     "defend": "抗辩",
@@ -79,8 +76,6 @@ CHANNEL_LABEL = {
 CUSTOMER_VALUE_OVERRIDE_KEYS = {
     "order_value_score_threshold": "ORDER_VALUE_SCORE_THRESHOLD",
     "order_value_amount_only_threshold": "ORDER_VALUE_AMOUNT_ONLY_THRESHOLD",
-    "channel_threshold": "LONG_TERM_VALUE_AMOUNT_THRESHOLD",
-    "long_term_value_amount_threshold": "LONG_TERM_VALUE_AMOUNT_THRESHOLD",
 }
 
 MALICIOUS_CONTEXT_FIELDS = frozenset(
@@ -351,6 +346,13 @@ def _strip_images_from_materials(materials: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+def _finalize_fact_output(facts: FactOutput, materials: dict[str, Any]) -> FactOutput:
+    """无图覆盖路径也写入 primary_dispute_frame，避免 replace 模式遗漏框架字段。"""
+    from backend.agents.agent1.dispute_frame import attach_primary_dispute_frame
+
+    return attach_primary_dispute_frame(facts, materials)
+
+
 def _build_fact_output_with_overlay(
     materials: dict[str, Any],
     *,
@@ -380,7 +382,7 @@ def _build_fact_output_with_overlay(
                 overlay["rule_match_plan"] = base_facts.rule_match_plan.model_dump()
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s 无图 Agent1 规则导航提取失败，将仅使用覆盖字段：%s", RUNNER_LOG_PREFIX, exc)
-        return FactOutput.model_validate(overlay)
+        return _finalize_fact_output(FactOutput.model_validate(overlay), materials)
 
     try:
         base_facts = original_extract(_strip_images_from_materials(materials))
@@ -389,7 +391,7 @@ def _build_fact_output_with_overlay(
         logger.warning("%s 无图 Agent1 文本提取失败，将仅使用覆盖字段：%s", RUNNER_LOG_PREFIX, exc)
         merged = {}
     merged.update(overlay)
-    return FactOutput.model_validate(merged)
+    return _finalize_fact_output(FactOutput.model_validate(merged), materials)
 
 
 @contextmanager
@@ -511,6 +513,8 @@ def _patch_test_overrides(
     for key in ("channel_threshold", "order_value_score_threshold", "order_value_amount_only_threshold"):
         if key in test_overrides and key not in cv_config:
             cv_config[key] = test_overrides[key]
+    if "channel_threshold" in cv_config and "order_value_score_threshold" not in cv_config:
+        cv_config["order_value_score_threshold"] = cv_config.pop("channel_threshold")
     hard_raw = test_overrides.get("malicious_hard_rules")
     hard_config = hard_raw if isinstance(hard_raw, dict) else {}
     mc_config = malicious_context if isinstance(malicious_context, dict) else {}

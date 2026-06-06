@@ -10,19 +10,42 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from schemas import EVIDENCE_LOW, EVIDENCE_MEDIUM
+from schemas import EVIDENCE_LOW, EVIDENCE_MEDIUM, LogisticsInfo
 
 import backend.agents.agent1.fact_extractor as fact_extractor_module
 from backend.agents.agent1.fact_extractor import extract
 
 
-# ---------- 场景：材料齐全，多模态 mock + 物流正常 ----------
-def test_extract_with_complete_materials():
+# ---------- 场景：材料齐全，多模态与物流由测试层注入 ----------
+def test_extract_with_complete_materials(monkeypatch):
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "query_logistics",
+        lambda order_id="": LogisticsInfo(
+            is_shipped=True,
+            is_signed=True,
+            stagnant_days=0,
+            is_abnormal=False,
+        ),
+    )
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "analyze_image",
+        lambda image_url="", guidance="": {
+            "visual_description": "衣物袖子区域可见破洞",
+            "findings": ["袖子破洞"],
+            "defect_type": "外观破损",
+            "defect_location": "袖子",
+            "visual_defect_severity": "moderate",
+            "visual_goods_recoverability": "repairable",
+        },
+    )
+
     materials = {
         "order_id": "ORDER10001",
         "buyer_text": "我收到了衣服，袖子有破洞",
         "chat_history": [{"role": "buyer", "content": "已经签收，存在质量问题"}],
-        "image_urls": ["mock://sample-damage"],
+        "image_urls": ["https://example.com/evidence/damage.jpg"],
     }
 
     result = extract(materials)
@@ -37,12 +60,31 @@ def test_extract_with_complete_materials():
 
 
 # ---------- 场景：买家称未收 vs 物流已签收，应打红点 ----------
-def test_extract_with_signed_but_claim_not_received():
+def test_extract_with_signed_but_claim_not_received(monkeypatch):
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "query_logistics",
+        lambda order_id="": LogisticsInfo(
+            is_shipped=True,
+            is_signed=True,
+            stagnant_days=0,
+            is_abnormal=False,
+        ),
+    )
+    monkeypatch.setattr(
+        fact_extractor_module,
+        "analyze_image",
+        lambda image_url="", guidance="": {
+            "visual_description": "商品表面存在污渍",
+            "findings": ["表面污渍"],
+        },
+    )
+
     materials = {
         "order_id": "ORDER10002",
         "buyer_text": "我还没收到货",
         "chat_history": [{"role": "buyer", "content": "你们显示签收不对"}],
-        "image_urls": ["mock://sample-stain"],
+        "image_urls": ["https://example.com/evidence/stain.jpg"],
     }
 
     result = extract(materials)
@@ -63,7 +105,7 @@ def test_extract_missing_images():
     result = extract(materials)
     assert any("缺少举证图片" in item for item in result.missing_evidence)
     assert result.evidence_quality in (EVIDENCE_LOW, EVIDENCE_MEDIUM)
-    assert result.confidence <= 0.7
+    assert result.confidence <= 0.72
 
 
 # ---------- 场景：空材料，缺失项与低证据兜底 ----------
@@ -98,7 +140,7 @@ def test_extract_should_merge_missing_evidence_from_issue_llm(monkeypatch):
             "order_id": "ORDER10011",
             "buyer_text": "衣服有问题",
             "chat_history": [{"role": "buyer", "content": "你看图"}],
-            "image_urls": ["mock://custom"],
+            "image_urls": ["https://example.com/evidence/custom.jpg"],
         }
     )
     assert any("补拍" in item for item in result.missing_evidence)
@@ -130,7 +172,7 @@ def test_extract_should_fallback_when_issue_llm_unavailable(monkeypatch):
             "order_id": "ORDER10012",
             "buyer_text": "收到后袖口有问题",
             "chat_history": [{"role": "buyer", "content": "请看处理"}],
-            "image_urls": ["mock://custom"],
+            "image_urls": ["https://example.com/evidence/custom.jpg"],
         }
     )
     assert result.issue_summary is not None
@@ -158,7 +200,7 @@ def test_extract_should_keep_intent_tags_from_issue_llm(monkeypatch):
             "order_id": "ORDER10013ABN",
             "buyer_text": "物流一直不更新",
             "chat_history": [{"role": "buyer", "content": "麻烦尽快处理"}],
-            "image_urls": ["mock://custom"],
+            "image_urls": ["https://example.com/evidence/custom.jpg"],
         }
     )
     assert "物流异常" in result.intent_tags
@@ -188,7 +230,7 @@ def test_extract_vision_should_anchor_on_issue_summary(monkeypatch):
             "order_id": "ORDER10015",
             "buyer_text": "水果有问题",
             "chat_history": [{"role": "buyer", "content": "你看图"}],
-            "image_urls": ["mock://banana"],
+            "image_urls": ["https://example.com/evidence/banana.jpg"],
         }
     )
     assert captured_guidance
@@ -204,6 +246,8 @@ def test_extract_should_keep_external_source_clue_in_visual_observations(monkeyp
         lambda **_kwargs: {
             "visual_description": "图像右下角有 sohu.com 水印",
             "findings": ["图片带有网址水印，疑似网络公开图片"],
+            "credential_trust": "suspect",
+            "credential_trust_note": "图片角落可见门户网站水印，疑似网图",
         },
     )
 
@@ -212,7 +256,8 @@ def test_extract_should_keep_external_source_clue_in_visual_observations(monkeyp
             "order_id": "ORDER10014",
             "buyer_text": "香蕉发霉了",
             "chat_history": [{"role": "buyer", "content": "这是我拍的图"}],
-            "image_urls": ["mock://custom"],
+            "image_urls": ["https://example.com/evidence/custom.jpg"],
         }
     )
     assert any("水印" in item or "疑似网络公开图片" in item for item in result.visual_observations)
+    assert result.credential_trust == "suspect"

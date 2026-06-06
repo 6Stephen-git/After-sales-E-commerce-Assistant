@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from scenario_gen import (
+from eval.pipeline.scenario_gen import (
     apply_source_identity,
     case_id_from_source_key,
     source_key_from_path,
@@ -25,7 +25,7 @@ def test_apply_source_identity_overrides_llm_case_id() -> None:
         "buyer_profile": {},
         "evidence_facts": {"issue_summary": "s"},
     }
-    updated = apply_source_identity(spec, input_path=Path("tests/scenarios/case/case1.md"))
+    updated = apply_source_identity(spec, input_path=Path("eval/content/scenarios/case/case1.md"))
     assert updated["meta"]["case_id"] == "CASE-CASE1"
     assert updated["meta"]["source_key"] == "case1"
 

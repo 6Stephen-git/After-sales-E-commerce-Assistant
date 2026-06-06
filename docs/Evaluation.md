@@ -11,6 +11,7 @@
 - 必须包含 1 个边界或异常场景（如缺失图片、空文本、极端情绪）。
 - 测试用例直接嵌入各模块的任务说明书，不单独存放。
 - 测试失败时必须输出明确的期望值与实际值对比。
+- **勿为单次修复堆叠 pytest**：bug 修通后合并进既有典型用例或删除；业务回归以 §LLM 情景评测（scenario_gen + Judge）为主。
 
 ## 代码质量标准
 - Agent 函数为无状态纯函数，输出仅依赖输入参数。
@@ -31,9 +32,20 @@
 
 流程：**情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM**。
 
+### 目录结构
+
+| 路径 | 职责 |
+|------|------|
+| `eval/content/scenarios/` | 情景 Markdown（模板 + `case/*.md`） |
+| `eval/content/prompts/` | 情景生成 / Judge 提示词与 JSON Schema |
+| `eval/pipeline/` | 跑批与 Judge 实现（`scenario_gen`、`run_manual_cases`、`judge_cases` 等） |
+| `eval/output/` | 跑批与 Judge 产出（gitignore） |
+| `tests/eval/` | 评测链路的 pytest 单测 |
+| `tests/test_agent*.py` 等 | Agent / Controller 单元与集成测试 |
+
 ### 1. 写情景
 
-复制 `tests/scenarios/scenario_template.md` 到 `tests/scenarios/case/<名称>.md`，按 **6 段 + 其他说明** 填写。
+复制 `eval/content/scenarios/scenario_template.md` 到 `eval/content/scenarios/case/<名称>.md`，按 **6 段 + 其他说明** 填写。
 
 | 段落 | 写什么 |
 |------|--------|
@@ -48,43 +60,41 @@
 ### 2. 生成用例并跑链路
 
 ```bash
-python tests/scenario_gen.py --input tests/scenarios/case/case3.md --run -v
+python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
 ```
 
-产出（均在 `tests/output/`，已 gitignore）：
+产出（均在 `eval/output/`，已 gitignore）：
 
 | 路径 | 内容 |
 |------|------|
-| `tests/output/scenarios/<slug>/` | `REVIEW.md`、`spec.json`、`fixture.json` |
-| `tests/output/manual_reports/` | `SCENARIO-001.md` / `.json`（全链路报告） |
+| `eval/output/scenarios/<slug>/` | `REVIEW.md`、`spec.json`、`fixture.json` |
+| `eval/output/manual_reports/` | `CASE-*.md` / `.json`（全链路报告） |
 
 生成后核对 `fixture.json` 中 `platform_service_tags`、`product_category_slug`。仅重跑链路：
 
 ```bash
-python tests/scenario_gen.py --spec tests/output/scenarios/<slug>/spec.json --run -v
+python -m eval.pipeline.scenario_gen --spec eval/output/scenarios/<slug>/spec.json --run -v
 ```
 
 ### 3. Judge 评测
 
 ```bash
-python tests/judge_cases.py \
-  --scenario-output tests/output/scenarios/<slug> \
-  --report tests/output/manual_reports/SCENARIO-001.json \
+python -m eval.pipeline.judge_cases \
+  --scenario-output eval/output/scenarios/<slug> \
+  --report eval/output/manual_reports/CASE-CASE3.json \
   -v
 ```
 
-产出：`tests/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
+产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
 
-### 评测相关代码（保留）
+### 评测实现模块
 
 | 路径 | 作用 |
 |------|------|
-| `tests/scenarios/` | 情景 Markdown（`scenario_template.md`、`case/*.md`） |
-| `tests/scenario_gen.py` | 情景 → spec/fixture → 调跑批 |
-| `tests/spec_to_fixture.py` | spec → fixture（无 LLM） |
-| `tests/scenario_spec.py` / `scenario_llm_utils.py` | spec 结构与 LLM 调用 |
-| `tests/run_manual_cases.py` | 跑批引擎（读 fixture.json） |
-| `tests/judge_cases.py` / `judge_models.py` | Judge 跑批 |
-| `tests/prompts/` | `scenario_gen_system.md`、`judge_system.md`、JSON Schema |
+| `eval/pipeline/scenario_gen.py` | 情景 → spec/fixture → 调跑批 |
+| `eval/pipeline/spec_to_fixture.py` | spec → fixture（无 LLM） |
+| `eval/pipeline/scenario_spec.py` / `scenario_llm_utils.py` | spec 结构与 LLM 调用 |
+| `eval/pipeline/run_manual_cases.py` | 跑批引擎（读 fixture.json） |
+| `eval/pipeline/judge_cases.py` / `judge_models.py` | Judge 跑批 |
 
-单元测试：`test_spec_to_fixture.py`、`test_scenario_llm_json.py`、`test_run_manual_cases.py`、`test_judge_cases.py` 覆盖上述链路；Agent/Controller 单测仍在 `tests/test_agent*.py` 等，与情景评测并行。
+pytest：`tests/eval/test_*.py` 覆盖上述链路；Agent/Controller 单测仍在 `tests/test_agent*.py` 等，与情景评测并行。

@@ -12,8 +12,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from schemas import EVIDENCE_HIGH, EVIDENCE_LOW, EVIDENCE_MEDIUM, FactOutput, RuleMatchPlan
+from schemas import (
+    CREDENTIAL_TRUST_SUSPECT,
+    CREDENTIAL_TRUST_TRUSTED,
+    CREDENTIAL_TRUST_UNKNOWN,
+    EVIDENCE_HIGH,
+    EVIDENCE_LOW,
+    EVIDENCE_MEDIUM,
+    FactOutput,
+    VALID_CREDENTIAL_TRUST,
+)
 
+from backend.agents.agent1.dispute_frame import resolve_primary_dispute_frame
 from backend.agents.agent1.rule_plan import merge_llm_rule_plan
 
 from backend.tools.agent1_tools import (
@@ -24,12 +34,37 @@ from backend.tools.agent1_tools import (
 from backend.tools.llm_client import chat_completion
 from backend.tools.platform_api import query_logistics
 from backend.tools.rule_lexicon import format_category_slug_compact, validate_category_slug
+from backend.tools.text_signals import contains_any, signal_group
 
 LOG_PREFIX = "[Agent1]"
 logger = logging.getLogger(__name__)
 
 _VISUAL_SEVERITY_RANK = {"minor": 1, "moderate": 2, "severe": 3}
 _VISUAL_RECOVERABILITY_LOSS_RANK = {"resalable": 1, "repairable": 2, "unrecoverable": 3}
+
+
+def _merge_credential_trust_from_visions(vision_results: list[dict[str, Any]]) -> tuple[str, str | None]:
+    """
+    多图合并举证可信度：任一 suspect 则 suspect；全部 trusted 则 trusted；否则 unknown。
+
+    仅依据视觉模型结构化字段，不再由下游关键词复判。
+    """
+    trusts: list[str] = []
+    notes: list[str] = []
+    for item in vision_results:
+        if item.get("error"):
+            continue
+        trust = item.get("credential_trust")
+        if isinstance(trust, str) and trust in VALID_CREDENTIAL_TRUST:
+            trusts.append(trust)
+        note = str(item.get("credential_trust_note") or "").strip()
+        if note:
+            notes.append(note)
+    if any(t == CREDENTIAL_TRUST_SUSPECT for t in trusts):
+        return CREDENTIAL_TRUST_SUSPECT, notes[0] if notes else None
+    if trusts and all(t == CREDENTIAL_TRUST_TRUSTED for t in trusts):
+        return CREDENTIAL_TRUST_TRUSTED, notes[0] if notes else None
+    return CREDENTIAL_TRUST_UNKNOWN, None
 
 
 def _merge_visual_defect_severity(current: str | None, new: str | None) -> str | None:
@@ -52,14 +87,6 @@ def _merge_visual_goods_recoverability(current: str | None, new: str | None) -> 
     if _VISUAL_RECOVERABILITY_LOSS_RANK[new] > _VISUAL_RECOVERABILITY_LOSS_RANK[current]:
         return new
     return current
-
-
-def _coerce_visual_field(value: Any, valid_values: frozenset[str]) -> str | None:
-    """规范视觉枚举字段。"""
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized if normalized in valid_values else None
 
 
 # ---------- 纠纷材料解析：图片 URL 与可检索文本上下文 ----------
@@ -336,9 +363,9 @@ def _fallback_infer_goods_received(text_context: str) -> bool | None:
     """
     if not text_context:
         return None
-    if any(keyword in text_context for keyword in ["没收到", "未收到", "没有收到", "未签收"]):
+    if contains_any(text_context, signal_group("goods_received_negative")):
         return False
-    if any(keyword in text_context for keyword in ["收到了", "已收到", "签收了", "拿到了"]):
+    if contains_any(text_context, signal_group("goods_received_positive")):
         return True
     return None
 
@@ -529,14 +556,15 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         if wear_signs is None:
             wear_signs = image_result.get("wear_signs")
 
-        visual_defect_severity = _merge_visual_defect_severity(
-            visual_defect_severity,
-            _coerce_visual_field(image_result.get("visual_defect_severity"), VISUAL_DEFECT_SEVERITY_VALUES),
-        )
-        visual_goods_recoverability = _merge_visual_goods_recoverability(
-            visual_goods_recoverability,
-            _coerce_visual_field(image_result.get("visual_goods_recoverability"), VISUAL_GOODS_RECOVERABILITY_VALUES),
-        )
+        candidate_severity = image_result.get("visual_defect_severity")
+        if isinstance(candidate_severity, str) and candidate_severity in VISUAL_DEFECT_SEVERITY_VALUES:
+            visual_defect_severity = _merge_visual_defect_severity(visual_defect_severity, candidate_severity)
+        candidate_recoverability = image_result.get("visual_goods_recoverability")
+        if isinstance(candidate_recoverability, str) and candidate_recoverability in VISUAL_GOODS_RECOVERABILITY_VALUES:
+            visual_goods_recoverability = _merge_visual_goods_recoverability(
+                visual_goods_recoverability,
+                candidate_recoverability,
+            )
         if visual_category_slug is None:
             candidate_slug = image_result.get("category_slug")
             if isinstance(candidate_slug, str) and candidate_slug.strip():
@@ -548,6 +576,11 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         red_flags.append(f"物流异常：停滞 {logistics_info.stagnant_days} 天")
     if not visual_observations and image_urls:
         missing_evidence.append("缺少可用视觉分析结论，建议补充更清晰图片或视频")
+
+    credential_trust, credential_trust_note = _merge_credential_trust_from_visions(vision_results)
+    if not image_urls:
+        credential_trust = CREDENTIAL_TRUST_UNKNOWN
+        credential_trust_note = None
 
     evidence_quality = _derive_evidence_quality(
         has_text=bool(text_context),
@@ -594,20 +627,15 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         defect_type=defect_type,
     )
     if not rule_match_plan.target_doc_ids:
-        from backend.tools.rule_matcher import build_fallback_plan_from_materials
-
-        rule_match_plan = build_fallback_plan_from_materials(
-            materials,
-            FactOutput(
-                issue_summary=issue_summary,
-                intent_tags=intent_tags,
-                logistics_normal=logistics_normal,
-                defect_type=defect_type,
-            ),
-        )
-        logger.warning("%s rule_match_plan 为空，已启用 materials 兜底导航", LOG_PREFIX)
+        logger.warning("%s rule_match_plan 无 target_doc_ids，规则匹配将跳过", LOG_PREFIX)
 
     attributes = _merge_rule_context_attributes(attributes, materials)
+    primary_dispute_frame = resolve_primary_dispute_frame(
+        materials=materials,
+        intent_tags=intent_tags,
+        defect_type=defect_type,
+        logistics_normal=logistics_normal,
+    )
 
     return FactOutput(
         issue_summary=issue_summary,
@@ -627,6 +655,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         logistics_normal=logistics_normal,
         missing_evidence=missing_evidence,
         red_flags=red_flags,
+        credential_trust=credential_trust,
+        credential_trust_note=credential_trust_note,
+        primary_dispute_frame=primary_dispute_frame,
         evidence_quality=evidence_quality,
         confidence=confidence,
         uncertainty_note=uncertainty_note,

@@ -15,7 +15,9 @@ if ROOT_DIR not in sys.path:
 from backend.agents.agent3.script_generator import generate
 import backend.agents.agent3.script_generator as script_generator_module
 from schemas import (
+    ACTION_MERCHANT_REMEDY,
     ChatTurn,
+    COMPENSATION_POLICY_EXPLICIT_AMOUNT,
     CustomerValueOutput,
     DialogueContext,
     DISPOSITION_COMPENSATE,
@@ -65,8 +67,8 @@ def _minimal_dialogue_context() -> DialogueContext:
 
 
 class TestAgent3Generate:
-    def test_generate_defend_should_use_malicious_risk_mode(self, monkeypatch):
-        """抗辩策略：应对思想为依据应对。"""
+    def test_generate_defend_should_use_neutral_negotiate_mode(self, monkeypatch):
+        """抗辩策略：与恶意高风险话术模式解耦，默认协商沟通。"""
         script_text = "这单我核过了，细节还需要您补一下凭证，我这边按规则整理材料。"
         monkeypatch.setattr(script_generator_module, "generate_buyer_script", _mock_script(script_text))
         input_data = ScriptInput(
@@ -85,7 +87,7 @@ class TestAgent3Generate:
         )
 
         output = generate(input_data)
-        assert output.response_mode == RESPONSE_MODE_MALICIOUS_RISK
+        assert output.response_mode == RESPONSE_MODE_NEUTRAL_NEGOTIATE
         assert output.script == script_text
 
     def test_generate_compensate_close_should_use_merchant_fault_mode(self, monkeypatch):
@@ -96,6 +98,8 @@ class TestAgent3Generate:
             strategy_output=StrategyOutput(
                 disposition=DISPOSITION_COMPENSATE,
                 strategy_stage=STRATEGY_STAGE_COMPENSATE_CLOSE,
+                action_type=ACTION_MERCHANT_REMEDY,
+                compensation_policy=COMPENSATION_POLICY_EXPLICIT_AMOUNT,
                 confidence=0.81,
                 dialogue_context=_minimal_dialogue_context(),
             ),

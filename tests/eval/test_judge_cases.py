@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from judge_models import JudgeResult
-from judge_cases import (
+from eval.pipeline.judge_models import JudgeResult
+from eval.pipeline.judge_cases import (
     build_report_markdown_summary,
     judge_case,
     main,
@@ -144,7 +144,7 @@ def test_judge_case_writes_jsonl_record_and_summary(tmp_path: Path, monkeypatch:
     report_json, _ = _report_files(tmp_path)
     eval_root = tmp_path / "eval_runs"
 
-    monkeypatch.setattr("judge_cases.call_llm_json", lambda **_kwargs: _judge_payload(passed=True))
+    monkeypatch.setattr("eval.pipeline.judge_cases.call_llm_json", lambda **_kwargs: _judge_payload(passed=True))
 
     record = judge_case(
         scenario_output=scenario_dir,
@@ -174,7 +174,7 @@ def test_main_returns_nonzero_only_when_fail_on_judge_fail(tmp_path: Path, monke
     scenario_dir = _scenario_output(tmp_path)
     report_json, _ = _report_files(tmp_path)
     eval_root = tmp_path / "eval_runs"
-    monkeypatch.setattr("judge_cases.call_llm_json", lambda **_kwargs: _judge_payload(passed=False))
+    monkeypatch.setattr("eval.pipeline.judge_cases.call_llm_json", lambda **_kwargs: _judge_payload(passed=False))
 
     ok_exit = main(
         [

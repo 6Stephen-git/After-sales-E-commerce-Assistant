@@ -2,11 +2,11 @@
 半结构化情景 Markdown → 审阅说明 + spec + fixture →（可选）跑全链路。
 
 情景须含固定 6 段（背景/买家/争议/证据/参考/期望与禁忌），可选「其他说明」。
-模板见 tests/scenarios/scenario_template.md。
+模板见 eval/content/scenarios/scenario_template.md。
 
 用法:
-  python tests/scenario_gen.py --input tests/scenarios/case/case3.md -v
-  python tests/scenario_gen.py --input tests/scenarios/case/case3.md --run -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
 """
 
 from __future__ import annotations
@@ -19,33 +19,28 @@ import sys
 from pathlib import Path
 from typing import Any
 
-TESTS_DIR = Path(__file__).resolve().parent
-ROOT_DIR = TESTS_DIR.parent
-OUTPUT_DIR = TESTS_DIR / "output" / "scenarios"
-
-for path in (str(ROOT_DIR), str(TESTS_DIR)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 try:
     from dotenv import load_dotenv
-
-    load_dotenv(ROOT_DIR / ".env")
 except ImportError:
-    pass
+    load_dotenv = None  # type: ignore[misc, assignment]
 
-from scenario_llm_utils import (  # noqa: E402
+from eval.pipeline.paths import ROOT_DIR, SCENARIO_OUTPUT_DIR, SCENARIO_TEMPLATE_PATH
+from eval.pipeline.scenario_llm_utils import (
     call_llm_json,
     load_json_prompt,
     load_prompt,
     scenario_gen_model_env,
     scenario_gen_temperature,
 )
-from scenario_spec import ScenarioSpec, validate_spec_dict  # noqa: E402
-from spec_to_fixture import fixture_from_spec_dict, write_fixture  # noqa: E402
+from eval.pipeline.scenario_spec import ScenarioSpec, validate_spec_dict
+from eval.pipeline.spec_to_fixture import fixture_from_spec_dict, write_fixture
+
+if load_dotenv is not None:
+    load_dotenv(ROOT_DIR / ".env")
 
 GEN_LOG_PREFIX = "[ScenarioGen]"
 logger = logging.getLogger(__name__)
+OUTPUT_DIR = SCENARIO_OUTPUT_DIR
 
 # ---------- 半结构化情景：固定段落标题 ----------
 SCENARIO_SECTION_HEADERS = (
@@ -58,7 +53,6 @@ SCENARIO_SECTION_HEADERS = (
 )
 SCENARIO_EVIDENCE_SECTION_ALIASES = ("## 事实证据", "## 证据")
 OPTIONAL_SECTION_HEADER = "## 其他说明"
-SCENARIO_TEMPLATE_PATH = TESTS_DIR / "scenarios" / "scenario_template.md"
 
 
 def _missing_section_headers(narrative: str) -> list[str]:
@@ -199,7 +193,7 @@ def render_review_markdown(spec: ScenarioSpec) -> str:
             "- `spec.json`：完整中间态（含原文 `scenario_narrative`）",
             "- `fixture.json`：可跑 `run_manual_cases` 的用例",
             "",
-            "确认无误后再执行：`python tests/scenario_gen.py --spec <spec路径> --run`",
+            "确认无误后再执行：`python -m eval.pipeline.scenario_gen --spec <spec路径> --run`",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -232,7 +226,7 @@ def write_outputs(
 
 def run_fixture(fixture_path: Path) -> list[tuple[Path, Path]]:
     """跑全链路（含真实规则匹配）并返回报告路径。"""
-    from run_manual_cases import run_cases_file  # noqa: E402
+    from eval.pipeline.run_manual_cases import run_cases_file
 
     return run_cases_file(fixture_path)
 
@@ -308,7 +302,7 @@ def main() -> int:
             print(f"报告：{md_path}\n      {json_path}")
     else:
         print("确认后跑批：")
-        print(f"  python tests/scenario_gen.py --spec {paths['spec']} --run -v")
+        print(f"  python -m eval.pipeline.scenario_gen --spec {paths['spec']} --run -v")
 
     return 0
 

@@ -8,6 +8,7 @@ import logging
 from copy import deepcopy
 from typing import Any
 
+from backend.cache.helpers import as_list
 from backend.cache.redis_client import CACHE_LOG_PREFIX, delete, delete_by_pattern, get_json, set_json
 
 
@@ -20,15 +21,6 @@ def _materials_key(dispute_id: str) -> str:
     生成材料层 Redis key。
     """
     return f"ea:materials:{dispute_id}"
-
-
-def _to_list(value: Any) -> list[Any]:
-    """
-    将任意值安全转为列表。
-    """
-    if isinstance(value, list):
-        return value
-    return []
 
 
 def _dedupe_preserve_order(items: list[Any]) -> list[Any]:
@@ -93,10 +85,10 @@ def _merge_dicts(
             continue
         if key in {"chat_history", "image_urls"}:
             if snapshot:
-                merged_materials[key] = deepcopy(_to_list(value))
+                merged_materials[key] = deepcopy(as_list(value))
             else:
-                old_items = _to_list(merged_materials.get(key))
-                new_items = _to_list(value)
+                old_items = as_list(merged_materials.get(key))
+                new_items = as_list(value)
                 merged_materials[key] = _dedupe_preserve_order(old_items + new_items)
         else:
             merged_materials[key] = deepcopy(value)
