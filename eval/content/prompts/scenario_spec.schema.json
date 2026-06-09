@@ -45,7 +45,25 @@
         "complexity": { "type": "string", "enum": ["simple", "conflict"] }
       }
     },
-    "materials": { "type": "object" },
+    "materials": {
+      "type": "object",
+      "properties": {
+        "order_amount": { "type": "number" },
+        "product_category_slug": { "type": "string" },
+        "platform_service_tags": { "type": "array", "items": { "type": "string" } },
+        "chat_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "content"],
+            "properties": {
+              "role": { "type": "string", "enum": ["buyer", "merchant"] },
+              "content": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "buyer_profile": { "type": "object" },
     "similar_cases": { "type": "array" },
     "test_overrides": { "type": "object" },
@@ -53,6 +71,7 @@
       "type": "object",
       "properties": {
         "issue_summary": { "type": "string" },
+        "dispute_issue_type": { "type": "string" },
         "defect_type": { "type": "string" },
         "evidence_quality": { "type": "string" },
         "visual_observations": { "type": "array", "items": { "type": "string" } },

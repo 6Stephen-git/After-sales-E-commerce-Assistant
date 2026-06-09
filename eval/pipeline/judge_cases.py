@@ -4,7 +4,7 @@ LLM-as-Judge 跑批评测：读取情景 spec 与售后报告，输出 JSONL 记
 用法:
   python -m eval.pipeline.judge_cases \\
     --scenario-output eval/output/scenarios/case3 \\
-    --report eval/output/manual_reports/CASE-CASE3.json -v
+    --report eval/output/manual_reports/NG-02_EVIDENCE_COMPENSATION.json -v
 """
 
 from __future__ import annotations

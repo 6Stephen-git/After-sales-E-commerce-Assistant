@@ -22,21 +22,27 @@
         "expectation_alignment",
         "forbidden_output_safety",
         "rule_understanding",
+        "rule_boundary_ability",
         "evidence_handling",
+        "malicious_risk_recognition",
+        "customer_value_tradeoff",
         "merchant_interest",
         "buyer_communication",
         "script_safety",
-        "report_readability"
+        "script_reliability"
       ],
       "properties": {
         "expectation_alignment": { "type": "integer", "minimum": 1, "maximum": 5 },
         "forbidden_output_safety": { "type": "integer", "minimum": 1, "maximum": 5 },
         "rule_understanding": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "rule_boundary_ability": { "type": "integer", "minimum": 1, "maximum": 5 },
         "evidence_handling": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "malicious_risk_recognition": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "customer_value_tradeoff": { "type": "integer", "minimum": 1, "maximum": 5 },
         "merchant_interest": { "type": "integer", "minimum": 1, "maximum": 5 },
         "buyer_communication": { "type": "integer", "minimum": 1, "maximum": 5 },
         "script_safety": { "type": "integer", "minimum": 1, "maximum": 5 },
-        "report_readability": { "type": "integer", "minimum": 1, "maximum": 5 }
+        "script_reliability": { "type": "integer", "minimum": 1, "maximum": 5 }
       }
     },
     "fail_reasons": { "type": "array", "items": { "type": "string" } },

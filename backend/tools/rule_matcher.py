@@ -739,9 +739,17 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
             if threshold is not None:
                 if time_since_delivery >= threshold:
                     status = RULE_CONSTRAINT_VIOLATED if time_since_delivery > threshold else RULE_CONSTRAINT_MISSING_FACT
-                    text = (
-                        f"本案售后发生在签收后约{time_since_delivery:g}小时，需先核验并说明是否超过规则要求的{threshold}小时内申请/举证时效"
-                    )
+                    # violated：签收间隔已确定且超窗，策略侧固定事实即可，勿再写「核验是否超过」
+                    if status == RULE_CONSTRAINT_VIOLATED:
+                        text = (
+                            f"本案售后发生在签收后约{time_since_delivery:g}小时，"
+                            f"已超过规则要求的{threshold:g}小时申请/举证时效窗口"
+                        )
+                    else:
+                        text = (
+                            f"本案售后发生在签收后约{time_since_delivery:g}小时，"
+                            f"需先核验并说明是否超过规则要求的{threshold:g}小时内申请/举证时效"
+                        )
                 else:
                     status = RULE_CONSTRAINT_APPLIES
                     text = f"本案仍在签收后{threshold}小时规则时效内，后续处理仍需按举证和比例规则执行"

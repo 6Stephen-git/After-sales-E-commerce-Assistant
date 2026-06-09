@@ -260,3 +260,136 @@ def chat_completion(
 
     logger.error("%s 调用终止：未知错误", LOG_PREFIX)
     return None
+
+
+def _is_valid_tool_chat_messages(messages: list[dict[str, Any]]) -> bool:
+    """校验含 tool 角色的多轮消息结构。"""
+    if not isinstance(messages, list) or not messages:
+        return False
+
+    for item in messages:
+        if not isinstance(item, dict):
+            return False
+        role = item.get("role")
+        if role not in {"system", "user", "assistant", "tool"}:
+            return False
+        if role in {"system", "user"}:
+            content = item.get("content")
+            if not isinstance(content, str) or not content.strip():
+                return False
+        elif role == "assistant":
+            content = item.get("content")
+            tool_calls = item.get("tool_calls")
+            has_content = isinstance(content, str) and bool(content.strip())
+            has_tools = isinstance(tool_calls, list) and bool(tool_calls)
+            if not has_content and not has_tools:
+                return False
+        elif role == "tool":
+            tool_call_id = item.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+                return False
+            if not isinstance(item.get("content"), str):
+                return False
+    return True
+
+
+def _extract_assistant_message(response_data: dict[str, Any]) -> dict[str, Any] | None:
+    """从 chat/completions 响应中提取 assistant message（含 tool_calls）。"""
+    choices = response_data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return None
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        return None
+    if str(message.get("role") or "") != "assistant":
+        return None
+    return message
+
+
+def chat_completion_assistant_message(
+    messages: list[dict[str, Any]],
+    model_env_key: str,
+    temperature: float = 0.7,
+    fallback_model_env_key: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = "auto",
+) -> dict[str, Any] | None:
+    """
+    调用 chat/completions 并返回完整 assistant message（支持 tools）。
+
+    用于 Agent 多轮 tool 循环；失败返回 None。
+    """
+    if not _is_valid_tool_chat_messages(messages):
+        logger.warning("%s tool 调用跳过：messages 结构非法或为空", LOG_PREFIX)
+        return None
+
+    if not isinstance(model_env_key, str) or not model_env_key.strip():
+        logger.warning("%s tool 调用跳过：model_env_key 为空", LOG_PREFIX)
+        return None
+
+    raw_endpoint = os.getenv("LLM_API_ENDPOINT", "").strip()
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    if not raw_endpoint or not api_key:
+        logger.info("%s tool 调用跳过：LLM 未配置", LOG_PREFIX)
+        return None
+
+    endpoint = _resolve_endpoint(raw_endpoint=raw_endpoint)
+    primary_model = os.getenv(model_env_key, "").strip()
+    fallback_model = os.getenv(fallback_model_env_key or "", "").strip() if fallback_model_env_key else ""
+    model = primary_model or fallback_model or DEFAULT_MODEL
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    timeout = _build_httpx_timeout()
+    logger.info(
+        "%s 开始 tool 请求：model=%s tools=%s",
+        LOG_PREFIX,
+        model,
+        len(tools or []),
+    )
+
+    for attempt in range(3):
+        attempt_index = attempt + 1
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                response_data = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "%s tool 第%d次失败：HTTP %s",
+                LOG_PREFIX,
+                attempt_index,
+                exc.response.status_code,
+            )
+        except httpx.RequestError as exc:
+            logger.error("%s tool 第%d次失败：网络异常 %s", LOG_PREFIX, attempt_index, exc)
+        except ValueError as exc:
+            logger.error("%s tool 第%d次失败：JSON 解析 %s", LOG_PREFIX, attempt_index, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s tool 第%d次失败：%s", LOG_PREFIX, attempt_index, exc)
+        else:
+            message = _extract_assistant_message(response_data=response_data)
+            if message is not None:
+                logger.info("%s tool 请求成功", LOG_PREFIX)
+                return message
+            logger.error("%s tool 第%d次失败：响应无 assistant message", LOG_PREFIX, attempt_index)
+
+        if attempt == 2:
+            return None
+        time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+
+    return None

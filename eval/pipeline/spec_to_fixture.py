@@ -20,6 +20,17 @@ from eval.pipeline.scenario_spec import ScenarioSpec, validate_spec_dict
 
 FIXTURE_LOG_PREFIX = "[SpecToFixture]"
 _logger = logging.getLogger(__name__)
+LEAK_FIELD_NAMES = frozenset(
+    {
+        "expectation",
+        "forbidden_outputs",
+        "human_review",
+        "scenario_restated",
+        "fixture_focus",
+        "checks_before_run",
+    }
+)
+LEAK_TEXT_MARKERS = ("期望策略", "禁止", "禁忌", "标准答案", "处理方式", "测试重点", "策略提示", "应如何")
 
 VALID_VISUAL_PRESETS = frozenset(
     {"high_evidence", "low_evidence", "medium_evidence", "high_quality_defect", "medium_neutral"}
@@ -236,7 +247,7 @@ def _service_tag_inputs_from_spec(spec: ScenarioSpec) -> dict[str, Any]:
         "meta_tags": list(spec.meta.tags or []),
         "title": spec.meta.title or "",
         "issue_summary": ef.issue_summary or "",
-        "defect_type": ef.defect_type or "",
+        "defect_type": ef.resolved_issue_type(),
     }
 
 
@@ -359,7 +370,7 @@ def _normalize_test_overrides_keys(overrides: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_test_overrides(spec: ScenarioSpec) -> dict[str, Any]:
-    """合并 test_overrides；visual_preset 仅表证据强弱，不写瑕疵类型。"""
+    """合并 test_overrides；visual_preset 仅表证据强弱，不写争议问题类型。"""
     overrides = _normalize_test_overrides_keys(copy.deepcopy(spec.test_overrides or {}))
     preset = overrides.get("visual_preset")
     if not preset:
@@ -443,14 +454,48 @@ def spec_to_case_dict(spec: ScenarioSpec) -> dict[str, Any]:
     return case
 
 
+def _collect_leak_paths(value: Any, *, path: str = "$") -> list[str]:
+    """扫描 fixture 是否把 Judge 专用答案字段泄露给被测 agent。"""
+    leaks: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}"
+            if key_text in LEAK_FIELD_NAMES:
+                leaks.append(child_path)
+            leaks.extend(_collect_leak_paths(item, path=child_path))
+        return leaks
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            leaks.extend(_collect_leak_paths(item, path=f"{path}[{index}]"))
+        return leaks
+    if isinstance(value, str):
+        compact = value.strip()
+        if any(marker in compact for marker in LEAK_TEXT_MARKERS):
+            leaks.append(path)
+    return leaks
+
+
+def validate_fixture_no_answer_leak(payload: dict[str, Any]) -> None:
+    """校验 fixture 中不存在期望、禁忌、人审提示等评测答案信息。"""
+    leaks = _collect_leak_paths(payload)
+    if leaks:
+        preview = "、".join(leaks[:8])
+        raise ValueError(f"{FIXTURE_LOG_PREFIX} fixture 存在评测答案泄露字段：{preview}")
+
+
 def spec_to_fixture_payload(spec: ScenarioSpec, *, version: str = "1.0") -> dict[str, Any]:
     """包装为 manual_cases 顶层结构。"""
-    return {"version": version, "cases": [spec_to_case_dict(spec)]}
+    payload = {"version": version, "cases": [spec_to_case_dict(spec)]}
+    validate_fixture_no_answer_leak(payload)
+    return payload
 
 
 def merge_specs_to_payload(specs: list[ScenarioSpec], *, version: str = "1.0") -> dict[str, Any]:
     """多条 spec 合并为一个 fixture 文件。"""
-    return {"version": version, "cases": [spec_to_case_dict(s) for s in specs]}
+    payload = {"version": version, "cases": [spec_to_case_dict(s) for s in specs]}
+    validate_fixture_no_answer_leak(payload)
+    return payload
 
 
 def fixture_from_spec_dict(payload: dict[str, Any], *, version: str = "1.0") -> dict[str, Any]:
@@ -461,6 +506,7 @@ def fixture_from_spec_dict(payload: dict[str, Any], *, version: str = "1.0") -> 
 
 def write_fixture(payload: dict[str, Any], path: Path) -> Path:
     """落盘 fixture JSON。"""
+    validate_fixture_no_answer_leak(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

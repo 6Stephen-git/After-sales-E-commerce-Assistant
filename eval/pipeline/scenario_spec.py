@@ -61,7 +61,8 @@ class ScenarioEvidenceFacts(BaseModel):
     """
 
     issue_summary: str = Field(default="", description="诉求与争议焦点一句话")
-    defect_type: str = Field(default="", description="瑕疵/问题类型")
+    dispute_issue_type: str = Field(default="", description="争议问题类型：质量、物流、服务承诺、规则边界、证据疑点或恶意风险等")
+    defect_type: str = Field(default="", description="兼容旧字段；新情景请优先使用 dispute_issue_type")
     evidence_quality: str = Field(default="medium", description="high/medium/low 或 高/中/低")
     visual_observations: list[str] = Field(
         default_factory=list,
@@ -82,6 +83,10 @@ class ScenarioEvidenceFacts(BaseModel):
         default=False,
         description="true=模拟买家已上传图/视频；materials 仍 image_urls=[]",
     )
+
+    def resolved_issue_type(self) -> str:
+        """返回用于现有 FactOutput.defect_type 的兼容问题类型。"""
+        return (self.dispute_issue_type or self.defect_type or "").strip()
 
 
 class ScenarioSpec(BaseModel):

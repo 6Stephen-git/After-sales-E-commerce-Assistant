@@ -30,13 +30,13 @@
 
 ## LLM 情景评测（主路径）
 
-流程：**情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM**。
+流程：**Scenario Designer Agent（可选）→ 情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM**。
 
 ### 目录结构
 
 | 路径 | 职责 |
 |------|------|
-| `eval/content/scenarios/` | 情景 Markdown（模板 + `case/*.md`） |
+| `eval/content/scenarios/` | 情景 Markdown（模板 + `pilot/<轴>/*.md`） |
 | `eval/content/prompts/` | 情景生成 / Judge 提示词与 JSON Schema |
 | `eval/pipeline/` | 跑批与 Judge 实现（`scenario_gen`、`run_manual_cases`、`judge_cases` 等） |
 | `eval/output/` | 跑批与 Judge 产出（gitignore） |
@@ -45,22 +45,46 @@
 
 ### 1. 写情景
 
-复制 `eval/content/scenarios/scenario_template.md` 到 `eval/content/scenarios/case/<名称>.md`，按 **6 段 + 其他说明** 填写。
+需要从评测树叶子节点生成新情景时，可先用轻量 Scenario Designer Agent 生成单个 Markdown 草稿：
+
+```bash
+python -m eval.pipeline.scenario_designer \
+  --axis 商责善后 \
+  --leaf "物流责任 + 补偿边界" \
+  --target-ability "识别物流责任并控制赔偿边界" \
+  --factors "物流异常, 破损包赔, 赔偿上限" \
+  --output eval/content/scenarios/pilot/merchant_fault/MF-01_example.md
+```
+
+Scenario Designer 只生成一个 Markdown，不批量创建 pilot 文件，不生成 fixture，不跑链路。
+
+复制 `eval/content/scenarios/scenario_template.md` 到 `eval/content/scenarios/pilot/<轴>/<CASE_ID>.md`，按固定段落 + 其他说明填写。
+
+**文件命名**（源情景 → 产出一一对应）：
+
+| 层级 | 格式 | 示例 |
+|------|------|------|
+| 源 Markdown | `{轴缩写}-{序号}_{snake_case}.md` | `NG-02_evidence_compensation.md` |
+| 输出目录 `slug` / `source_key` | 源文件名 stem **小写** | `ng-02_evidence_compensation` |
+| `case_id` / 报告文件名 | stem **大写** | `NG-02_EVIDENCE_COMPENSATION.md` |
+| `dispute_id` | `DISPUTE-{case_id}` | `DISPUTE-NG-02_EVIDENCE_COMPENSATION` |
+
+轴缩写：`NG` 协商、`MF` 商责善后、`MA` 恶意抗辩；序号两位数字。`eval/output/` 为跑批产物，可随时清理后按 `--spec … --run` 重跑。
 
 | 段落 | 写什么 |
 |------|--------|
 | 背景 | 品类、金额、签收、服务标（lexicon 短名） |
 | 买家 | 表格 +「特殊说明」；`return_rate` / `refund_only_rate` 分开 |
-| 争议 | 买家诉求 + 关键聊天 |
-| 事实证据 | 同 case2 bullet → `evidence_facts`（不传 URL） |
-| 参考 | 判例或「无」 |
-| 期望与禁忌 | 期望策略 + **禁止**逐条 |
+| 对话记录 | 买家诉求 + 4-7 轮聊天记录 |
+| 事实证据 | 图/视频解析、物流、视觉严重度、可挽回性、缺失材料 → `evidence_facts`（不传 URL） |
+| 参考 | 判例或单独一行「无」 |
+| 期望与禁忌 | 目标方向 + 关键动作 + 禁忌（Judge 专用，不进聊天） |
 | 其他说明 | 老客价值/赔偿/恶意规则自然语言 → `test_overrides` 数字键 |
 
 ### 2. 生成用例并跑链路
 
 ```bash
-python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
+python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
 ```
 
 产出（均在 `eval/output/`，已 gitignore）：
@@ -68,9 +92,11 @@ python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.m
 | 路径 | 内容 |
 |------|------|
 | `eval/output/scenarios/<slug>/` | `REVIEW.md`、`spec.json`、`fixture.json` |
-| `eval/output/manual_reports/` | `CASE-*.md` / `.json`（全链路报告） |
+| `eval/output/manual_reports/` | `{CASE_ID}.md` / `.json`（全链路报告，如 `NG-02_EVIDENCE_COMPENSATION.md`） |
 
 生成后核对 `fixture.json` 中 `platform_service_tags`、`product_category_slug`。仅重跑链路：
+
+生成 fixture 时会检查被测输入是否泄露 `expectation`、`forbidden_outputs`、`human_review`、`期望策略`、`禁止`、`禁忌` 等 Judge 专用答案信息。
 
 ```bash
 python -m eval.pipeline.scenario_gen --spec eval/output/scenarios/<slug>/spec.json --run -v
@@ -81,11 +107,13 @@ python -m eval.pipeline.scenario_gen --spec eval/output/scenarios/<slug>/spec.js
 ```bash
 python -m eval.pipeline.judge_cases \
   --scenario-output eval/output/scenarios/<slug> \
-  --report eval/output/manual_reports/CASE-CASE3.json \
+  --report eval/output/manual_reports/NG-02_EVIDENCE_COMPENSATION.json \
   -v
 ```
 
 产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
+
+本轮 Judge 采用硬失败 + 等权评分，重点指标包含期望对齐、禁忌安全、规则理解、规则边界能力、证据处理、恶意风险识别、客户价值权衡、商家利益、买家沟通、话术安全、话术可靠性；稳定性与策略一致性另做专项。
 
 ### 评测实现模块
 

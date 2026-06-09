@@ -1350,12 +1350,15 @@ class TestRuleMatcherInfra:
             },
         )
         constraints = _build_rule_constraints([rule], facts)
-        assert any(
-            item.constraint_type == RULE_CONSTRAINT_TIMING
-            and item.status == "violated"
-            and "48小时" in item.text
+        timing_violated = [
+            item
             for item in constraints
-        )
+            if item.constraint_type == RULE_CONSTRAINT_TIMING and item.status == "violated"
+        ]
+        assert timing_violated
+        assert "48" in timing_violated[0].text
+        assert "已超过" in timing_violated[0].text
+        assert "核验并说明是否超过" not in timing_violated[0].text
         assert any(
             item.constraint_type == RULE_CONSTRAINT_RATIO_LIMIT and "30%" in item.text
             for item in constraints

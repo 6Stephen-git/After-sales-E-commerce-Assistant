@@ -91,6 +91,74 @@ def get_doc_by_id(doc_id: str) -> dict[str, Any] | None:
     return None
 
 
+def normalize_service_tag_key(text: str) -> str:
+    """服务标展示键：去引号、空白与末尾「服务规范」。"""
+    normalized = str(text or "").strip()
+    for old, new in (("“", ""), ("”", ""), ("\"", ""), ("'", ""), (" ", ""), ("\u3000", "")):
+        normalized = normalized.replace(old, new)
+    if normalized.endswith("服务规范"):
+        normalized = normalized[: -len("服务规范")]
+    return normalized.strip()
+
+
+def get_service_tag_doc_map() -> dict[str, str]:
+    """读取 E 通道服务标 → doc_id 映射。"""
+    return dict((load_lexicon().get("lanes") or {}).get("E_service_tag_to_doc_id") or {})
+
+
+def resolve_service_tag_doc_id(raw_tag: str) -> tuple[str, str] | None:
+    """
+    将服务标中文名解析为 (canonical 名, doc_id)。
+
+    支持精确匹配、去引号键与子串唯一模糊命中。
+    """
+    text = str(raw_tag or "").strip()
+    if not text:
+        return None
+
+    svc_map = get_service_tag_doc_map()
+    if not text:
+        return None
+    if text in svc_map:
+        return text, str(svc_map[text])
+
+    keyed = normalize_service_tag_key(text)
+    aliases: dict[str, str] = {}
+    for canonical in svc_map.keys():
+        canon_text = str(canonical or "").strip()
+        if not canon_text:
+            continue
+        for key in {canon_text, normalize_service_tag_key(canon_text)}:
+            if key and key not in aliases:
+                aliases[key] = canon_text
+
+    if keyed in aliases:
+        canonical = aliases[keyed]
+        return canonical, str(svc_map[canonical])
+    if keyed in svc_map:
+        return keyed, str(svc_map[keyed])
+
+    fuzzy: list[str] = []
+    keyed_lower = keyed.lower()
+    for canonical in svc_map.keys():
+        canon_key = normalize_service_tag_key(canonical)
+        if not canon_key:
+            continue
+        if keyed_lower == canon_key.lower():
+            return canonical, str(svc_map[canonical])
+        if len(canon_key) >= 3 and (canon_key in keyed or keyed in canon_key):
+            fuzzy.append(canonical)
+
+    if len(fuzzy) == 1:
+        canonical = fuzzy[0]
+        return canonical, str(svc_map[canonical])
+    if len(fuzzy) > 1:
+        fuzzy.sort(key=lambda item: len(normalize_service_tag_key(item)), reverse=True)
+        canonical = fuzzy[0]
+        return canonical, str(svc_map[canonical])
+    return None
+
+
 def resolve_doc_id_reference(ref: str) -> str | None:
     """
     将 LLM 可能输出的 doc_id / doc_name / 部分路径解析为 lexicon  canonical doc_id。

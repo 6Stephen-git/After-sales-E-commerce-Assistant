@@ -2,8 +2,8 @@
 手工全链路用例跑批：读取 scenario_gen 产出的 fixture.json，注入画像与判例 mock，走 AssistedController 并导出报告。
 
 用法（一般由 scenario_gen 调用；也可单独重跑已生成的 fixture）:
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
-  python -m eval.pipeline.run_manual_cases --file eval/output/scenarios/case3/fixture.json -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
+  python -m eval.pipeline.run_manual_cases --file eval/output/scenarios/ng-02_evidence_compensation/fixture.json -v
 
   须配置 .env（LLM、MySQL 平台规则库）；无图用例依赖 facts_override / visual_preset。
 """
@@ -827,7 +827,7 @@ def _run_case(
 ) -> list[tuple[Path, Path]]:
     """执行一条用例，返回生成的报告路径列表。"""
     meta = case.get("meta") or {}
-    case_id = str(meta.get("case_id") or "CASE-UNKNOWN")
+    case_id = str(meta.get("case_id") or "SCENARIO-UNKNOWN")
     title = str(meta.get("title") or case_id)
 
     test_overrides = _parse_test_overrides(case)

@@ -14,11 +14,14 @@ class JudgeScores(BaseModel):
     expectation_alignment: int = Field(default=0, ge=0, le=5)
     forbidden_output_safety: int = Field(default=0, ge=0, le=5)
     rule_understanding: int = Field(default=0, ge=0, le=5)
+    rule_boundary_ability: int = Field(default=0, ge=0, le=5)
     evidence_handling: int = Field(default=0, ge=0, le=5)
+    malicious_risk_recognition: int = Field(default=0, ge=0, le=5)
+    customer_value_tradeoff: int = Field(default=0, ge=0, le=5)
     merchant_interest: int = Field(default=0, ge=0, le=5)
     buyer_communication: int = Field(default=0, ge=0, le=5)
     script_safety: int = Field(default=0, ge=0, le=5)
-    report_readability: int = Field(default=0, ge=0, le=5)
+    script_reliability: int = Field(default=0, ge=0, le=5)
 
 
 class JudgeResult(BaseModel):

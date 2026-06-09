@@ -26,6 +26,23 @@ _FORBIDDEN_PHRASES = (
     "给您带来不便深表歉意",
 )
 
+# ---------- 未定许诺：踢皮球式「能不能处理」 ----------
+_HEDGING_PHRASES = (
+    "看能不能处理",
+    "能不能帮您处理",
+    "看能不能赔",
+    "帮您核对能不能",
+    "进一步核对，看能不能",
+)
+
+# ---------- 非终局抗辩时：禁止向买家亮规则条文 ----------
+_RULE_EXPOSURE_PATTERNS = (
+    re.compile(r"根据.{0,12}规则"),
+    re.compile(r"依据.{0,16}(规则|服务标|服务标识|平台)"),
+    re.compile(r"《[^》]{2,}》"),
+    re.compile(r"签收后.{0,12}\d+.{0,8}(小时|天).{0,12}(申请|举证|提交|退款)"),
+)
+
 # ---------- 须报金额时：空泛「商量补偿数额」表述（非禁止「商量」一词） ----------
 _VAGUE_COMPENSATION_PATTERNS = (
     re.compile(r"补偿.{0,12}商量|商量.{0,12}(?:补偿|退多少|多少钱|多少元|数目)"),
@@ -41,13 +58,24 @@ _AMOUNT_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 # ---------- 话术生成：system prompt（约束以 payload 字段为准，少枚举场景） ----------
 _SCRIPT_SYSTEM_PROMPT = """你是电商店主本人（非平台客服），写一条可直接发送的口语回复。
 
-user 消息为 JSON（含 action_type、compensation_policy、strategy_stage、next_step、rule_constraints、dialogue_context、recent_turns、must_state_compensation_amount 等）。**严格服从这些字段**，勿自创规则或金额。
+user 消息为 JSON（含 action_type、compensation_policy、strategy_stage、next_step、rule_constraints、dialogue_context、recent_turns、missing_evidence、must_state_compensation_amount、malicious_risk_level、tone_hint 等）。**服从这些字段的业务意图**，勿自创规则或金额；但面向买家的表达须口语化、可执行。
 
 要点：
-- continue 须承接 recent_turns；blocked 项禁再索要；next_step 必须体现。
+- 基础语气亲切、热情，像真心想帮买家解决问题的店主；短句、一句一事；适度即可，勿谄媚、勿堆叠客套、勿平台腔。
+- continue 须承接 recent_turns；dialogue_context.blocked_evidence_requests 禁再索要；next_step 的意图须体现，但禁止照搬其中的规则术语或条文措辞。
 - compensation_policy 决定能否谈钱；must_state_compensation_amount=true 时须先报具体金额（元）并征求接受，不超 max_compensation_amount。
 - forbid/none/soft_no_amount 或 rule_explain/evidence_request/return_inspection/defend_prepare：不主动金额和解。
-- evidence_first 只推进补证；issue_summary 仅供理解，勿复述货损或重复买家诉求；禁客服套话。
+- evidence_first 只推进补证；issue_summary 仅供理解，勿复述货损或重复买家诉求；禁客服套话，避免人机味话术和生硬的表示理解客户，如“这我明白”这种。
+
+规则怎么说（面向买家）：
+- 仅当 action_type=defend_prepare 且 malicious_risk_level=high 时，才可较直接说明不满足退款/补偿条件及规则边界。
+- 其他情况（含 rule_explain、evidence_request、协商推进）：**禁止**引用服务标名称、平台规则原文、书名号条款、具体时效小时/天数；不把 rule_constraints 念给买家。可用口语表达「隔了挺久」「手头材料还差一点」，不亮底牌。
+- recent_turns 或 next_step 已写明签收间隔/申请时间的：**禁止**再向买家核实、核对签收时间或天数；
+
+补证怎么说（须可执行）：
+- 只索要买家**客观上能当场提供**的材料（现状照、外包装、拆开/存放情况、物流面单等）。
+- missing_evidence / actionable_evidence_requests 若含异味、口感、变质气味等感官描述，**禁止**要求检测报告、仪器读数、异味/气味的「客观证明」；感官问题以买家描述为准，改问可拍可说的内容。
+- 禁踢皮球：不写「看能不能处理」「帮您核实能不能赔」等未定许诺；材料未齐时明确还要什么，材料已够时给出下一步（报价/方案/说明还需等待核实），勿悬空。
 
 只输出 JSON：{"script": "..."}
 """
@@ -76,12 +104,35 @@ def _parse_script_json(raw_text: str) -> str | None:
 
 def _contains_forbidden_phrase(text: str) -> bool:
     """
-    仅拦截典型客服套话。
+    拦截客服套话与未定许诺套话。
     """
     normalized = (text or "").strip()
     if not normalized:
         return True
-    return any(phrase in normalized for phrase in _FORBIDDEN_PHRASES)
+    if any(phrase in normalized for phrase in _FORBIDDEN_PHRASES):
+        return True
+    return any(phrase in normalized for phrase in _HEDGING_PHRASES)
+
+
+def _allows_explicit_rule_citation(payload: dict[str, Any]) -> bool:
+    """
+    仅终局抗辩（高恶意 + defend_prepare）允许向买家较直接亮规则。
+    """
+    action = str(payload.get("action_type") or "").strip().lower()
+    risk = str(payload.get("malicious_risk_level") or "").strip().lower()
+    return action == "defend_prepare" and risk == "high"
+
+
+def _has_premature_rule_exposure(script: str, payload: dict[str, Any]) -> bool:
+    """
+    非终局抗辩时检测是否向买家暴露规则条文或时效数字。
+    """
+    if _allows_explicit_rule_citation(payload):
+        return False
+    normalized = (script or "").strip()
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _RULE_EXPOSURE_PATTERNS)
 
 
 def _has_vague_compensation_negotiation(script: str) -> bool:
@@ -116,11 +167,23 @@ def _collect_quality_issues(script: str, payload: dict[str, Any]) -> list[str]:
     return issues
 
 
+def _collect_style_issues(script: str, payload: dict[str, Any]) -> list[str]:
+    """
+    口语风格门禁：过早亮规则、踢皮球许诺。
+    """
+    issues: list[str] = []
+    if _has_premature_rule_exposure(script, payload):
+        issues.append("非终局抗辩阶段勿向买家引用规则条文或具体时效数字")
+    return issues
+
+
 def _script_fails_quality_check(script: str, payload: dict[str, Any]) -> bool:
     """
     质量未达标时触发一次重试。
     """
     if _contains_forbidden_phrase(script):
+        return True
+    if _collect_style_issues(script, payload):
         return True
     return bool(_collect_quality_issues(script, payload))
 
@@ -157,11 +220,11 @@ def generate_buyer_script(payload: dict[str, Any]) -> str | None:
         logger.error("%s LLM 话术生成失败：JSON 解析失败", AGENT3_LOG_PREFIX)
         return None
     if _script_fails_quality_check(script, payload):
-        issues = _collect_quality_issues(script, payload)
+        issues = _collect_quality_issues(script, payload) or _collect_style_issues(script, payload)
         logger.warning(
             "%s 话术未通过质量校验 issues=%s，重试一次",
             AGENT3_LOG_PREFIX,
-            issues or ["客服套话"],
+            issues or ["客服套话或踢皮球表述"],
         )
         retry_raw = _call_script_llm(payload=payload, model_env_key="AGENT3_LLM_MODEL")
         if retry_raw:

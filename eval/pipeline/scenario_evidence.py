@@ -52,7 +52,7 @@ def evidence_facts_is_empty(ef: ScenarioEvidenceFacts | None) -> bool:
 
         return True
 
-    if ef.issue_summary.strip() or ef.defect_type.strip() or ef.visual_observations:
+    if ef.issue_summary.strip() or ef.resolved_issue_type() or ef.visual_observations:
 
         return False
 
@@ -110,9 +110,10 @@ def evidence_facts_to_facts_override(spec: ScenarioSpec) -> dict[str, Any]:
 
         merged["issue_summary"] = ef.issue_summary.strip()
 
-    if ef.defect_type.strip():
+    issue_type = ef.resolved_issue_type()
+    if issue_type:
 
-        merged["defect_type"] = ef.defect_type.strip()
+        merged["defect_type"] = issue_type
 
     merged["evidence_quality"] = normalize_evidence_quality(ef.evidence_quality)
 

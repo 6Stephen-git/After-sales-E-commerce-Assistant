@@ -7,7 +7,7 @@
 1. 报告是否满足情景 `expectation.intent_summary`。
 2. 报告是否触犯 `expectation.forbidden_outputs`。
 3. 策略方向是否落在 `expectation.acceptable_dispositions`，若不一致，是否有充分理由。
-4. 报告是否符合独立售后专家标准：规则理解、证据处理、商家利益、买家沟通、话术安全、报告可读性。
+4. 报告是否符合独立售后专家标准：规则理解、规则边界、证据处理、恶意风险、客户价值、商家利益、买家沟通、话术安全与话术可靠性。
 
 ## 硬失败规则
 
@@ -28,11 +28,14 @@
 - `expectation_alignment`：是否满足情景期望。
 - `forbidden_output_safety`：是否避开禁忌输出；触犯禁忌时必须给 1 分。
 - `rule_understanding`：是否理解平台规则边界，而不是机械套条。
+- `rule_boundary_ability`：是否能识别服务标、品类、物流、时效、验收、赔偿上限等规则边界，并给出合适下一步。
 - `evidence_handling`：是否正确处理证据强弱、缺失证据和事实不确定性。
+- `malicious_risk_recognition`：是否识别证据疑点、高频仅退款、调包/套利等恶意风险，同时避免无依据定性买家。
+- `customer_value_tradeoff`：是否结合老客价值、本单金额、历史信誉与风险，在商家利益和客户体验间做合理权衡。
 - `merchant_interest`：是否保护商家利益，不提前承诺、不无依据补偿、不放弃验收权。
 - `buyer_communication`：话术是否清楚、礼貌、能发给买家。
 - `script_safety`：话术是否存在法律、平台、情绪升级风险。
-- `report_readability`：报告是否让商家看得懂下一步怎么做。
+- `script_reliability`：话术是否稳妥可执行，避免承诺结果、扩大责任、遗漏关键前置条件或与策略矛盾。
 
 建议总分映射：
 

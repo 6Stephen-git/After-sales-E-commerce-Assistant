@@ -11,8 +11,8 @@ from eval.pipeline.scenario_gen import (
 
 
 def test_case_id_from_source_key() -> None:
-    assert case_id_from_source_key("case1") == "CASE-CASE1"
-    assert case_id_from_source_key("case2") == "CASE-CASE2"
+    assert case_id_from_source_key("case1") == "CASE1"
+    assert case_id_from_source_key("ng-02_evidence_compensation") == "NG-02_EVIDENCE_COMPENSATION"
 
 
 def test_apply_source_identity_overrides_llm_case_id() -> None:
@@ -26,7 +26,7 @@ def test_apply_source_identity_overrides_llm_case_id() -> None:
         "evidence_facts": {"issue_summary": "s"},
     }
     updated = apply_source_identity(spec, input_path=Path("eval/content/scenarios/case/case1.md"))
-    assert updated["meta"]["case_id"] == "CASE-CASE1"
+    assert updated["meta"]["case_id"] == "CASE1"
     assert updated["meta"]["source_key"] == "case1"
 
 
@@ -46,4 +46,4 @@ def test_write_outputs_uses_source_key_for_directory(tmp_path) -> None:
     paths = write_outputs(spec_dict, out_dir=tmp_path / "case1", source_key="case1")
     assert paths["spec"].parent.name == "case1"
     fixture = paths["fixture"].read_text(encoding="utf-8")
-    assert "CASE-CASE1" in fixture
+    assert "CASE1" in fixture

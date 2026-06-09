@@ -5,8 +5,8 @@
 模板见 eval/content/scenarios/scenario_template.md。
 
 用法:
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md -v
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/case/case3.md --run -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ OUTPUT_DIR = SCENARIO_OUTPUT_DIR
 SCENARIO_SECTION_HEADERS = (
     "## 背景",
     "## 买家",
-    "## 争议",
+    "## 对话记录",
     "## 事实证据",
     "## 参考",
     "## 期望与禁忌",
@@ -75,14 +75,14 @@ def _slug_from_case_id(case_id: str) -> str:
 
 
 def source_key_from_path(path: Path) -> str:
-    """情景 Markdown 路径 stem → 输出目录键（如 case1）。"""
+    """情景 Markdown 路径 stem → 输出目录键（小写，如 ng-02_evidence_compensation）。"""
     return _slug_from_case_id(path.stem)
 
 
 def case_id_from_source_key(source_key: str) -> str:
-    """源文件 stem → 稳定 case_id（如 case1 → CASE-CASE1）。"""
+    """源文件 stem → 稳定 case_id（大写，与 pilot 文件名一致，如 NG-02_EVIDENCE_COMPENSATION）。"""
     normalized = _slug_from_case_id(source_key)
-    return f"CASE-{normalized.upper()}"
+    return normalized.upper() or "SCENARIO-UNKNOWN"
 
 
 def apply_source_identity(
@@ -123,6 +123,18 @@ def load_narrative(*, text: str, input_path: Path | None) -> str:
     return narrative
 
 
+def _has_dialogue_section(narrative: str) -> bool:
+    """判断情景是否显式包含对话记录段。"""
+    return "## 对话记录" in narrative
+
+
+def _chat_history_is_empty(spec_dict: dict[str, Any]) -> bool:
+    """检查 LLM 是否成功把对话记录抽入 materials.chat_history。"""
+    materials = spec_dict.get("materials") if isinstance(spec_dict.get("materials"), dict) else {}
+    chat_history = materials.get("chat_history") if isinstance(materials, dict) else None
+    return not isinstance(chat_history, list) or not chat_history
+
+
 def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
     """调用编写 LLM：半结构化 Markdown → scenario_spec。"""
     missing = _missing_section_headers(narrative)
@@ -137,7 +149,7 @@ def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
     system_prompt = load_prompt("scenario_gen_system.md")
     schema = load_json_prompt("scenario_spec.schema.json")
     user_prompt = (
-        "商家提供半结构化情景（6 段标题 + 可选「其他说明」）。请按段提取并生成 scenario_spec JSON。\n\n"
+        "商家提供半结构化情景（背景/买家/对话记录/事实证据/参考/期望与禁忌 + 可选「其他说明」）。请按段提取并生成 scenario_spec JSON。\n\n"
         f"## JSON Schema\n```json\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n```\n\n"
         f"## 商家情景（原文）\n{narrative}\n"
     )
@@ -152,8 +164,11 @@ def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
     spec = validate_spec_dict(payload)
     if not (spec.human_review.scenario_restated or "").strip():
         raise ValueError(f"{GEN_LOG_PREFIX} 生成结果缺少 human_review.scenario_restated，请重试")
+    spec_dict = spec.model_dump(mode="json")
+    if _has_dialogue_section(narrative) and _chat_history_is_empty(spec_dict):
+        raise ValueError(f"{GEN_LOG_PREFIX} 生成结果未抽取 materials.chat_history，请检查对话记录格式或提示词")
     logger.info("%s 已生成 spec case_id=%s", GEN_LOG_PREFIX, spec.meta.case_id)
-    return spec.model_dump(mode="json")
+    return spec_dict
 
 
 def render_review_markdown(spec: ScenarioSpec) -> str:

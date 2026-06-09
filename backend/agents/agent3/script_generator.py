@@ -153,7 +153,7 @@ def _build_tone_hint(input_data: ScriptInput) -> str:
     if customer_value and customer_value.tone_suggestion:
         parts.append(str(customer_value.tone_suggestion).strip())
     if not parts:
-        return "自然、真诚、像店主本人；短句优先"
+        return "亲切热情、自然真诚，像店主本人；适度即可，短句优先"
     return "；".join(parts) + "；短句优先"
 
 
@@ -217,6 +217,12 @@ def _build_script_payload(
     }
     if facts.evidence_quality:
         payload["evidence_quality"] = facts.evidence_quality
+    # 视觉观察供话术与 Agent1 结论对齐，避免对外复述或矛盾描述
+    visual_observations = [
+        str(item).strip() for item in (facts.visual_observations or []) if str(item).strip()
+    ]
+    if visual_observations:
+        payload["visual_observations"] = visual_observations[:5]
     missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
     if missing:
         payload["missing_evidence"] = missing[:3]
