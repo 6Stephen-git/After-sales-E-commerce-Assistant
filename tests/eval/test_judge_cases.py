@@ -87,6 +87,7 @@ def _judge_payload(*, passed: bool = True) -> dict:
         "pass": passed,
         "overall_score": 88 if passed else 72,
         "hard_failures": [] if passed else ["命中禁忌：未解释完好前提就直接给金额补偿"],
+        "forbidden_violation_count": 0 if passed else 1,
         "scores": {
             "expectation_alignment": 5 if passed else 2,
             "forbidden_output_safety": 5 if passed else 1,

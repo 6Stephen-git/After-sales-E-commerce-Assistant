@@ -686,6 +686,26 @@ def _strip_markdown_json(text: str) -> str:
     return content
 
 
+def _parse_llm_json_array(llm_text: str) -> list[Any]:
+    """
+    解析 LLM 返回的 JSON 数组；容忍数组后附带解释文字（Extra data）。
+
+    恶意语义层要求根节点为数组，仅取首个完整 JSON 值。
+    """
+    content = _strip_markdown_json(llm_text)
+    decoder = json.JSONDecoder()
+    start = content.find("[")
+    if start < 0:
+        parsed = json.loads(content)
+        if not isinstance(parsed, list):
+            raise ValueError("根节点不是 JSON 数组")
+        return parsed
+    parsed, _end = decoder.raw_decode(content[start:])
+    if not isinstance(parsed, list):
+        raise ValueError("根节点不是 JSON 数组")
+    return parsed
+
+
 def _build_malicious_semantic_messages(
     input_data: MaliciousDetectionInput,
     hard_rule_summary: str,
@@ -783,11 +803,9 @@ def _run_llm_semantic(input_data: MaliciousDetectionInput, hard_signals: List[Ma
         raise RuntimeError("恶意语义分析失败：LLM 无返回内容")
 
     try:
-        parsed = json.loads(_strip_markdown_json(llm_text))
+        parsed = _parse_llm_json_array(llm_text)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"恶意语义分析失败：JSON 解析异常，原因：{exc}") from exc
-    if not isinstance(parsed, list):
-        raise RuntimeError("恶意语义分析失败：输出不是 JSON 数组")
 
     signals: List[MaliciousSignal] = []
     for item in parsed:

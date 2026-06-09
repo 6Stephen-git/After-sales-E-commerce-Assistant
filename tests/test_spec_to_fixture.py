@@ -86,3 +86,24 @@ def test_fixture_leak_check_rejects_answer_markers():
     }
     with pytest.raises(ValueError, match="评测答案泄露"):
         validate_fixture_no_answer_leak(payload)
+
+
+def test_fixture_leak_check_allows_natural_dialogue_phrases():
+    """买家日常口语（如「处理方式」）不应触发泄题误杀。"""
+    payload = {
+        "version": "1.0",
+        "cases": [
+            {
+                "meta": {"case_id": "CASE-DIALOGUE"},
+                "materials": {
+                    "chat_history": [
+                        {
+                            "role": "buyer",
+                            "content": "这就是你们的处理方式？一直要照片。",
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    validate_fixture_no_answer_leak(payload)

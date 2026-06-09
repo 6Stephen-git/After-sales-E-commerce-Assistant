@@ -2,6 +2,7 @@
 
 import json
 
+from eval.pipeline.scenario_spec import normalize_spec_dict, validate_spec_dict
 from eval.pipeline.spec_to_fixture import fixture_from_spec_dict
 
 
@@ -151,3 +152,25 @@ def test_invalid_service_tag_slug_inferred_from_spec_context() -> None:
     tags = payload["cases"][0]["materials"]["platform_service_tags"]
 
     assert tags == ["“伤亡大病包退”服务规范"]
+
+
+def test_normalize_spec_dict_coerces_primary_axis_and_null_strings() -> None:
+    """LLM 漂移字段应在校验前被规范化。"""
+    spec = validate_spec_dict(
+        {
+            "meta": {"case_id": "NG-06_TEST", "title": "test"},
+            "human_review": {
+                "scenario_restated": "r",
+                "fixture_focus": "f",
+                "checks_before_run": ["c"],
+            },
+            "taxonomy": {"primary_axis": "evidence"},
+            "evidence_facts": {
+                "defect_type": None,
+                "logistics": {"note": None},
+            },
+        }
+    )
+    assert spec.taxonomy.primary_axis == "conflict"
+    assert spec.evidence_facts.defect_type == ""
+    assert spec.evidence_facts.logistics.note == ""

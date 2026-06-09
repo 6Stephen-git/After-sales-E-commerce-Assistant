@@ -134,6 +134,54 @@ class ScenarioSpec(BaseModel):
         return value if isinstance(value, list) else []
 
 
+_VALID_PRIMARY_AXIS = frozenset({"rule", "malicious", "value", "precedent", "conflict"})
+_PRIMARY_AXIS_ALIASES = {
+    "evidence": "conflict",
+    "negotiation": "conflict",
+    "rule_boundary": "rule",
+    "malicious_risk": "malicious",
+    "customer_value": "value",
+}
+
+
+def normalize_spec_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    规范化 scenario_gen LLM 输出，修正可推断的枚举/空值后再校验。
+
+    避免 primary_axis=evidence、defect_type/logistics.note=null 等导致整案中断。
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized = dict(payload)
+    taxonomy = normalized.get("taxonomy")
+    if isinstance(taxonomy, dict):
+        tax = dict(taxonomy)
+        axis = str(tax.get("primary_axis") or "").strip().lower()
+        if axis not in _VALID_PRIMARY_AXIS:
+            tax["primary_axis"] = _PRIMARY_AXIS_ALIASES.get(axis, "conflict")
+        normalized["taxonomy"] = tax
+
+    evidence = normalized.get("evidence_facts")
+    if isinstance(evidence, dict):
+        ef = dict(evidence)
+        if ef.get("defect_type") is None:
+            ef["defect_type"] = ""
+        if ef.get("dispute_issue_type") is None:
+            ef["dispute_issue_type"] = ""
+        if ef.get("issue_summary") is None:
+            ef["issue_summary"] = ""
+        logistics = ef.get("logistics")
+        if isinstance(logistics, dict):
+            log = dict(logistics)
+            if log.get("note") is None:
+                log["note"] = ""
+            ef["logistics"] = log
+        normalized["evidence_facts"] = ef
+
+    return normalized
+
+
 def validate_spec_dict(payload: dict[str, Any]) -> ScenarioSpec:
     """校验并返回 ScenarioSpec。"""
-    return ScenarioSpec.model_validate(payload)
+    return ScenarioSpec.model_validate(normalize_spec_dict(payload))

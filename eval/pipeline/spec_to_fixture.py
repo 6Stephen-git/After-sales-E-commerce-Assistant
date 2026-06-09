@@ -30,7 +30,10 @@ LEAK_FIELD_NAMES = frozenset(
         "checks_before_run",
     }
 )
-LEAK_TEXT_MARKERS = ("期望策略", "禁止", "禁忌", "标准答案", "处理方式", "测试重点", "策略提示", "应如何")
+# 非对话字段：匹配评测作者口吻的泄题短语
+LEAK_TEXT_MARKERS = ("期望策略", "禁忌：", "禁忌:", "标准答案", "测试重点", "策略提示", "应如何")
+# 对话字段：仅拦截明确的评测泄题口吻，放过「处理方式」等日常口语
+LEAK_DIALOGUE_MARKERS = ("期望策略", "标准答案", "测试重点", "策略提示", "应如何")
 
 VALID_VISUAL_PRESETS = frozenset(
     {"high_evidence", "low_evidence", "medium_evidence", "high_quality_defect", "medium_neutral"}
@@ -454,6 +457,11 @@ def spec_to_case_dict(spec: ScenarioSpec) -> dict[str, Any]:
     return case
 
 
+def _path_is_agent_dialogue(path: str) -> bool:
+    """买家/商家对话内容允许日常口语，不做泄题短语扫描。"""
+    return ".chat_history[" in path or path.endswith(".chat_history")
+
+
 def _collect_leak_paths(value: Any, *, path: str = "$") -> list[str]:
     """扫描 fixture 是否把 Judge 专用答案字段泄露给被测 agent。"""
     leaks: list[str] = []
@@ -471,7 +479,8 @@ def _collect_leak_paths(value: Any, *, path: str = "$") -> list[str]:
         return leaks
     if isinstance(value, str):
         compact = value.strip()
-        if any(marker in compact for marker in LEAK_TEXT_MARKERS):
+        markers = LEAK_DIALOGUE_MARKERS if _path_is_agent_dialogue(path) else LEAK_TEXT_MARKERS
+        if any(marker in compact for marker in markers):
             leaks.append(path)
     return leaks
 

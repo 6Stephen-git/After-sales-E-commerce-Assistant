@@ -1,0 +1,201 @@
+# 评测树：20 叶，MA:MF:NG = 1:1:2（5/5/10）
+# 服务标须为 rule_match_lexicon E 通道已有键（短名），见 eval/pipeline/eval_tree.list_lexicon_service_tags()
+version: 1
+
+axes:
+  - id: negotiation
+    label: 妥善协商
+    prefix: NG
+    dir: pilot/negotiation
+    leaves:
+      - case_id: NG-01_rule_boundary_negotiate
+        status: new
+        leaf: 服务标误读 + 规则边界协商
+        target_ability: 识别买家对服务标范围的误解并控制承诺边界
+        factors: 服务标, 规则边界, 证据中等
+        category_hint: 水果
+        service_tag_hint: 果径无忧
+        service_constraints: 果径无忧
+        notes: 买家误读果径/规格承诺范围；责任未完全定论
+
+      - case_id: NG-02_evidence_compensation
+        status: existing
+        path: eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md
+        leaf: 证据不足 + 口述与图片矛盾
+        target_ability: 在证据链不完整时控制全额退款承诺边界
+        factors: 证据不足, 口述矛盾, 赔偿上限
+        category_hint: 水产肉类
+        service_tag_hint: 坏单包退
+
+      - case_id: NG-03_seven_day_return_fit
+        status: existing
+        path: eval/content/scenarios/pilot/negotiation/NG-03_seven_day_return_fit.md
+        leaf: 七天无理由 + 商品完好争议
+        target_ability: 判断商品完好状态并控制退货边界
+        factors: 七天无理由, 吊牌剪断, 二次销售
+        category_hint: 服饰-连衣裙
+        service_tag_hint: 七天无理由
+
+      - case_id: NG-04_timeout_customer_value
+        status: existing
+        path: eval/content/scenarios/pilot/negotiation/NG-04_timeout_customer_value.md
+        leaf: 超时效 + 老客价值权衡
+        target_ability: 在超时效与弱证据下结合客户价值协商补偿边界
+        factors: 签收时效, 老客价值, 证据偏弱
+        category_hint: 冰鲜三文鱼刺身
+        service_tag_hint: 坏单包退
+
+      - case_id: NG-05_partial_vs_full_refund
+        status: new
+        leaf: 部分补偿 vs 全额退 + 赔偿上限内协商
+        target_ability: 在规则框架内引导部分补偿而非全额退款
+        factors: 赔偿上限, 证据中等, 协商边界
+        category_hint: 酒类
+        service_tag_hint: 试饮可退
+        service_constraints: 试饮可退
+
+      - case_id: NG-06_low_value_weak_evidence
+        status: new
+        leaf: 低客单 + 弱证据 + 无老客压力协商
+        target_ability: 弱证据下仍保持协商但不越权承诺
+        factors: 低客单, 证据偏弱, 无老客价值
+        category_hint: 干货称重食品
+        service_tag_hint: 足斤足两
+        service_constraints: 足斤足两
+
+      - case_id: NG-07_emotional_buyer_evidence_gap
+        status: new
+        leaf: 情绪化施压 + 举证仍不完整
+        target_ability: 应对情绪升级同时坚持举证要求与承诺边界
+        factors: 情绪化, 举证缺口, 协商
+        category_hint: 生鲜蔬菜
+        service_tag_hint: 不爱吃包退
+        service_constraints: 不爱吃包退
+
+      - case_id: NG-08_service_promise_scope
+        status: new
+        leaf: 服务承诺范围争议（非恶意、责任未定论）
+        target_ability: 厘清服务标适用边界并避免过度承诺
+        factors: 服务承诺, 规则边界, 证据中等
+        category_hint: 服饰面料
+        service_tag_hint: 材质不符赔三
+        service_constraints: 材质不符赔三
+
+      - case_id: NG-09_mixed_evidence_negotiate
+        status: new
+        leaf: 图文证据部分矛盾 + 协商控边界
+        target_ability: 处理部分矛盾证据时不越权承诺全额退
+        factors: 证据矛盾, 协商, 赔偿边界
+        category_hint: 鲜花绿植
+        service_tag_hint: 15天包活
+        service_constraints: 15天包活
+
+      - case_id: NG-10_channel_threshold_edge
+        status: new
+        leaf: 老客通道门槛边缘 + 弱证据协商
+        target_ability: 在通道门槛边缘结合证据强弱协商补偿
+        factors: 老客价值, 通道门槛, 证据偏弱
+        category_hint: 保健滋补
+        service_tag_hint: 不适包退
+        service_constraints: 不适包退
+
+  - id: merchant_fault
+    label: 商责善后
+    prefix: MF
+    dir: pilot/merchant_fault
+    leaves:
+      - case_id: MF-01_logistics_damage_cap
+        status: existing
+        path: eval/content/scenarios/pilot/merchant_fault/MF-01_logistics_damage_cap.md
+        leaf: 物流破损 + 老客 + 赔偿 30% 上限
+        target_ability: 识别物流责任并在赔偿上限内善后
+        factors: 物流破损, 老客价值, 赔偿上限
+        category_hint: 咖啡/麦片/冲饮
+        service_tag_hint: 破损包退
+
+      - case_id: MF-02_evidence_gap_cap
+        status: existing
+        path: eval/content/scenarios/pilot/merchant_fault/MF-02_evidence_gap_cap.md
+        leaf: 商责明确但举证缺口 + 赔偿边界
+        target_ability: 确认商责同时因举证不全控制赔偿承诺
+        factors: 破损包退, 举证缺口, 赔偿边界
+        category_hint: 咖啡
+        service_tag_hint: 破损包退
+
+      - case_id: MF-03_return_inspection_flow
+        status: new
+        leaf: 明确商责 + 退货验货/流程要求
+        target_ability: 主动担责同时坚持验货与退货流程
+        factors: 商责明确, 退货验货, 流程要求
+        category_hint: 家具
+        service_tag_hint: 上门安装
+        service_constraints: 上门安装
+
+      - case_id: MF-04_compensation_ceiling
+        status: new
+        leaf: 善后压力下赔偿触顶（硬边界）
+        target_ability: 在高善后压力下仍严守赔偿上限
+        factors: 商责善后, 赔偿触顶, 老客价值
+        category_hint: 家装灯饰
+        service_tag_hint: 破损包赔
+        service_constraints: 破损包赔
+
+      - case_id: MF-05_clear_fault_process
+        status: new
+        leaf: 商责明确 + 多材料补齐流程
+        target_ability: 主动善后同时要求补齐退货/验货材料
+        factors: 商责明确, 流程要求, 举证补齐
+        category_hint: 大家电
+        service_tag_hint: 送货入户并安装
+        service_constraints: 送货入户并安装
+
+  - id: malicious
+    label: 恶意抗辩
+    prefix: MA
+    dir: pilot/malicious
+    leaves:
+      - case_id: MA-01_fake_evidence_refund_only
+        status: existing
+        path: eval/content/scenarios/pilot/malicious/MA-01_fake_evidence_refund_only.md
+        leaf: 举证矛盾 + 高仅退款率
+        target_ability: 识别证据矛盾与高仅退款风险
+        factors: 证据矛盾, 高仅退款率, 举证缺口
+        category_hint: 家装灯饰光源
+        service_tag_hint: 破损包赔
+
+      - case_id: MA-02_exaggerated_spoilage
+        status: existing
+        path: eval/content/scenarios/pilot/malicious/MA-02_exaggerated_spoilage.md
+        leaf: 夸大货损 + 视频/口述矛盾
+        target_ability: 识别夸大索赔与证据不符
+        factors: 夸大货损, 视频矛盾, 高频仅退
+        category_hint: 水产肉类-活鲜大闸蟹
+        service_tag_hint: 坏单包退
+
+      - case_id: MA-03_review_blackmail
+        status: new
+        leaf: 差评/投诉勒索类语义恶意
+        target_ability: 识别差评勒索与身份施压信号并审慎抗辩
+        factors: 差评勒索, 语义恶意, 证据疑点
+        category_hint: 珠宝首饰
+        service_tag_hint: 先鉴后发
+        service_constraints: 先鉴后发
+        notes: 买家以差评/投诉要挟；勿让买家直接承认恶意
+
+      - case_id: MA-04_professional_claim_pattern
+        status: new
+        leaf: 职业索赔话术 / 套利意图
+        target_ability: 识别职业索赔话术与套利意图
+        factors: 职业索赔话术, 套利意图, 证据疑点
+        category_hint: 宠物
+        service_tag_hint: 伤亡大病包退
+        service_constraints: 伤亡大病包退
+
+      - case_id: MA-05_swap_missing_items
+        status: new
+        leaf: 退货调包/少件风险识别
+        target_ability: 识别调包少件信号并审慎抗辩
+        factors: 调包风险, 退货异常, 证据疑点
+        category_hint: 手机
+        service_tag_hint: 以旧换新
+        service_constraints: 以旧换新

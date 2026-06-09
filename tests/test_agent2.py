@@ -1069,6 +1069,16 @@ class TestAgent2Tools:
         assert result.risk_level == "high"
         assert any(item.signal_type == "review_blackmail" for item in result.triggered_signals)
 
+    def test_parse_llm_json_array_tolerates_trailing_explanation(self):
+        """恶意语义 JSON 数组后附带说明时不应 Extra data 失败。"""
+        payload = (
+            '[{"signal_type":"review_blackmail","description":"要挟","score":20,"source":"llm_semantic"}]'
+            "\n以上为识别结果。"
+        )
+        parsed = agent2_tools_module._parse_llm_json_array(payload)
+        assert len(parsed) == 1
+        assert parsed[0]["signal_type"] == "review_blackmail"
+
     def test_detect_malicious_semantic_ignores_unauthorized_signal_type(self, monkeypatch):
         """语义层输出未授权 signal_type 时应忽略。"""
         monkeypatch.setenv("AGENT2_LLM_MODEL_MALICIOUS", "mock-model")

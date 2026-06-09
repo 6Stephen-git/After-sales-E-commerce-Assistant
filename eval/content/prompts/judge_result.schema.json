@@ -5,6 +5,7 @@
     "pass",
     "overall_score",
     "hard_failures",
+    "forbidden_violation_count",
     "scores",
     "fail_reasons",
     "warnings",
@@ -16,6 +17,7 @@
     "pass": { "type": "boolean" },
     "overall_score": { "type": "integer", "minimum": 0, "maximum": 100 },
     "hard_failures": { "type": "array", "items": { "type": "string" } },
+    "forbidden_violation_count": { "type": "integer", "minimum": 0 },
     "scores": {
       "type": "object",
       "required": [

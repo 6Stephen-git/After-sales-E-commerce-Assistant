@@ -30,15 +30,18 @@
 
 ## LLM 情景评测（主路径）
 
-流程：**Scenario Designer Agent（可选）→ 情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM**。
+流程：**评测树 → Scenario Designer（批量）→ 情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM → 批次汇总**。
+
+当前 pilot 规模：**20 叶**（NG 8 / MF 4 / MA 4，比例 2:1:1），定义见 [`eval/content/scenarios/eval_tree.yaml`](../eval/content/scenarios/eval_tree.yaml)。工作流为 **Designer 生成后直接批量测试**，不设人工 REVIEW 环节与批次通过门槛。
 
 ### 目录结构
 
 | 路径 | 职责 |
 |------|------|
+| `eval/content/scenarios/eval_tree.yaml` | 评测树（20 叶元数据、路径、因子、多样性提示） |
 | `eval/content/scenarios/` | 情景 Markdown（模板 + `pilot/<轴>/*.md`） |
 | `eval/content/prompts/` | 情景生成 / Judge 提示词与 JSON Schema |
-| `eval/pipeline/` | 跑批与 Judge 实现（`scenario_gen`、`run_manual_cases`、`judge_cases` 等） |
+| `eval/pipeline/` | 跑批与 Judge（`batch_from_tree`、`run_batch_eval`、`scenario_gen`、`judge_cases` 等） |
 | `eval/output/` | 跑批与 Judge 产出（gitignore） |
 | `tests/eval/` | 评测链路的 pytest 单测 |
 | `tests/test_agent*.py` 等 | Agent / Controller 单元与集成测试 |
@@ -56,9 +59,16 @@ python -m eval.pipeline.scenario_designer \
   --output eval/content/scenarios/pilot/merchant_fault/MF-01_example.md
 ```
 
-Scenario Designer 只生成一个 Markdown，不批量创建 pilot 文件，不生成 fixture，不跑链路。
+单案仍可用 `scenario_designer`；**批量**新增叶子用：
 
-复制 `eval/content/scenarios/scenario_template.md` 到 `eval/content/scenarios/pilot/<轴>/<CASE_ID>.md`，按固定段落 + 其他说明填写。
+```bash
+python -m eval.pipeline.batch_from_tree -v
+python -m eval.pipeline.batch_from_tree --only NG-01_rule_boundary_negotiate -v
+```
+
+仅处理 `eval_tree.yaml` 中 `status: new` 的叶子；失败记录写入 `eval/output/batch_gen_errors.jsonl`。
+
+亦可复制 [`eval/content/scenarios/scenario_template.md`](../eval/content/scenarios/scenario_template.md) 手工编写。
 
 **文件命名**（源情景 → 产出一一对应）：
 
@@ -70,6 +80,8 @@ Scenario Designer 只生成一个 Markdown，不批量创建 pilot 文件，不�
 | `dispute_id` | `DISPUTE-{case_id}` | `DISPUTE-NG-02_EVIDENCE_COMPENSATION` |
 
 轴缩写：`NG` 协商、`MF` 商责善后、`MA` 恶意抗辩；序号两位数字。`eval/output/` 为跑批产物，可随时清理后按 `--spec … --run` 重跑。
+
+**服务标**：须为 `data/rule_match_lexicon.json` → `E_service_tag_to_doc_id` 已有键（如 `果径无忧`、`试饮可退`、`15天包活`、`先鉴后发`、`以旧换新` 等），勿反复只用 `坏单包退`/`破损包退`。评测树 `service_tag_hint` 按叶分配，Designer 生成前可查 `python -c "from eval.pipeline.eval_tree import list_lexicon_service_tags; print(len(list_lexicon_service_tags()))"`。
 
 | 段落 | 写什么 |
 |------|--------|
@@ -113,12 +125,27 @@ python -m eval.pipeline.judge_cases \
 
 产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
 
+### 4. 批量评测
+
+一键跑评测树全部已有 Markdown（生成 spec/fixture → 全链路 → Judge）：
+
+```bash
+python -m eval.pipeline.run_batch_eval -v
+python -m eval.pipeline.run_batch_eval --skip-gen -v          # 仅重跑 fixture + Judge
+python -m eval.pipeline.run_batch_eval --only ng-02 -v      # 单案重跑
+```
+
+产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`、**`BATCH_SUMMARY.md`**（分轴通过率、硬失败清单、跑批错误）。**不设批次 pass/fail 门槛**，仅供分析。
+
 本轮 Judge 采用硬失败 + 等权评分，重点指标包含期望对齐、禁忌安全、规则理解、规则边界能力、证据处理、恶意风险识别、客户价值权衡、商家利益、买家沟通、话术安全、话术可靠性；稳定性与策略一致性另做专项。
 
 ### 评测实现模块
 
 | 路径 | 作用 |
 |------|------|
+| `eval/pipeline/eval_tree.py` | 评测树加载与校验 |
+| `eval/pipeline/batch_from_tree.py` | 按树批量调用 Scenario Designer |
+| `eval/pipeline/run_batch_eval.py` | 批量 gen + 跑批 + Judge + 批次汇总 |
 | `eval/pipeline/scenario_gen.py` | 情景 → spec/fixture → 调跑批 |
 | `eval/pipeline/spec_to_fixture.py` | spec → fixture（无 LLM） |
 | `eval/pipeline/scenario_spec.py` / `scenario_llm_utils.py` | spec 结构与 LLM 调用 |

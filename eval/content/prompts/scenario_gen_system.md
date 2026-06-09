@@ -66,6 +66,7 @@
 
 ## 其它
 
+- `taxonomy.primary_axis` 仅限：`rule`、`malicious`、`value`、`precedent`、`conflict`（勿输出 `evidence` 等自造值）；`evidence_facts` 字符串字段无内容时写 `""`，勿写 `null`。
 - `meta.case_id` 由工具根据源情景文件名写入（如 `NG-02_evidence_compensation.md` → `NG-02_EVIDENCE_COMPENSATION`），生成器勿自拟 `SCENARIO-001`；`meta.source_key` 为文件名 stem 小写（如 `ng-02_evidence_compensation`）。
 - `malicious_context` 无注入时为 `{}`；`steps` 无则为 `[]`。
 - 只输出一个 JSON 对象。
