@@ -1,8 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import DisputeView from '../views/DisputeView.vue'
+import IntelligentView from '../views/IntelligentView.vue'
 import SettingsView from '../views/SettingsView.vue'
 
-// ---------- 路由定义：辅助模式主页面 + 设置页面 ----------
+// ---------- 路由定义：辅助模式 + 智能模式 + 设置页面 ----------
 const routes = [
   {
     path: '/',
@@ -12,6 +13,11 @@ const routes = [
     path: '/dispute',
     name: 'dispute',
     component: DisputeView
+  },
+  {
+    path: '/intelligent',
+    name: 'intelligent',
+    component: IntelligentView
   },
   {
     path: '/settings',

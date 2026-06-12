@@ -102,6 +102,57 @@ export function getMaliciousSignalSourceLabel(source) {
   return source || '未知'
 }
 
+// ---------- 智能模式枚举映射表 ----------
+const INTEL_PHASE_LABEL_MAP = {
+  evidence_collection: '证据收集',
+  strategy_negotiation: '策略协商',
+  settlement: '善后处理',
+  defense: '抗辩准备',
+  handoff: '已转人工'
+}
+
+const INTEL_STRATEGY_LABEL_MAP = {
+  collect_evidence: '收集证据',
+  negotiate: '协商沟通',
+  compensate: '善后补偿',
+  defend: '抗辩守底'
+}
+
+const INTEL_RESPONSIBILITY_LABEL_MAP = {
+  merchant_fault: '商家责任',
+  buyer_fault: '买家责任',
+  unclear: '待确认',
+  mixed: '混合责任'
+}
+
+const BUYER_TYPE_LABEL_MAP = {
+  high_value_old: '高价值老客',
+  normal: '普通买家',
+  first_time: '首次购买',
+  suspicious: '可疑买家',
+  malicious: '恶意买家'
+}
+
+// ---------- 映射函数：智能模式阶段 ----------
+export function getIntelPhaseLabel(value) {
+  return INTEL_PHASE_LABEL_MAP[value] || '未知阶段'
+}
+
+// ---------- 映射函数：智能模式策略 ----------
+export function getIntelStrategyLabel(value) {
+  return INTEL_STRATEGY_LABEL_MAP[value] || '未知策略'
+}
+
+// ---------- 映射函数：责任归属 ----------
+export function getResponsibilityLabel(value) {
+  return INTEL_RESPONSIBILITY_LABEL_MAP[value] || '未知'
+}
+
+// ---------- 映射函数：买家类型 ----------
+export function getBuyerTypeLabel(value) {
+  return BUYER_TYPE_LABEL_MAP[value] || '未知类型'
+}
+
 // ---------- 工具函数：平台规则展示文案（去条号/章节/内部 doc 引用） ----------
 export function polishRuleLine(text) {
   const raw = String(text || '').trim()

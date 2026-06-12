@@ -943,3 +943,94 @@ def detect_malicious_behavior(input_data: MaliciousDetectionInput) -> MaliciousD
         malicious_risk_hints=malicious_risk_hints,
         disposition_advice=disposition_advice,
     )
+
+
+# ---------- 智能模式轻量入口：供 conversation_agent function calling 使用 ----------
+
+def _build_default_facts(description: str) -> FactOutput:
+    """从纠纷描述文本构建最小 FactOutput，仅供轻量入口内部使用。"""
+    return FactOutput(
+        issue_summary=description,
+        intent_tags=[],
+        evidence_quality=EVIDENCE_LOW,
+        confidence=0.3,
+        missing_evidence=["买家举证图片", "商品实物照片"],
+    )
+
+
+def _build_default_buyer_profile_simple(buyer_id: str) -> BuyerProfile:
+    """轻量入口用的默认画像。"""
+    return _build_default_buyer_profile(buyer_id)
+
+
+def evaluate_customer_value_simple(
+    buyer_id: str,
+    merchant_id: str = "",
+    order_amount: float = 0.0,
+) -> CustomerValueOutput:
+    """
+    轻量客户价值评估：仅需 buyer_id + merchant_id + order_amount，内部构建完整输入。
+
+    参数:
+        buyer_id: 买家脱敏ID。
+        merchant_id: 商家ID。
+        order_amount: 订单金额。
+
+    返回:
+        CustomerValueOutput 评分结果。
+    """
+    profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id)
+    cv_input = CustomerValueInput(
+        buyer_profile=profile,
+        order_amount=max(0.0, order_amount),
+        has_visual_loss_exposure=False,
+        block_order_channel=False,
+    )
+    logger.info("%s 轻量客户价值评估开始 buyer_id=%s order_amount=%s", AGENT2_LOG_PREFIX, buyer_id, order_amount)
+    return evaluate_customer_value(cv_input)
+
+
+def detect_malicious_simple(
+    chat_history: List[str],
+    buyer_id: str = "",
+    merchant_id: str = "",
+    order_amount: float = 0.0,
+    description: str = "",
+) -> MaliciousDetectionOutput:
+    """
+    轻量恶意检测：从聊天记录与描述构建最小输入，内部调用完整检测链路。
+
+    参数:
+        chat_history: 聊天记录文本列表。
+        buyer_id: 买家脱敏ID（可选，用于查画像）。
+        merchant_id: 商家ID（可选）。
+        order_amount: 订单金额。
+        description: 纠纷描述。
+
+    返回:
+        MaliciousDetectionOutput。
+    """
+    profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id) if buyer_id else _build_default_buyer_profile("")
+    facts = _build_default_facts(description or "（无描述）")
+    md_input = MaliciousDetectionInput(
+        buyer_profile=profile,
+        facts=facts,
+        order_amount=max(0.0, order_amount),
+        chat_history=[str(s).strip() for s in (chat_history or []) if str(s).strip()],
+    )
+    logger.info("%s 轻量恶意检测开始 buyer_id=%s", AGENT2_LOG_PREFIX, buyer_id)
+    return detect_malicious_behavior(md_input)
+
+
+def search_similar_cases_simple(description: str, top_k: int = 3) -> List[SimilarCase]:
+    """
+    轻量相似判例检索入口，直接透传。
+
+    参数:
+        description: 纠纷描述文本。
+        top_k: 返回条数上限。
+
+    返回:
+        SimilarCase 列表。
+    """
+    return search_similar_cases(dispute_desc=description, top_k=top_k)

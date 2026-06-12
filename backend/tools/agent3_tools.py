@@ -169,11 +169,28 @@ def _collect_quality_issues(script: str, payload: dict[str, Any]) -> list[str]:
 
 def _collect_style_issues(script: str, payload: dict[str, Any]) -> list[str]:
     """
-    口语风格门禁：过早亮规则、踢皮球许诺。
+    口语风格门禁：过早亮规则、踢皮球许诺、索要已拒证或后台操作类材料。
     """
+    from backend.agents.agent2.evidence_readiness import is_operational_evidence_gap
+
     issues: list[str] = []
     if _has_premature_rule_exposure(script, payload):
         issues.append("非终局抗辩阶段勿向买家引用规则条文或具体时效数字")
+    blocked = payload.get("dialogue_context") or {}
+    if isinstance(blocked, dict):
+        blocked_items = blocked.get("blocked_evidence_requests") or []
+    else:
+        blocked_items = []
+    for topic in blocked_items:
+        topic_text = str(topic or "").strip()
+        if topic_text and topic_text in script:
+            issues.append(f"勿再索要买家已拒举证：{topic_text}")
+    operational_markers = ("快递单号", "签收证明", "签收截图", "签收时间", "官方证明")
+    if any(marker in script for marker in operational_markers):
+        issues.append("勿向买家索要单号/签收证明等后台可查材料，改问可拍可说的商品现状")
+    for line in (payload.get("actionable_evidence_requests") or []):
+        if is_operational_evidence_gap(str(line or "")) and str(line) in script:
+            issues.append("勿向买家索要后台操作类材料")
     return issues
 
 

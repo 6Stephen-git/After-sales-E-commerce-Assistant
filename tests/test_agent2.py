@@ -179,7 +179,7 @@ class TestAgent2Recommend:
         assert output.risk_factors, "期望输出风险因素列表"
 
     def test_recommend_negotiate_when_medium_evidence_but_missing_key_proof(self, monkeypatch):
-        """有图有文但关键举证未齐（如划痕缺开箱视频）：处置仍为协商，当下动作由补证阶段约束。"""
+        """有图有文但关键举证未齐：无规则 missing_fact 时不锁 evidence_first，缺证仅风险提示。"""
         self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
@@ -201,8 +201,89 @@ class TestAgent2Recommend:
         )
         output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_NEGOTIATE
-        assert any("策略阶段" in item for item in output.risk_factors)
-        assert "补证" in output.strategy_direction_summary or "举证" in output.strategy_direction_summary
+        assert output.strategy_stage != "evidence_first"
+        assert any("[证据提示]" in item for item in output.risk_factors)
+        assert "金额" in output.strategy_direction_summary or "方案" in output.strategy_direction_summary
+
+    def test_evidence_first_when_rule_missing_fact(self, monkeypatch):
+        """规则约束 missing_fact 且低证据/无视觉结论时锁定举证优先阶段。"""
+        self._mock_strategy_llm(monkeypatch)
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="破损",
+            evidence_quality="low",
+            missing_evidence=["开箱视频"],
+            issue_summary="收到就破了，要退款",
+            intent_tags=["质量问题", "退款诉求"],
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_gap"),
+            rule_constraints=[
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_EVIDENCE,
+                    text="处理退款前应先核验买家举证是否满足规则要求",
+                    status=RULE_CONSTRAINT_MISSING_FACT,
+                    source_rule_id="quality::1",
+                )
+            ],
+            order_amount=198.0,
+        )
+        output = recommend(_with_precomputed(input_data))
+        assert output.strategy_stage == "evidence_first"
+        assert output.action_type == "evidence_request"
+        assert any(item.startswith("[策略阶段]") for item in output.risk_factors)
+
+    def test_evidence_first_when_malicious_high(self, monkeypatch):
+        """恶意高风险时锁定举证优先阶段。"""
+        self._mock_strategy_llm(monkeypatch)
+        high_malicious = MaliciousDetectionOutput(
+            risk_score=80,
+            risk_level="high",
+            triggered_signals=[],
+            hard_rule_summary="高风险。",
+            disposition_advice="建议固定完整证据链后再沟通。",
+        )
+        input_data = StrategyInput(
+            facts=FactOutput(evidence_quality="medium", issue_summary="要求全额退款"),
+            buyer_profile=BuyerProfile(buyer_id="buyer_high"),
+            order_amount=99.0,
+        )
+        output = recommend(_with_precomputed(input_data, malicious_detection=high_malicious))
+        assert output.strategy_stage == "evidence_first"
+        assert output.disposition == DISPOSITION_DEFEND
+
+    def test_blocked_evidence_from_chat(self, monkeypatch):
+        """商家已索要且买家拒录的举证项不得再进入可执行补证列表。"""
+        self._mock_strategy_llm(monkeypatch)
+        facts = FactOutput(
+            goods_received=True,
+            defect_type="破损",
+            evidence_quality="low",
+            missing_evidence=["开箱视频", "外包装全貌照"],
+            issue_summary="包裹压坏了要退款",
+            intent_tags=["质量问题", "退款诉求"],
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_chat"),
+            rule_constraints=[
+                RuleConstraint(
+                    constraint_type=RULE_CONSTRAINT_EVIDENCE,
+                    text="应先核验买家举证",
+                    status=RULE_CONSTRAINT_MISSING_FACT,
+                )
+            ],
+            chat_turns=[
+                ChatTurn(role="merchant", content="亲，拆快递时有录开箱视频吗？"),
+                ChatTurn(role="buyer", content="没录，当时没想到要录。"),
+                ChatTurn(role="buyer", content="反正照片都发了，你们赶紧处理。"),
+            ],
+            order_amount=150.0,
+        )
+        output = recommend(_with_precomputed(input_data))
+        assert "开箱视频" in output.dialogue_context.blocked_evidence_requests
+        assert "开箱视频" not in output.dialogue_context.actionable_evidence_requests
 
     def test_service_return_frame_strategy_contract(self, monkeypatch):
         """服务退货框架（只读 primary_dispute_frame）：不进质量补证阶段，动作为讲规则/验收。"""
@@ -589,6 +670,61 @@ class TestAgent2Recommend:
         assert output.malicious_detection is not None
         assert output.malicious_detection.risk_level == "high"
         assert any(item.startswith("[恶意层]") for item in output.risk_factors)
+        assert output.strategy_stage == "evidence_first"
+
+
+# ---------- 举证就绪度：分级门控与对话拒证推导 ----------
+class TestEvidenceReadiness:
+    def test_buyer_facing_missing_evidence_filters_order_id_gap(self):
+        from backend.agents.agent2.evidence_readiness import buyer_facing_missing_evidence
+
+        facts = FactOutput(
+            missing_evidence=["缺少订单号，无法查询物流状态", "开箱视频"],
+        )
+        assert buyer_facing_missing_evidence(facts) == ["开箱视频"]
+
+    def test_rule_matcher_sets_evidence_missing_fact_when_gaps_block_settlement(self):
+        from backend.tools.rule_matcher import _build_rule_constraints
+
+        facts = FactOutput(
+            defect_type="破损",
+            evidence_quality="low",
+            missing_evidence=["开箱视频"],
+            primary_dispute_frame="quality_defect",
+        )
+        pool = [
+            MatchedRule(
+                rule_id="svc::1",
+                rule_summary="买家应提供照片或视频等初步凭证",
+                condition_result="举证要求",
+            )
+        ]
+        constraints = _build_rule_constraints(pool, facts)
+        evidence_items = [c for c in constraints if c.constraint_type == RULE_CONSTRAINT_EVIDENCE]
+        assert evidence_items
+        assert evidence_items[0].status == RULE_CONSTRAINT_MISSING_FACT
+
+    def test_rule_matcher_evidence_applies_when_medium_visual_confirms_damage(self):
+        from backend.tools.rule_matcher import _build_rule_constraints
+
+        facts = FactOutput(
+            defect_type="破损",
+            evidence_quality="medium",
+            visual_observations=["罐体顶部明显凹陷"],
+            missing_evidence=["开箱视频"],
+            primary_dispute_frame="quality_defect",
+        )
+        pool = [
+            MatchedRule(
+                rule_id="svc::1",
+                rule_summary="买家应提供照片或视频等初步凭证",
+                condition_result="举证要求",
+            )
+        ]
+        constraints = _build_rule_constraints(pool, facts)
+        evidence_items = [c for c in constraints if c.constraint_type == RULE_CONSTRAINT_EVIDENCE]
+        assert len(evidence_items) == 1
+        assert evidence_items[0].status == RULE_CONSTRAINT_APPLIES
 
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
@@ -1250,7 +1386,7 @@ class TestStrategyPromptPayload:
             disposition=DISPOSITION_NEGOTIATE,
             strategy_stage="negotiate_settle",
             compensation_policy="negotiate_soft",
-            evidence_incomplete=False,
+            evidence_blocks_decision=False,
             merchant_fault_signal=False,
             input_data=input_data,
             risk_factors=[],

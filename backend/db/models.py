@@ -28,6 +28,7 @@ class MerchantConfig(Base):
     merchant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     mode: Mapped[str] = mapped_column(String(32), nullable=False, default="assisted")
     auto_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.8)
+    max_compensation: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, comment="智能模式个性化赔偿上限（元），0 表示不限制")
     created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime,

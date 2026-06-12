@@ -38,10 +38,17 @@ from schemas import (
     DISPUTE_FRAME_SEVEN_DAY_RETURN,
     DISPUTE_FRAME_UNKNOWN,
     FRAMES_NO_MONETARY_SETTLE,
-    FRAMES_SKIP_QUALITY_EVIDENCE_GATE,
     STRATEGY_STAGE_EVIDENCE_FIRST,
     StrategyInput,
     StrategyOutput,
+)
+from backend.agents.agent2.evidence_readiness import (
+    assess_evidence_readiness,
+    build_evidence_risk_notes,
+    buyer_facing_missing_evidence,
+    compose_evidence_stage_next_step,
+    derive_blocked_evidence_requests,
+    filter_actionable_evidence_requests,
 )
 from backend.tools.llm_client import chat_completion
 from backend.tools.text_signals import contains_any, signal_group
@@ -59,7 +66,7 @@ STRATEGY_MODEL_ENV = "AGENT2_LLM_MODEL_STRATEGY"
 # ---------- 策略参谋核心目标（全链路提示词共用） ----------
 _MERCHANT_INTEREST_GOAL = (
     "目标：在道德、平台规则与法律边界内，帮助商家分阶段争取最优结果（本单损益 + 客户长期价值 + 口碑与升级风险）。"
-    "售后不是一步结案：先完善举证与事实闭环，再视证据与规则选择协商、善后或合理拒赔；禁止跳过举证直接给退款/换新方案。"
+    "规则或高风险恶意要求补证时优先固定证据链；其余缺证写入风险说明并推进协商、善后或合理拒赔，禁止无依据跳过举证直接承诺退款。"
 )
 
 
@@ -247,6 +254,21 @@ def _value_risks_from_result(customer_value: CustomerValueOutput) -> List[str]:
     return layer_risks
 
 
+def _merchant_fault_signal(input_data: StrategyInput, rule_stance: str) -> bool:
+    """
+    规则站位偏买家且已有足够视觉/高质量证据时，视为商责压力明确。
+
+    中等证据但已有视觉观察结论时与高质量同等触发善后通道，避免仅有照片仍卡在纯补证。
+    """
+    if rule_stance != "buyer":
+        return False
+    facts = input_data.facts
+    evidence_quality = (facts.evidence_quality or "").strip().lower()
+    if evidence_quality == "high":
+        return True
+    return evidence_quality == "medium" and bool(facts.visual_observations or [])
+
+
 def _has_defect_claim(defect_type: str | None) -> bool:
     """
     判断事实层是否真的声明了质量/瑕疵问题。
@@ -261,58 +283,12 @@ def _has_defect_claim(defect_type: str | None) -> bool:
     return normalized not in negative_values
 
 
-def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
-    """
-    判断当前材料是否尚不足以支撑退款/补偿/拒赔等终局决策（全品类，基于事实字段而非品类词表）。
-
-    参数:
-        input_data: 策略输入。
-
-    返回:
-        True 表示应先进入「补证/固定证据」阶段。
-    """
-    facts = input_data.facts
-    skip_quality_evidence_gate = (
-        _primary_dispute_frame(input_data) in FRAMES_SKIP_QUALITY_EVIDENCE_GATE
-        and not _has_defect_claim(facts.defect_type)
-    )
-    if facts.missing_evidence and not skip_quality_evidence_gate:
-        return True
-
-    corpus_parts: List[str] = []
-    if facts.uncertainty_note:
-        corpus_parts.append(str(facts.uncertainty_note))
-    for item in facts.red_flags or []:
-        corpus_parts.append(str(item))
-    for item in facts.visual_observations or []:
-        corpus_parts.append(str(item))
-    corpus = " ".join(corpus_parts)
-    if contains_any(corpus, signal_group("evidence_doubt_markers")):
-        return True
-
-    summary = (facts.issue_summary or "") + " " + " ".join(str(t) for t in (facts.intent_tags or []))
-    has_settlement_demand = contains_any(summary, signal_group("settlement_demand_markers"))
-    defect_claimed = _has_defect_claim(facts.defect_type) or contains_any(
-        summary, signal_group("defect_claim_markers")
-    )
-    evidence_quality = (facts.evidence_quality or "").strip().lower()
-    if has_settlement_demand and defect_claimed and evidence_quality != "high":
-        return True
-
-    has_image_evidence = any(
-        isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "image"
-        for item in (facts.evidence_items or [])
-    )
-    if defect_claimed and has_image_evidence and not facts.visual_observations:
-        return True
-    return False
-
-
 def _infer_strategy_stage(
     input_data: StrategyInput,
     *,
     disposition: str,
     merchant_fault_signal: bool,
+    blocks_decision: bool,
 ) -> str:
     """
     推断当前应处的策略阶段，供 LLM 生成「当下这一步」而非终局方案。
@@ -320,7 +296,7 @@ def _infer_strategy_stage(
     返回:
         evidence_first | negotiate_settle | compensate_close | defend_platform
     """
-    if _is_evidence_insufficient_for_decision(input_data):
+    if blocks_decision:
         return "evidence_first"
     if disposition == DISPOSITION_COMPENSATE and merchant_fault_signal:
         return "compensate_close"
@@ -330,25 +306,11 @@ def _infer_strategy_stage(
 
 
 def _compose_evidence_first_next_step(input_data: StrategyInput) -> str:
-    """
-    生成举证优先阶段的下一步。
-
-    该文案只围绕事实疑点和缺证推进，不预设最终退款、补偿或拒赔结论。
-    """
-    facts = input_data.facts
-    red_flags = [str(item).strip() for item in (facts.red_flags or []) if str(item).strip()]
-    missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
-    parts: list[str] = []
-    if red_flags:
-        parts.append(f"先围绕“{red_flags[0]}”核验关键事实")
-    else:
-        parts.append("先把当前关键事实核验清楚")
-    if missing:
-        parts.append(f"请买家补充{ '、'.join(missing[:3]) }")
-    else:
-        parts.append("请买家补充可核实责任归属的材料")
-    parts.append("商家同步固定发货、聊天和已有举证记录，事实闭环后再判断是否退款、补偿或抗辩")
-    return "，".join(parts)
+    """生成举证优先阶段的下一步（排除已拒证与不可执行项）。"""
+    return compose_evidence_stage_next_step(
+        facts=input_data.facts,
+        chat_turns=input_data.chat_turns or [],
+    )
 
 
 def _infer_action_contract(
@@ -480,7 +442,7 @@ def _determine_disposition(
     举证未闭环不改变 disposition，由 strategy_stage=evidence_first 约束「当下先补证」。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
-    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    merchant_fault_signal = _merchant_fault_signal(input_data, rule_stance)
 
     if malicious_result.risk_level == "high":
         return DISPOSITION_DEFEND
@@ -533,7 +495,7 @@ def _estimate_win_rate(
 
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
     missing_count = len(input_data.facts.missing_evidence)
-    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    merchant_fault_signal = _merchant_fault_signal(input_data, rule_stance)
 
     # 规则轴
     if rule_stance == "merchant" and rule_count >= 2:
@@ -588,7 +550,7 @@ def _estimate_confidence(
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
     missing_count = len(input_data.facts.missing_evidence)
-    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    merchant_fault_signal = _merchant_fault_signal(input_data, rule_stance)
 
     # 维度一：规则确定性
     if rule_count >= 1 and rule_stance in {"merchant", "buyer"}:
@@ -627,7 +589,7 @@ def _has_major_signal_conflict(input_data: StrategyInput, *, malicious_result, r
     判断是否存在恶意风险与商责明确信号的主要矛盾。
     """
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
-    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    merchant_fault_signal = _merchant_fault_signal(input_data, rule_stance)
     return malicious_result.risk_level in {"high", "medium"} and merchant_fault_signal
 
 
@@ -691,7 +653,8 @@ def _build_strategy_json_system_prompt() -> str:
         "strategy_direction_summary 只能写面向商家的当前处理方向。"
         "strategy_direction_rationale 是案情分析+规则要点的推理说明（给商家看）。"
         "只可概括规则如何约束本案（如时效、举证、验收），禁止复述 rule_briefs/rule_constraints/platform_rule_basis 原文。"
-        "若 strategy_stage=evidence_first：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
+        "若 evidence_blocks_decision=true（strategy_stage=evidence_first）：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
+        "若 evidence_blocks_decision=false：非阻断缺证已在 risk_factors，不得再主导为纯补证策略。"
         "若 compensation_policy=none/forbid/soft_no_amount：不得建议报具体补偿金额。"
         "若 dialogue_context.blocked_evidence_requests 非空：不得再要求其中任何一项。"
         "若 recent_turns 非空：须承接对话，禁止重复商家已提且买家已拒的举证要求。"
@@ -728,10 +691,15 @@ def _normalize_dialogue_context(raw: Any, input_data: StrategyInput) -> Dialogue
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
-    blocked = _as_list(data.get("blocked_evidence_requests"))
-    actionable = _as_list(data.get("actionable_evidence_requests"))
-    if not actionable:
-        actionable = list(input_data.facts.missing_evidence or [])
+    chat_blocked = derive_blocked_evidence_requests(input_data.chat_turns or [])
+    blocked = list(
+        dict.fromkeys(_as_list(data.get("blocked_evidence_requests")) + chat_blocked)
+    )
+    llm_actionable = _as_list(data.get("actionable_evidence_requests"))
+    actionable = filter_actionable_evidence_requests(
+        llm_actionable or buyer_facing_missing_evidence(input_data.facts),
+        blocked,
+    )
 
     fallback = str(data.get("fallback_script") or "").strip()
     if not fallback:
@@ -826,7 +794,7 @@ def _build_strategy_prompt_payload(
     action_type: str = "",
     rule_constraints: List[str] | None = None,
     next_step: str = "",
-    evidence_incomplete: bool,
+    evidence_blocks_decision: bool,
     merchant_fault_signal: bool,
     input_data: StrategyInput,
     risk_factors: List[str],
@@ -845,7 +813,7 @@ def _build_strategy_prompt_payload(
             item.model_dump() for item in (input_data.rule_constraints or [])
         ],
         "next_step": next_step,
-        "evidence_incomplete": evidence_incomplete,
+        "evidence_blocks_decision": evidence_blocks_decision,
         "merchant_fault_clear": merchant_fault_signal,
         "facts": _build_strategy_facts_summary(input_data),
         "buyer_profile": _build_strategy_buyer_profile_summary(input_data),
@@ -859,6 +827,15 @@ def _build_strategy_prompt_payload(
     turns = input_data.chat_turns or []
     if turns:
         payload["recent_turns"] = [t.model_dump() for t in turns[-STRATEGY_RECENT_TURNS_MAX:]]
+    chat_blocked = derive_blocked_evidence_requests(turns)
+    actionable = filter_actionable_evidence_requests(
+        buyer_facing_missing_evidence(input_data.facts),
+        chat_blocked,
+    )
+    if chat_blocked:
+        payload["blocked_evidence_requests"] = chat_blocked
+    if actionable:
+        payload["actionable_evidence_requests"] = actionable
     return payload
 
 
@@ -871,6 +848,7 @@ def _llm_generate_strategy(
     strategy_stage: str,
     action_contract: dict[str, Any],
     merchant_fault_signal: bool,
+    evidence_blocks_decision: bool,
     reasoning_delta_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
     """
@@ -883,7 +861,7 @@ def _llm_generate_strategy(
         compensation_policy=str(action_contract.get("compensation_policy") or ""),
         rule_constraints=list(action_contract.get("rule_constraints") or []),
         next_step=str(action_contract.get("next_step") or ""),
-        evidence_incomplete=_is_evidence_insufficient_for_decision(input_data),
+        evidence_blocks_decision=evidence_blocks_decision,
         merchant_fault_signal=merchant_fault_signal,
         input_data=input_data,
         risk_factors=risk_factors,
@@ -959,8 +937,7 @@ def recommend(
     if has_signal_conflict:
         risk_factors.append("[信号一致性] 恶意风险与商责明确信号同时存在，需说明冲突并按优先级谨慎处理")
 
-    evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
-    merchant_fault_signal = rule_stance == "buyer" and evidence_quality == "high"
+    merchant_fault_signal = _merchant_fault_signal(input_data, rule_stance)
 
     disposition = _determine_disposition(
         input_data,
@@ -968,13 +945,22 @@ def recommend(
         customer_value=customer_value,
         rule_stance=rule_stance,
     )
+    evidence_readiness = assess_evidence_readiness(
+        facts=input_data.facts,
+        rule_constraints=input_data.rule_constraints or [],
+        malicious_result=malicious_result,
+    )
     strategy_stage = _infer_strategy_stage(
         input_data,
         disposition=disposition,
         merchant_fault_signal=merchant_fault_signal,
+        blocks_decision=evidence_readiness.blocks_decision,
     )
-    if strategy_stage == "evidence_first":
-        risk_factors.append("[策略阶段] 举证未闭环：当前建议先补证并固定证据链，再进入协商/善后/拒赔决策")
+    if evidence_readiness.blocks_decision:
+        for reason in evidence_readiness.blocking_reasons:
+            risk_factors.append(f"[策略阶段] {reason}")
+    else:
+        risk_factors.extend(build_evidence_risk_notes(input_data.facts))
 
     rule_constraints = _build_rule_constraints(input_data)
     action_contract = _infer_action_contract(
@@ -1009,6 +995,7 @@ def recommend(
         strategy_stage=strategy_stage,
         action_contract=action_contract,
         merchant_fault_signal=merchant_fault_signal,
+        evidence_blocks_decision=evidence_readiness.blocks_decision,
         reasoning_delta_callback=reasoning_delta_callback,
     )
 

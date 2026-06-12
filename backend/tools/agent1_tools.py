@@ -512,3 +512,22 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     if legacy_result.get("error"):
         return legacy_result
     return _normalize_vision_dict(legacy_result)
+
+
+# ---------- 智能模式轻量入口：供 conversation_agent function calling 使用 ----------
+def analyze_image_simple(image_url: str, buyer_claim: str = "") -> dict[str, Any]:
+    """
+    轻量图片分析入口：直接传 URL 与买家诉求文本，返回视觉特征 dict。
+
+    与 analyze_image 的区别：buyer_claim 直接作为 guidance，无需上游预处理。
+
+    参数:
+        image_url: 图片公网 URL 或 data URL。
+        buyer_claim: 买家的文字诉求描述，用于锚定视觉分析焦点。
+
+    返回:
+        视觉特征 dict 或 error dict。
+    """
+    if not image_url:
+        return {"error": "图片分析失败：image_url 为空"}
+    return analyze_image(image_url=image_url, guidance=buyer_claim)

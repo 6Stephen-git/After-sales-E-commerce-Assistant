@@ -712,6 +712,7 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
     if ratio_cap is None and isinstance(policy_limits, dict):
         ratio_cap = _coerce_float(policy_limits.get("compensation_ratio_cap"))
 
+    evidence_constraint_added = False
     for rule in pool:
         source_rule_id = rule.rule_id
         for text in rule.strategy_constraints or []:
@@ -767,17 +768,30 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
         skip_generic_evidence = frame in FRAMES_SKIP_QUALITY_EVIDENCE_GATE and is_no_defect_claim(
             facts.defect_type
         )
-        if not skip_generic_evidence and (
-            "举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text
+        if (
+            not evidence_constraint_added
+            and not skip_generic_evidence
+            and ("举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text)
         ):
+            from backend.agents.agent2.evidence_readiness import (
+                buyer_facing_missing_evidence,
+                evidence_gap_blocks_settlement,
+            )
+
+            buyer_gaps = buyer_facing_missing_evidence(facts)
+            if buyer_gaps and evidence_gap_blocks_settlement(facts):
+                evidence_status = RULE_CONSTRAINT_MISSING_FACT
+            else:
+                evidence_status = RULE_CONSTRAINT_APPLIES
             _append_constraint(
                 constraints,
                 constraint_type=RULE_CONSTRAINT_EVIDENCE,
                 text="处理退款或补偿前，应先核验买家举证是否满足规则要求，并固定商品照片、视频、快递单和聊天记录",
-                status=RULE_CONSTRAINT_APPLIES,
+                status=evidence_status,
                 source_rule_id=source_rule_id,
                 confidence=0.8,
             )
+            evidence_constraint_added = True
 
     if ratio_cap is not None:
         _append_constraint(
@@ -870,4 +884,70 @@ def _dedupe_rules(rules: list[MatchedRule]) -> list[MatchedRule]:
         seen.add(rule.rule_id)
         picked.append(rule)
     return picked
+
+
+# ---------- 智能模式轻量入口：供 conversation_agent function calling 使用 ----------
+
+def match_rules_simple(
+    description: str,
+    service_tags: List[str] | None = None,
+    category_slug: str = "",
+) -> RuleMatchResult:
+    """
+    轻量规则匹配入口：从自然语言描述构建最小 FactOutput，内部走完整匹配链路。
+
+    与 match_rules_from_facts 的区别：无需上游 Agent1 完整输出，直接传描述文本。
+
+    参数:
+        description: 纠纷自然语言描述（买家说了什么、什么问题）。
+        service_tags: 平台服务标标签列表（如 "坏单包退"、"七天无理由"）。
+        category_slug: 商品品类 slug（可选）。
+
+    返回:
+        RuleMatchResult（命中池、brief、前端代表条）。
+    """
+    logger.info("%s 轻量规则匹配开始 description=%s", LOG_PREFIX, description[:80])
+
+    # 构建最小 rule_match_plan，用描述文本中的关键词做检索
+    terms_text = description.strip()
+    if not terms_text:
+        return RuleMatchResult()
+
+    # 用简单分词提取检索词（不依赖 NLP 分词，直接按标点和空格拆分）
+    import re as _re
+    raw_tokens = _re.split(r"[，。；！？、\s]+", terms_text)
+    tokens = [t.strip() for t in raw_tokens if len(t.strip()) >= 2]
+
+    # must_terms 取较长的关键词，should_terms 取全部
+    must_terms = [t for t in tokens if len(t) >= 3][:8]
+    should_terms = tokens[:15]
+
+    # 服务标关键词补充
+    if service_tags:
+        for tag in service_tags:
+            tag_text = str(tag).strip()
+            if tag_text and tag_text not in must_terms:
+                must_terms.append(tag_text)
+
+    plan = RuleMatchPlan(
+        activated_lanes=[],
+        target_doc_ids=[],  # 无 doc_id 时会走字面降级
+        section_selections=[],
+        search_terms=RuleSearchTerms(
+            must_terms=must_terms,
+            should_terms=should_terms,
+            case_terms=[],
+            exclude_terms=[],
+        ),
+        category_confidence=0.5 if category_slug else 0.0,
+        service_confidence=0.5 if service_tags else 0.0,
+    )
+
+    minimal_facts = FactOutput(
+        issue_summary=description,
+        rule_match_plan=plan,
+        confidence=0.4,
+    )
+
+    return match_rules_from_facts(minimal_facts)
 

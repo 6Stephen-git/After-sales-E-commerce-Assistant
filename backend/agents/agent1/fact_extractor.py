@@ -425,8 +425,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     red_flags: list[str] = []
     uncertainty_reasons: list[str] = []
 
+    operational_gaps: list[str] = []
     if not order_id:
-        missing_evidence.append("缺少订单号，无法查询物流状态")
+        operational_gaps.append("缺少订单号，无法查询物流状态")
     if not image_urls:
         missing_evidence.append("缺少举证图片")
     if not text_context:
@@ -630,6 +631,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         logger.warning("%s rule_match_plan 无 target_doc_ids，规则匹配将跳过", LOG_PREFIX)
 
     attributes = _merge_rule_context_attributes(attributes, materials)
+    if operational_gaps:
+        attributes = dict(attributes or {})
+        attributes["operational_gaps"] = list(dict.fromkeys(operational_gaps))
     primary_dispute_frame = resolve_primary_dispute_frame(
         materials=materials,
         intent_tags=intent_tags,
