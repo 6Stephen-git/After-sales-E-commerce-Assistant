@@ -13,6 +13,7 @@
 import json
 import os
 import sys
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,11 +30,12 @@ from schemas import (
     AgentReply,
     ChatTurn,
     EvidenceSummary,
+    FactOutput,
     IntelligentContext,
     IntelligentState,
     KeyDecision,
     UpdateStateInput,
-    ToolCallLog,
+    ToolFinding,
     INTEL_PHASE_EVIDENCE,
     INTEL_PHASE_HANDOFF,
     INTEL_PHASE_SETTLE,
@@ -56,44 +58,48 @@ class TestHandoffThreshold:
         """买家明确要求转人工时应触发。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, reason = check_handoff_threshold(
+        should, suggested, reason = check_handoff_threshold(
             buyer_message="转人工，我要找人工客服",
         )
         assert should is True
+        assert suggested is False
         assert "转人工" in reason or "人工" in reason
 
     def test_handoff_when_amount_exceeds_threshold(self):
         """订单金额超阈值时应触发转人工。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, reason = check_handoff_threshold(order_amount=600.0)
+        should, suggested, reason = check_handoff_threshold(order_amount=600.0)
         assert should is True
+        assert suggested is False
         assert "600" in reason
 
     def test_handoff_when_high_risk_malicious(self):
         """高风险 + 可疑/恶意买家应触发转人工。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, reason = check_handoff_threshold(
+        should, suggested, reason = check_handoff_threshold(
             risk_level="high",
             buyer_type="malicious",
         )
         assert should is True
+        assert suggested is False
         assert "恶意" in reason
 
-    def test_handoff_when_too_many_rounds(self):
-        """对话轮次过多无进展应触发转人工。"""
+    def test_suggest_handoff_when_too_many_rounds(self):
+        """对话轮次过多应建议转人工而非强制。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, reason = check_handoff_threshold(round_count=7)
-        assert should is True
+        should, suggested, reason = check_handoff_threshold(round_count=7)
+        assert should is False
+        assert suggested is True
         assert "7" in reason or "轮" in reason
 
     def test_no_handoff_for_normal_low_amount(self):
         """正常低金额对话不触发转人工。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, reason = check_handoff_threshold(
+        should, suggested, reason = check_handoff_threshold(
             order_amount=50.0,
             buyer_type="normal",
             risk_level="low",
@@ -101,14 +107,28 @@ class TestHandoffThreshold:
             round_count=1,
         )
         assert should is False
+        assert suggested is False
         assert reason == ""
 
     def test_handoff_on_complaint_keyword(self):
         """买家提及投诉相关关键词应触发转人工。"""
         from backend.tools.intelligent_tools import check_handoff_threshold
 
-        should, _ = check_handoff_threshold(buyer_message="你们不处理我就投诉12315")
+        should, suggested, _ = check_handoff_threshold(buyer_message="你们不处理我就投诉12315")
         assert should is True
+        assert suggested is False
+
+    def test_dismiss_round_handoff_skips_suggestion(self):
+        """用户选择继续后不再因轮次建议转人工。"""
+        from backend.tools.intelligent_tools import check_handoff_threshold
+
+        should, suggested, reason = check_handoff_threshold(
+            round_count=10,
+            dismiss_round_handoff=True,
+        )
+        assert should is False
+        assert suggested is False
+        assert reason == ""
 
 
 # ---------- 状态更新工具测试 ----------
@@ -210,30 +230,200 @@ class TestUpdateState:
         assert state.phase == INTEL_PHASE_EVIDENCE  # 原对象不变
         assert new_state.phase == INTEL_PHASE_SETTLE  # 新对象已变
 
+    def test_update_can_clear_missing_with_empty_list(self):
+        """传入 missing=[] 应清空缺失项，而非因空列表被忽略。"""
+        from backend.tools.intelligent_tools import update_state
+        from schemas import EvidenceSummaryInput
 
-# ---------- 工具调用日志测试 ----------
-class TestToolCallLog:
-    """log_tool_call 核心契约。"""
+        state = IntelligentState(
+            dispute_id="test_001",
+            evidence_summary=EvidenceSummary(collected=[], missing=["买家举证图片"]),
+        )
+        update_input = UpdateStateInput(
+            dispute_id="test_001",
+            evidence_summary=EvidenceSummaryInput(collected=["买家举证图片"], missing=[]),
+            update_reason="核销缺证",
+        )
+        new_state = update_state(state, update_input)
+        assert new_state.evidence_summary.missing == []
 
-    def test_log_appends_tool_call(self):
-        """工具调用日志应正确追加。"""
-        from backend.tools.intelligent_tools import log_tool_call
 
-        state = IntelligentState(dispute_id="test_002")
-        new_state = log_tool_call(state, "query_buyer_profile", 0, "credit=high")
-        assert len(new_state.tool_calls_log) == 1
-        assert new_state.tool_calls_log[0].tool == "query_buyer_profile"
-        assert new_state.tool_calls_log[0].result_summary == "credit=high"
+class TestEvidenceStateSync:
+    """工具结论自动写入 IntelligentState 的契约。"""
 
-    def test_log_preserves_existing_entries(self):
-        """新日志应追加而非覆盖。"""
-        from backend.tools.intelligent_tools import log_tool_call
+    def test_sync_state_after_vision_clears_generic_missing(self):
+        from backend.tools.intelligent_tools import sync_state_after_vision
 
-        state = IntelligentState(dispute_id="test_002")
-        state = log_tool_call(state, "query_buyer_profile", 0)
-        state = log_tool_call(state, "analyze_image_simple", 1, "破损")
-        assert len(state.tool_calls_log) == 2
-        assert state.tool_calls_log[1].tool == "analyze_image_simple"
+        state = IntelligentState(
+            dispute_id="vision_001",
+            evidence_summary=EvidenceSummary(
+                collected=[],
+                missing=["买家举证图片", "商品实物照片", "开箱视频"],
+            ),
+        )
+        vision = {
+            "visual_description": "书角明显翘边",
+            "defect_type": "翘边",
+            "visual_defect_severity": "moderate",
+        }
+        new_state = sync_state_after_vision(
+            state,
+            vision,
+            update_reason="测试视觉同步",
+        )
+        assert any("买家举证图片" in item for item in new_state.evidence_summary.collected)
+        assert "买家举证图片" not in new_state.evidence_summary.missing
+        assert "商品实物照片" not in new_state.evidence_summary.missing
+        assert "开箱视频" in new_state.evidence_summary.missing
+
+    def test_sync_state_after_vision_skips_error(self):
+        from backend.tools.intelligent_tools import sync_state_after_vision
+
+        state = IntelligentState(dispute_id="vision_002")
+        unchanged = sync_state_after_vision(state, {"error": "失败"}, update_reason="x")
+        assert unchanged.model_dump() == state.model_dump()
+
+    def test_sync_state_after_logistics_adds_collected(self):
+        from backend.tools.intelligent_tools import sync_state_after_logistics
+
+        state = IntelligentState(
+            dispute_id="logistics_001",
+            evidence_summary=EvidenceSummary(missing=["物流状态"]),
+        )
+        new_state = sync_state_after_logistics(
+            state,
+            {"order_id": "9999", "is_signed": True},
+        )
+        assert "物流状态" in new_state.evidence_summary.collected
+        assert "物流状态" not in new_state.evidence_summary.missing
+
+
+class TestToolFindings:
+    """工具事实层：record_tool_finding 与跨轮 prompt 注入。"""
+
+    def test_record_tool_finding_appends_vision(self):
+        from backend.tools.intelligent_tools import record_tool_finding
+
+        state = IntelligentState(dispute_id="tf_001")
+        vision = {
+            "visual_description": "笔记本边角翘起",
+            "defect_type": "翘边",
+            "visual_defect_severity": "moderate",
+        }
+        new_state = record_tool_finding(
+            state,
+            "analyze_image_simple",
+            1,
+            vision,
+            extra_facts={"image_url": "data:image/png;base64,abc"},
+        )
+        assert len(new_state.tool_findings) == 1
+        assert new_state.tool_findings[0].tool == "analyze_image_simple"
+        assert "翘边" in new_state.tool_findings[0].summary
+        assert new_state.tool_findings[0].facts.get("defect_type") == "翘边"
+
+    def test_format_tool_findings_for_prompt(self):
+        from backend.tools.intelligent_tools import format_tool_findings_for_prompt, record_tool_finding
+
+        state = IntelligentState(dispute_id="tf_002")
+        state = record_tool_finding(
+            state,
+            "query_logistics",
+            0,
+            {"order_id": "9999", "is_signed": True, "status_text": "已签收1天"},
+        )
+        text = format_tool_findings_for_prompt(state)
+        assert "已确认的工具事实" in text
+        assert "query_logistics" in text
+        assert "9999" in text
+
+    def test_summarize_logistics_with_status_text(self):
+        from backend.tools.intelligent_tools import summarize_tool_result
+
+        summary, facts = summarize_tool_result(
+            "query_logistics",
+            {"order_id": "9999", "is_signed": True, "status_text": "已签收1天"},
+        )
+        assert "9999" in summary
+        assert "签收" in summary
+        assert facts.get("order_id") == "9999"
+
+    def test_record_tool_finding_appends_without_overwrite(self):
+        from backend.tools.intelligent_tools import record_tool_finding
+
+        state = IntelligentState(dispute_id="tf_003")
+        state = record_tool_finding(state, "query_buyer_profile", 0, {"credit_level": "高"})
+        state = record_tool_finding(
+            state,
+            "analyze_image_simple",
+            1,
+            {"visual_description": "破损", "defect_type": "破损"},
+        )
+        assert len(state.tool_findings) == 2
+        assert state.tool_findings[1].tool == "analyze_image_simple"
+
+    def test_record_tool_finding_syncs_evidence_for_vision(self):
+        from backend.tools.intelligent_tools import record_tool_finding
+
+        state = IntelligentState(
+            dispute_id="tf_004",
+            evidence_summary=EvidenceSummary(missing=["买家举证图片"]),
+        )
+        state = record_tool_finding(
+            state,
+            "analyze_image_simple",
+            0,
+            {"visual_description": "翘边", "defect_type": "翘边"},
+        )
+        assert state.tool_findings
+        assert "买家举证图片" not in state.evidence_summary.missing
+
+
+class TestBuyerClaimFromContext:
+    """视觉锚点文本合成。"""
+
+    def test_build_buyer_claim_skips_image_placeholder(self):
+        from backend.agents.conversation_agent import _build_buyer_claim_from_context
+
+        context = IntelligentContext(
+            dispute_id="claim_001",
+            chat_history=[
+                ChatTurn(role="buyer", content="本子翘边"),
+                ChatTurn(role="merchant", content="请发近照"),
+                ChatTurn(role="buyer", content="9999"),
+                ChatTurn(role="buyer", content="[图片]"),
+            ],
+            current_state=IntelligentState(dispute_id="claim_001"),
+        )
+        claim = _build_buyer_claim_from_context(context)
+        assert "本子翘边" in claim
+        assert "9999" in claim
+        assert "[图片]" not in claim
+
+
+class TestResolveAnalyzeImageUrl:
+    """附图 URL 服务端解析。"""
+
+    def test_resolve_by_image_index(self):
+        from backend.agents.conversation_agent import _resolve_analyze_image_url
+
+        pending = ["data:image/png;base64,abc", "https://example.com/b.jpg"]
+        url = _resolve_analyze_image_url(
+            pending_image_urls=pending,
+            arguments={"image_index": 2},
+        )
+        assert url == "https://example.com/b.jpg"
+
+    def test_resolve_single_pending_when_llm_passes_truncated_url(self):
+        from backend.agents.conversation_agent import _resolve_analyze_image_url
+
+        full = "data:image/jpeg;base64," + ("A" * 200)
+        truncated = full[:117] + "..."
+        url = _resolve_analyze_image_url(
+            pending_image_urls=[full],
+            arguments={"image_url": truncated},
+        )
+        assert url == full
 
 
 # ---------- 构建转人工摘要测试 ----------
@@ -324,7 +514,9 @@ class TestStateSerialization:
             risk_level=RISK_LOW,
             risk_signals=["信号A"],
             key_decisions=[KeyDecision(turn=1, decision="善后", reason="商责")],
-            tool_calls_log=[ToolCallLog(tool="query_buyer_profile", turn=0, result_summary="ok")],
+            tool_findings=[
+                ToolFinding(tool="query_buyer_profile", turn=0, summary="信誉=高", facts={"credit_level": "高"}),
+            ],
             last_update_reason="测试序列化",
         )
         json_str = state.model_dump_json()
@@ -337,7 +529,8 @@ class TestStateSerialization:
         assert len(restored.evidence_summary.collected) == 2
         assert len(restored.key_decisions) == 1
         assert restored.key_decisions[0].decision == "善后"
-        assert len(restored.tool_calls_log) == 1
+        assert len(restored.tool_findings) == 1
+        assert restored.tool_findings[0].tool == "query_buyer_profile"
 
 
 # ---------- conversation_agent 工具执行测试 ----------
@@ -355,12 +548,19 @@ class TestToolExecution:
             current_state=IntelligentState(dispute_id="exec_001"),
         )
 
+    def _make_facts(self) -> FactOutput:
+        return FactOutput(
+            issue_summary="商品破损了",
+            evidence_quality="low",
+            confidence=0.3,
+        )
+
     def test_update_state_tool(self):
         """update_state 工具应正确更新状态。"""
         from backend.agents.conversation_agent import _execute_tool_call
 
         ctx = self._make_context()
-        result_text, new_state = _execute_tool_call(
+        result_text, new_state, _facts = _execute_tool_call(
             "update_state",
             {
                 "phase": "settlement",
@@ -369,6 +569,7 @@ class TestToolExecution:
             },
             ctx,
             round_count=0,
+            accumulated_facts=self._make_facts(),
         )
         result = json.loads(result_text)
         assert result["status"] == "updated"
@@ -390,11 +591,12 @@ class TestToolExecution:
         )
 
         ctx = self._make_context()
-        result_text, new_state = _execute_tool_call(
+        result_text, new_state, _facts = _execute_tool_call(
             "query_buyer_profile",
             {"buyer_id": "buyer_exec", "merchant_id": "merchant_exec"},
             ctx,
             round_count=0,
+            accumulated_facts=self._make_facts(),
         )
         result = json.loads(result_text)
         assert result["buyer_id"] == "buyer_exec"
@@ -405,25 +607,29 @@ class TestToolExecution:
         from backend.agents.conversation_agent import _execute_tool_call
 
         ctx = self._make_context()
-        result_text, _ = _execute_tool_call("nonexistent_tool", {}, ctx, 0)
+        result_text, _state, _facts = _execute_tool_call(
+            "nonexistent_tool", {}, ctx, 0, accumulated_facts=self._make_facts(),
+        )
         result = json.loads(result_text)
         assert "error" in result
         assert "未知工具" in result["error"]
 
-    def test_query_logistics_returns_placeholder(self):
-        """物流查询暂返回占位数据。"""
+    def test_query_logistics_returns_structured_data(self):
+        """物流查询返回结构化字段。"""
         from backend.agents.conversation_agent import _execute_tool_call
 
         ctx = self._make_context()
-        result_text, _ = _execute_tool_call(
+        result_text, _state, _facts = _execute_tool_call(
             "query_logistics",
             {"order_id": "ORD-999"},
             ctx,
             round_count=0,
+            accumulated_facts=self._make_facts(),
         )
         result = json.loads(result_text)
         assert result["order_id"] == "ORD-999"
-        assert "暂无" in result["status"] or "待接入" in result["note"]
+        assert "is_shipped" in result
+        assert "is_signed" in result
 
 
 # ---------- conversation_agent.chat 核心测试 ----------
@@ -649,6 +855,121 @@ class TestConversationAgentChat:
         # 应有兜底回复或最后一条 assistant content
         assert reply.reply_text
         assert reply.handoff is False
+
+    def test_chat_with_image_syncs_state_and_injects_vision_context(self, monkeypatch):
+        """附图时 LLM 调 analyze_image_simple 后应写入 tool_findings 与 evidence_summary。"""
+        from backend.agents import conversation_agent
+
+        captured: dict[str, Any] = {}
+        llm_round = {"n": 0}
+        vision_calls: list[dict[str, Any]] = []
+
+        def mock_vision(image_url: str, buyer_claim: str = "") -> dict[str, Any]:
+            vision_calls.append({"image_url": image_url, "buyer_claim": buyer_claim})
+            return {
+                "visual_description": "笔记本边角翘起",
+                "defect_type": "翘边",
+                "visual_defect_severity": "moderate",
+            }
+
+        def mock_llm(**kwargs):
+            llm_round["n"] += 1
+            messages = kwargs.get("messages") or []
+            if llm_round["n"] == 1:
+                captured["system"] = messages[0]["content"] if messages else ""
+                return {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_img",
+                            "type": "function",
+                            "function": {
+                                "name": "analyze_image_simple",
+                                "arguments": json.dumps(
+                                    {
+                                        "image_index": 1,
+                                        "buyer_claim": "本子翘边；9999",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+            return {
+                "role": "assistant",
+                "content": "看到了，翘边问题我这边给您处理",
+                "tool_calls": None,
+            }
+
+        monkeypatch.setattr(conversation_agent, "analyze_image_simple", mock_vision)
+        monkeypatch.setattr(conversation_agent, "chat_completion_assistant_message", mock_llm)
+
+        reply = conversation_agent.chat(
+            buyer_message="9999",
+            dispute_id="chat_image_001",
+            chat_history=[
+                ChatTurn(role="buyer", content="本子翘边"),
+                ChatTurn(role="merchant", content="请发订单号和近照"),
+            ],
+            image_urls=["data:image/png;base64,abc"],
+            round_count=1,
+        )
+
+        assert "analyze_image_simple" in reply.tools_called
+        assert reply.state_updated is True
+        assert any("买家举证图片" in item for item in reply.state.evidence_summary.collected)
+        assert len(reply.state.tool_findings) >= 1
+        assert "笔记本边角翘起" in reply.state.tool_findings[-1].summary
+        assert "附图1" in captured.get("system", "")
+        assert "data:image/png;base64,abc" not in captured.get("system", "")
+        assert len(vision_calls) == 1
+        assert vision_calls[0]["image_url"] == "data:image/png;base64,abc"
+
+    def test_cross_round_tool_findings_in_prompt(self, monkeypatch):
+        """第二轮应能在 system 中看到第一轮持久化的 tool_findings。"""
+        from backend.agents import conversation_agent
+        from backend.tools.intelligent_tools import record_tool_finding
+
+        captured: dict[str, Any] = {}
+        persisted = IntelligentState(dispute_id="cross_001")
+        persisted = record_tool_finding(
+            persisted,
+            "query_logistics",
+            0,
+            {"order_id": "9999", "is_signed": True, "status_text": "已签收1天"},
+        )
+
+        def mock_load(dispute_id: str):
+            if dispute_id == "cross_001":
+                return persisted
+            return None
+
+        monkeypatch.setattr(
+            "backend.agents.conversation_agent.context.load_state_from_redis",
+            mock_load,
+        )
+
+        def mock_llm(**kwargs):
+            messages = kwargs.get("messages") or []
+            captured["system"] = messages[0]["content"] if messages else ""
+            return {"role": "assistant", "content": "好的", "tool_calls": None}
+
+        monkeypatch.setattr(conversation_agent, "chat_completion_assistant_message", mock_llm)
+
+        reply = conversation_agent.chat(
+            buyer_message="单号9999",
+            dispute_id="cross_001",
+            chat_history=[
+                ChatTurn(role="buyer", content="本子翘边"),
+                ChatTurn(role="merchant", content="请发订单号"),
+            ],
+            round_count=1,
+        )
+
+        assert "query_logistics" in captured.get("system", "")
+        assert "9999" in captured.get("system", "")
+        assert reply.state.tool_findings
 
 
 # ---------- 控制器入口测试 ----------

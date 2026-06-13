@@ -208,15 +208,22 @@ Agent 可以在阶段间自由跳转，不强制线性推进。
   "key_decisions": [
     {"turn": 3, "decision": "先要照片再定策略", "reason": "证据不足"}
   ],
-  "tool_calls_log": [
-    {"tool": "query_logistics", "turn": 2, "result_summary": "物流正常"}
+  "tool_findings": [
+    {
+      "tool": "query_logistics",
+      "turn": 2,
+      "summary": "订单12345已签收1天",
+      "facts": {"order_id": "12345", "is_signed": true}
+    }
   ],
   "last_update_reason": "收到买家照片后，结合老客画像调整为协商策略",
   "updated_at": "2026-06-11T15:00:00"
 }
 ```
 
-**状态更新方式**：通过 `update_state` 工具调用，LLM 在策略分析完成后主动调用。
+**状态更新方式**：
+- 策略/阶段：`update_state` 工具（LLM 主动调用）
+- 工具结论：`record_tool_finding` 自动写入 `tool_findings`，每轮注入 system prompt
 
 **存储**：Redis，按 `dispute_id` 为 key，TTL 24h。
 
@@ -232,10 +239,9 @@ Agent 可以在阶段间自由跳转，不强制线性推进。
 | 高（对话初期） | `query_buyer_profile`            | 知道和谁说话    |
 | 中（按需）   | `match_rules_simple`             | 需要规则边界    |
 | 中（按需）   | `query_logistics`                | 需要物流状态    |
-| 中（按需）   | `analyze_image_simple`           | 买家发了图片    |
+| 中（按需）   | `analyze_image_simple`           | 买家发了图片（system 注入 URL，LLM 主动调用） |
 | 低（特定场景） | `evaluate_customer_value_simple` | 不确定客户价值   |
 | 低（特定场景） | `detect_malicious_simple`        | 怀疑恶意行为    |
-| 低（特定场景） | `assess_evidence_readiness`      | 判断举证完备性   |
 | 低（特定场景） | `search_similar_cases_simple`    | 需要参考案例    |
 | 低（按需）   | `analyze_sentiment`              | 需要情绪分析    |
 | 按需      | `update_state`                   | 局势变化时更新状态 |

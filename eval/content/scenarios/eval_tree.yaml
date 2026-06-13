@@ -90,6 +90,16 @@ axes:
         service_tag_hint: 15天包活
         service_constraints: 15天包活
 
+      - case_id: NG-20_evidence_arc_partial
+        status: existing
+        path: eval/content/scenarios/pilot/negotiation/NG-20_evidence_arc_partial.md
+        leaf: 多步快照·补证后部分补偿协商
+        target_ability: 证据闭环后在赔偿上限与老客价值内给出部分补偿而非继续补证
+        factors: 多步快照, 证据闭环, 赔偿上限, 老客价值
+        category_hint: 水产肉类
+        service_tag_hint: 坏单包退
+        notes: 跑批 fixture 见 pilot/fixtures/ng-20_evidence_arc_partial.fixture.json
+
       - case_id: NG-10_channel_threshold_edge
         status: new
         leaf: 老客通道门槛边缘 + 弱证据协商
@@ -148,6 +158,16 @@ axes:
         category_hint: 大家电
         service_tag_hint: 送货入户并安装
         service_constraints: 送货入户并安装
+
+      - case_id: MF-20_evidence_arc_remedy
+        status: existing
+        path: eval/content/scenarios/pilot/merchant_fault/MF-20_evidence_arc_remedy.md
+        leaf: 多步快照·商责善后与退货流程
+        target_ability: 证据齐后主动善后并推进退货验收，不因缺箱停在选择方案
+        factors: 多步快照, 商责明确, 退货流程, 老客价值
+        category_hint: 大家电
+        service_tag_hint: 送货入户并安装
+        notes: 跑批 fixture 见 pilot/fixtures/mf-20_evidence_arc_remedy.fixture.json
 
   - id: malicious
     label: 恶意抗辩

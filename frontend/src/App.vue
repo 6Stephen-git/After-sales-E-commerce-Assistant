@@ -72,6 +72,12 @@ function handle_menu_select(path) {
 .app-main {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
   background: #f5f7fa;
+}
+
+.app-main :deep(> *) {
+  height: 100%;
+  min-height: 0;
 }
 </style>

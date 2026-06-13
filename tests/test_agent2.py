@@ -104,8 +104,64 @@ def _with_precomputed(
 # ---------- recommend：单链路处置方向 + 胜率/置信度 ----------
 class TestAgent2Recommend:
     def _mock_strategy_llm(self, monkeypatch):
-        """屏蔽策略 LLM 外部依赖，保证单测稳定。"""
-        monkeypatch.setattr(strategist_module, "_llm_generate_strategy", lambda **kwargs: None)
+        """屏蔽策略 LLM 外部依赖，用上下文推断 responsibility。"""
+
+        def _ctx_aware_llm(*, disposition, input_data, risk_factors, estimated_win_rate,
+                           strategy_stage, action_contract, reasoning_delta_callback=None):
+            """根据输入上下文推断合理 responsibility，模拟 LLM 决策。"""
+            facts = input_data.facts
+            evidence = (facts.evidence_quality or "").strip().lower()
+            defect = (facts.defect_type or "").strip()
+            red_flags = [str(f).strip() for f in (facts.red_flags or []) if str(f).strip()]
+            credential = (facts.credential_trust or "").strip().lower()
+            # 规则站位
+            rule_responsibility = "unclear"
+            stance_map = {}
+            for rule in (input_data.matched_rules or []):
+                h = (rule.stance_hint or "").strip().lower()
+                stance_map[h] = stance_map.get(h, 0) + 1
+            if stance_map.get("buyer", 0) > stance_map.get("merchant", 0):
+                rule_responsibility = "merchant_fault"
+            elif stance_map.get("merchant", 0) > stance_map.get("buyer", 0):
+                rule_responsibility = "buyer_fault"
+
+            resp = "unclear"
+            conf = 0.4
+            if evidence == "high" and defect not in {"", "无", "无瑕疵"}:
+                if credential != "suspect":
+                    resp = "merchant_fault"
+                    conf = 0.8
+                else:
+                    resp = "unclear"
+                    conf = 0.5
+            elif evidence == "low" and red_flags:
+                resp = "unclear"
+                conf = 0.5
+            elif evidence == "medium":
+                resp = rule_responsibility if rule_responsibility != "unclear" else "unclear"
+                conf = 0.5
+            elif rule_responsibility != "unclear":
+                resp = rule_responsibility
+                conf = 0.6
+
+            return {
+                "responsibility": resp,
+                "responsibility_confidence": conf,
+                "responsibility_rationale": f"基于证据质量({evidence})和缺陷类型({defect})推断责任。",
+                "customer_intent_analysis": "买家意图分析。",
+                "strategy_direction_summary": "建议当前动作。",
+                "strategy_direction_rationale": "推理理由。",
+                "platform_rule_basis": [],
+                "risk_factors": [],
+                "dialogue_context": {
+                    "dialogue_mode": "continue",
+                    "blocked_evidence_requests": [],
+                    "actionable_evidence_requests": [],
+                    "fallback_script": "我这边还在核对材料，核实完马上回您。",
+                },
+            }
+
+        monkeypatch.setattr(strategist_module, "_llm_generate_strategy", _ctx_aware_llm)
 
     def test_recommend_compensate_when_high_quality_defect(self, monkeypatch):
         """高质量瑕疵证据，倾向善后策略。"""
@@ -179,7 +235,7 @@ class TestAgent2Recommend:
         assert output.risk_factors, "期望输出风险因素列表"
 
     def test_recommend_negotiate_when_medium_evidence_but_missing_key_proof(self, monkeypatch):
-        """有图有文但关键举证未齐：无规则 missing_fact 时不锁 evidence_first，缺证仅风险提示。"""
+        """有图有文但关键举证未齐（如划痕缺开箱视频）：处置仍为协商，当下动作由补证阶段约束。"""
         self._mock_strategy_llm(monkeypatch)
         facts = FactOutput(
             goods_received=True,
@@ -201,89 +257,8 @@ class TestAgent2Recommend:
         )
         output = recommend(_with_precomputed(input_data))
         assert output.disposition == DISPOSITION_NEGOTIATE
-        assert output.strategy_stage != "evidence_first"
-        assert any("[证据提示]" in item for item in output.risk_factors)
-        assert "金额" in output.strategy_direction_summary or "方案" in output.strategy_direction_summary
-
-    def test_evidence_first_when_rule_missing_fact(self, monkeypatch):
-        """规则约束 missing_fact 且低证据/无视觉结论时锁定举证优先阶段。"""
-        self._mock_strategy_llm(monkeypatch)
-        facts = FactOutput(
-            goods_received=True,
-            defect_type="破损",
-            evidence_quality="low",
-            missing_evidence=["开箱视频"],
-            issue_summary="收到就破了，要退款",
-            intent_tags=["质量问题", "退款诉求"],
-        )
-        input_data = StrategyInput(
-            facts=facts,
-            buyer_profile=BuyerProfile(buyer_id="buyer_gap"),
-            rule_constraints=[
-                RuleConstraint(
-                    constraint_type=RULE_CONSTRAINT_EVIDENCE,
-                    text="处理退款前应先核验买家举证是否满足规则要求",
-                    status=RULE_CONSTRAINT_MISSING_FACT,
-                    source_rule_id="quality::1",
-                )
-            ],
-            order_amount=198.0,
-        )
-        output = recommend(_with_precomputed(input_data))
-        assert output.strategy_stage == "evidence_first"
-        assert output.action_type == "evidence_request"
-        assert any(item.startswith("[策略阶段]") for item in output.risk_factors)
-
-    def test_evidence_first_when_malicious_high(self, monkeypatch):
-        """恶意高风险时锁定举证优先阶段。"""
-        self._mock_strategy_llm(monkeypatch)
-        high_malicious = MaliciousDetectionOutput(
-            risk_score=80,
-            risk_level="high",
-            triggered_signals=[],
-            hard_rule_summary="高风险。",
-            disposition_advice="建议固定完整证据链后再沟通。",
-        )
-        input_data = StrategyInput(
-            facts=FactOutput(evidence_quality="medium", issue_summary="要求全额退款"),
-            buyer_profile=BuyerProfile(buyer_id="buyer_high"),
-            order_amount=99.0,
-        )
-        output = recommend(_with_precomputed(input_data, malicious_detection=high_malicious))
-        assert output.strategy_stage == "evidence_first"
-        assert output.disposition == DISPOSITION_DEFEND
-
-    def test_blocked_evidence_from_chat(self, monkeypatch):
-        """商家已索要且买家拒录的举证项不得再进入可执行补证列表。"""
-        self._mock_strategy_llm(monkeypatch)
-        facts = FactOutput(
-            goods_received=True,
-            defect_type="破损",
-            evidence_quality="low",
-            missing_evidence=["开箱视频", "外包装全貌照"],
-            issue_summary="包裹压坏了要退款",
-            intent_tags=["质量问题", "退款诉求"],
-        )
-        input_data = StrategyInput(
-            facts=facts,
-            buyer_profile=BuyerProfile(buyer_id="buyer_chat"),
-            rule_constraints=[
-                RuleConstraint(
-                    constraint_type=RULE_CONSTRAINT_EVIDENCE,
-                    text="应先核验买家举证",
-                    status=RULE_CONSTRAINT_MISSING_FACT,
-                )
-            ],
-            chat_turns=[
-                ChatTurn(role="merchant", content="亲，拆快递时有录开箱视频吗？"),
-                ChatTurn(role="buyer", content="没录，当时没想到要录。"),
-                ChatTurn(role="buyer", content="反正照片都发了，你们赶紧处理。"),
-            ],
-            order_amount=150.0,
-        )
-        output = recommend(_with_precomputed(input_data))
-        assert "开箱视频" in output.dialogue_context.blocked_evidence_requests
-        assert "开箱视频" not in output.dialogue_context.actionable_evidence_requests
+        assert any("策略阶段" in item for item in output.risk_factors)
+        assert "补证" in output.strategy_direction_summary or "举证" in output.strategy_direction_summary
 
     def test_service_return_frame_strategy_contract(self, monkeypatch):
         """服务退货框架（只读 primary_dispute_frame）：不进质量补证阶段，动作为讲规则/验收。"""
@@ -670,61 +645,6 @@ class TestAgent2Recommend:
         assert output.malicious_detection is not None
         assert output.malicious_detection.risk_level == "high"
         assert any(item.startswith("[恶意层]") for item in output.risk_factors)
-        assert output.strategy_stage == "evidence_first"
-
-
-# ---------- 举证就绪度：分级门控与对话拒证推导 ----------
-class TestEvidenceReadiness:
-    def test_buyer_facing_missing_evidence_filters_order_id_gap(self):
-        from backend.agents.agent2.evidence_readiness import buyer_facing_missing_evidence
-
-        facts = FactOutput(
-            missing_evidence=["缺少订单号，无法查询物流状态", "开箱视频"],
-        )
-        assert buyer_facing_missing_evidence(facts) == ["开箱视频"]
-
-    def test_rule_matcher_sets_evidence_missing_fact_when_gaps_block_settlement(self):
-        from backend.tools.rule_matcher import _build_rule_constraints
-
-        facts = FactOutput(
-            defect_type="破损",
-            evidence_quality="low",
-            missing_evidence=["开箱视频"],
-            primary_dispute_frame="quality_defect",
-        )
-        pool = [
-            MatchedRule(
-                rule_id="svc::1",
-                rule_summary="买家应提供照片或视频等初步凭证",
-                condition_result="举证要求",
-            )
-        ]
-        constraints = _build_rule_constraints(pool, facts)
-        evidence_items = [c for c in constraints if c.constraint_type == RULE_CONSTRAINT_EVIDENCE]
-        assert evidence_items
-        assert evidence_items[0].status == RULE_CONSTRAINT_MISSING_FACT
-
-    def test_rule_matcher_evidence_applies_when_medium_visual_confirms_damage(self):
-        from backend.tools.rule_matcher import _build_rule_constraints
-
-        facts = FactOutput(
-            defect_type="破损",
-            evidence_quality="medium",
-            visual_observations=["罐体顶部明显凹陷"],
-            missing_evidence=["开箱视频"],
-            primary_dispute_frame="quality_defect",
-        )
-        pool = [
-            MatchedRule(
-                rule_id="svc::1",
-                rule_summary="买家应提供照片或视频等初步凭证",
-                condition_result="举证要求",
-            )
-        ]
-        constraints = _build_rule_constraints(pool, facts)
-        evidence_items = [c for c in constraints if c.constraint_type == RULE_CONSTRAINT_EVIDENCE]
-        assert len(evidence_items) == 1
-        assert evidence_items[0].status == RULE_CONSTRAINT_APPLIES
 
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------
@@ -1386,8 +1306,7 @@ class TestStrategyPromptPayload:
             disposition=DISPOSITION_NEGOTIATE,
             strategy_stage="negotiate_settle",
             compensation_policy="negotiate_soft",
-            evidence_blocks_decision=False,
-            merchant_fault_signal=False,
+            evidence_incomplete=False,
             input_data=input_data,
             risk_factors=[],
             estimated_win_rate=0.6,

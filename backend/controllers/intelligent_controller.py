@@ -35,6 +35,8 @@ def run_with_events(
     max_compensation: float = 0.0,
     chat_history: list[dict[str, Any]] | None = None,
     round_count: int = 0,
+    image_urls: list[str] | None = None,
+    dismiss_round_handoff: bool = False,
 ) -> AgentReply:
     """
     运行智能模式单轮对话并返回 AgentReply。
@@ -64,16 +66,20 @@ def run_with_events(
     """
     if not isinstance(dispute_id, str) or not dispute_id.strip():
         raise ValueError("dispute_id 不能为空")
-    if not isinstance(buyer_message, str) or not buyer_message.strip():
-        raise ValueError("buyer_message 不能为空")
+    normalized_message = str(buyer_message or "").strip()
+    normalized_images = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+    if not normalized_message and normalized_images:
+        normalized_message = "[图片]"
+    if not normalized_message and not normalized_images:
+        raise ValueError("buyer_message 与 image_urls 不能同时为空")
 
     normalized_dispute_id = dispute_id.strip()
-    normalized_message = buyer_message.strip()
     logger.info(
-        "%s 开始处理 dispute_id=%s buyer_msg=%s",
+        "%s 开始处理 dispute_id=%s buyer_msg=%s images=%s",
         LOG_PREFIX,
         normalized_dispute_id,
         normalized_message[:60],
+        len(normalized_images),
     )
 
     # 转换chat_history为ChatTurn列表
@@ -103,6 +109,8 @@ def run_with_events(
         max_compensation=max_compensation,
         chat_history=turns if turns else None,
         round_count=round_count,
+        image_urls=normalized_images or None,
+        dismiss_round_handoff=dismiss_round_handoff,
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 

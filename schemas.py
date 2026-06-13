@@ -103,6 +103,18 @@ VALID_COMPENSATION_POLICIES = [
     COMPENSATION_POLICY_EXPLICIT_AMOUNT,
 ]
 
+# 责任归属枚举
+RESPONSIBILITY_MERCHANT = "merchant_fault"
+RESPONSIBILITY_BUYER = "buyer_fault"
+RESPONSIBILITY_UNCLEAR = "unclear"
+RESPONSIBILITY_MIXED = "mixed"
+VALID_RESPONSIBILITIES = [
+    RESPONSIBILITY_MERCHANT,
+    RESPONSIBILITY_BUYER,
+    RESPONSIBILITY_UNCLEAR,
+    RESPONSIBILITY_MIXED,
+]
+
 
 # ============================================================
 # 二、共享数据结构
@@ -233,7 +245,15 @@ class FactOutput(BaseModel):
         default=DISPUTE_FRAME_UNKNOWN,
         description="主争议框架：seven_day_return/quality_defect/description_mismatch/logistics/unknown",
     )
-    evidence_quality: str = Field(default=EVIDENCE_MEDIUM, description="证据质量：high/medium/low")
+    evidence_quality: str = Field(default=EVIDENCE_MEDIUM, description="证据覆盖度：high/medium/low。文本+图+物流三类材料有几类，不直接代表可决策程度")
+    decision_readiness: str = Field(
+        default=EVIDENCE_LOW,
+        description="可决策度：high/medium/low。综合视觉结论、举证可信度、缺证、缺陷严重度，判断事实是否足以支撑终局决策（退款/补偿/拒赔）",
+    )
+    decision_readiness_note: Optional[str] = Field(
+        default=None,
+        description="可决策度判定理由，一句自然语言",
+    )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="事实提取置信度")
     uncertainty_note: Optional[str] = Field(default=None, description="当某些事实无法确定时，用自然语言说明原因")
     rule_match_plan: RuleMatchPlan = Field(default_factory=RuleMatchPlan, description="规则匹配导航计划")
@@ -427,6 +447,18 @@ class MaliciousDetectionOutput(BaseModel):
 class StrategyOutput(BaseModel):
     """Agent 2 输出：策略建议"""
     disposition: str = Field(..., description=f"处置方向：{'/'.join(VALID_DISPOSITIONS)}")
+    responsibility: str = Field(
+        default=RESPONSIBILITY_UNCLEAR,
+        description=f"责任归属判定：{'/'.join(VALID_RESPONSIBILITIES)}。由策略 LLM 综合规则、证据、画像、恶意信号等维度判定",
+    )
+    responsibility_confidence: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="责任判定置信度",
+    )
+    responsibility_rationale: str = Field(
+        default="",
+        description="责任判定理由，面向商家可读（2～3句）",
+    )
     estimated_win_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="抗辩胜率（仅抗辩方向返回）")
     policy_ref: Optional[str] = Field(default=None, description="引用的平台规则条款")
     customer_intent_analysis: str = Field(
@@ -504,12 +536,6 @@ class ScriptOutput(BaseModel):
 # 六、Agent 4 — 情绪监控员
 # ============================================================
 
-class EmotionInput(BaseModel):
-    """Agent 4 输入"""
-    text: str = Field(..., description="待分析的文本（商家输入或买家消息）")
-    context: dict = Field(default_factory=dict, description="纠纷上下文快照")
-
-
 class EmotionOutput(BaseModel):
     alert_triggered: bool = Field(default=False, description="是否触发预警")
     alert_message: str = Field(default="", description="预警提示文本")
@@ -577,18 +603,6 @@ VALID_INTEL_PHASES = [
     INTEL_PHASE_HANDOFF,
 ]
 
-# 责任归属枚举
-RESPONSIBILITY_MERCHANT = "merchant_fault"
-RESPONSIBILITY_BUYER = "buyer_fault"
-RESPONSIBILITY_UNCLEAR = "unclear"
-RESPONSIBILITY_MIXED = "mixed"
-VALID_RESPONSIBILITIES = [
-    RESPONSIBILITY_MERCHANT,
-    RESPONSIBILITY_BUYER,
-    RESPONSIBILITY_UNCLEAR,
-    RESPONSIBILITY_MIXED,
-]
-
 # 买家类型枚举
 BUYER_TYPE_HIGH_VALUE_OLD = "high_value_old"
 BUYER_TYPE_NORMAL = "normal"
@@ -636,11 +650,12 @@ class KeyDecision(BaseModel):
     reason: str = Field(default="", description="决策原因")
 
 
-class ToolCallLog(BaseModel):
-    """工具调用日志"""
+class ToolFinding(BaseModel):
+    """工具结构化结论 — 跨轮注入 LLM 上下文，供策略分析使用"""
     tool: str = Field(..., description="工具名称")
     turn: int = Field(..., description="发生在第几轮")
-    result_summary: str = Field(default="", description="结果摘要")
+    summary: str = Field(..., description="面向 LLM 的自然语言结论摘要")
+    facts: dict[str, Any] = Field(default_factory=dict, description="结构化事实键值")
 
 
 class IntelligentState(BaseModel):
@@ -648,7 +663,7 @@ class IntelligentState(BaseModel):
     智能模式案件状态 — 独立于对话历史，仅在案件发生实质性变化时更新。
 
     存储：Redis，按 dispute_id 为 key，TTL 24h。
-    更新方式：LLM 通过 update_state 工具调用。
+    更新方式：LLM 通过 update_state 工具调用；工具结论通过 record_tool_finding 自动追加。
     """
     dispute_id: str = Field(..., description="纠纷编号")
     phase: str = Field(
@@ -675,7 +690,7 @@ class IntelligentState(BaseModel):
     )
     risk_signals: List[str] = Field(default_factory=list, description="风险信号列表")
     key_decisions: List[KeyDecision] = Field(default_factory=list, description="关键决策历史")
-    tool_calls_log: List[ToolCallLog] = Field(default_factory=list, description="工具调用日志")
+    tool_findings: List[ToolFinding] = Field(default_factory=list, description="工具结构化结论（跨轮记忆）")
     last_update_reason: str = Field(default="", description="最近一次更新原因")
     updated_at: Optional[str] = Field(default=None, description="最近更新时间（ISO 8601）")
 
@@ -734,7 +749,8 @@ class AgentReply(BaseModel):
         default_factory=lambda: IntelligentState(dispute_id=""),
         description="最新状态（无论是否更新）",
     )
-    handoff: bool = Field(default=False, description="是否触发转人工")
-    handoff_reason: str = Field(default="", description="转人工原因（如触发）")
-    handoff_summary: str = Field(default="", description="交接摘要（如触发转人工）")
+    handoff: bool = Field(default=False, description="是否强制转人工")
+    handoff_reason: str = Field(default="", description="转人工原因（强制或建议）")
+    handoff_summary: str = Field(default="", description="交接摘要（强制转人工时）")
+    handoff_suggested: bool = Field(default=False, description="是否建议转人工（用户可选择继续）")
     tools_called: List[str] = Field(default_factory=list, description="本轮调用的工具列表")

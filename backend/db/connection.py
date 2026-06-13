@@ -10,7 +10,7 @@ import logging
 import os
 from urllib.parse import quote_plus
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -88,6 +88,40 @@ def get_db_session() -> Session:
         session.close()
 
 
+# ---------- 增量补丁：create_all 不会为已有表补列 ----------
+def _apply_schema_patches(engine: Engine) -> None:
+    """
+    对已有表补齐 ORM 新增列，避免模型与库表漂移导致查询 500。
+
+    参数:
+        engine: 已初始化的 SQLAlchemy Engine。
+    """
+    inspector = inspect(engine)
+    if "merchant_config" not in inspector.get_table_names():
+        return
+
+    column_names = {col["name"] for col in inspector.get_columns("merchant_config")}
+    if "max_compensation" in column_names:
+        return
+
+    dialect = engine.dialect.name
+    logger.info("%s 检测到 merchant_config 缺少 max_compensation，开始补列", DB_LOG_PREFIX)
+    if dialect == "mysql":
+        ddl = (
+            "ALTER TABLE merchant_config ADD COLUMN max_compensation FLOAT NOT NULL DEFAULT 0 "
+            "COMMENT '智能模式个性化赔偿上限（元），0 表示不限制'"
+        )
+    elif dialect == "sqlite":
+        ddl = "ALTER TABLE merchant_config ADD COLUMN max_compensation FLOAT NOT NULL DEFAULT 0"
+    else:
+        logger.warning("%s 未识别的数据库方言 %s，跳过 max_compensation 补列", DB_LOG_PREFIX, dialect)
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+    logger.info("%s merchant_config.max_compensation 补列完成", DB_LOG_PREFIX)
+
+
 # ---------- 元数据建表：应用启动时按模型创建缺失表 ----------
 def init_db() -> None:
     """
@@ -97,7 +131,9 @@ def init_db() -> None:
     try:
         from backend.db.models import Base
 
-        Base.metadata.create_all(bind=get_engine())
+        engine = get_engine()
+        Base.metadata.create_all(bind=engine)
+        _apply_schema_patches(engine)
         logger.info("%s 数据库建表完成", DB_LOG_PREFIX)
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 数据库建表失败：%s", DB_LOG_PREFIX, exc)

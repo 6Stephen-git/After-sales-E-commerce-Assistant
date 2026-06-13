@@ -111,14 +111,18 @@
         </el-timeline>
       </el-card>
 
-      <!-- 工具调用记录 -->
-      <el-card v-if="state.tool_calls_log && state.tool_calls_log.length > 0" class="state-card">
+      <!-- 工具事实（跨轮记忆） -->
+      <el-card v-if="state.tool_findings && state.tool_findings.length > 0" class="state-card">
         <template #header>
-          <span>工具调用记录</span>
+          <span>工具事实</span>
         </template>
-        <div v-for="log in state.tool_calls_log" :key="log.tool + log.turn" class="tool-log-item">
-          <el-tag size="small" type="info">{{ log.tool }}</el-tag>
-          <span class="tool-log-summary">{{ log.result_summary || '完成' }}</span>
+        <div
+          v-for="(item, idx) in state.tool_findings"
+          :key="item.tool + item.turn + idx"
+          class="tool-log-item"
+        >
+          <el-tag size="small" type="info">第{{ item.turn }}轮 · {{ item.tool }}</el-tag>
+          <span class="tool-log-summary">{{ item.summary || '完成' }}</span>
         </div>
       </el-card>
     </template>

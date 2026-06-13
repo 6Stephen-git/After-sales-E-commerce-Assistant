@@ -7,17 +7,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
 
 from schemas import (
     ChatTurn,
-    EvidenceSummary,
     IntelligentContext,
     IntelligentState,
-    KeyDecision,
-    ToolCallLog,
 )
 
 LOG_PREFIX = "[IntelligentContext]"

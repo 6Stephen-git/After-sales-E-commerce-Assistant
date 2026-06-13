@@ -141,6 +141,26 @@ export async function fetchIntelligentStatus(dispute_id) {
   }
 }
 
+// ---------- 智能模式：读取测试模拟配置 ----------
+export async function fetchIntelligentSimulation() {
+  try {
+    const response = await httpClient.get('/intelligent/simulation')
+    return response.data
+  } catch (error) {
+    throw new Error(`读取模拟配置失败：${error.message}`)
+  }
+}
+
+// ---------- 智能模式：保存测试模拟配置 ----------
+export async function saveIntelligentSimulation(payload) {
+  try {
+    const response = await httpClient.put('/intelligent/simulation', payload)
+    return response.data
+  } catch (error) {
+    throw new Error(`保存模拟配置失败：${error.message}`)
+  }
+}
+
 // ---------- 配置查询：获取默认商家模式和自动化阈值 ----------
 export async function fetchMerchantConfig() {
   try {

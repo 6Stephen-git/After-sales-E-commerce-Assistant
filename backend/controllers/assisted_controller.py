@@ -139,14 +139,18 @@ def _log_quality_baseline(normalized_dispute_id: str, report: AnalysisReport) ->
     mal_level = report.strategy.malicious_detection.risk_level if report.strategy.malicious_detection else "N/A"
     mal_score = report.strategy.malicious_detection.risk_score if report.strategy.malicious_detection else "N/A"
     logger.info(
-        "%s 质量基线：%s disposition=%s win_rate=%s confidence=%.3f evidence=%s risk_count=%s "
+        "%s 质量基线：%s disposition=%s responsibility=%s(%.2f) win_rate=%s confidence=%.3f "
+        "evidence=%s readiness=%s risk_count=%s "
         "cv_channel=%s cv_lt=%s cv_order=%s mal_level=%s mal_score=%s",
         ASSISTED_LOG_PREFIX,
         normalized_dispute_id,
         report.strategy.disposition,
+        report.strategy.responsibility,
+        report.strategy.responsibility_confidence,
         win_rate_text,
         report.strategy.confidence,
         report.facts.evidence_quality,
+        report.facts.decision_readiness,
         len(report.strategy.risk_factors),
         cv_channel,
         cv_lt_score,
@@ -176,15 +180,23 @@ def _emit_final_report(
         cache_hit,
     )
     _log_quality_baseline(normalized_dispute_id, report)
+    
+    # 添加新字段到事件负载
+    event_payload = {
+        "dispute_id": normalized_dispute_id,
+        "elapsed_ms": total_elapsed,
+        "report": report.model_dump(),
+        "cache_hit": cache_hit,
+        # 新增：透传关键新字段
+        "responsibility": report.strategy.responsibility,
+        "responsibility_confidence": report.strategy.responsibility_confidence,
+        "decision_readiness": report.facts.decision_readiness,
+    }
+    
     _emit_event(
         emit_event,
         "final_report",
-        {
-            "dispute_id": normalized_dispute_id,
-            "elapsed_ms": total_elapsed,
-            "report": report.model_dump(),
-            "cache_hit": cache_hit,
-        },
+        event_payload,
     )
     _emit_event(
         emit_event,
@@ -331,6 +343,9 @@ def run_with_events(
                 "dispute_id": normalized_dispute_id,
                 "partial_report": {"facts": facts.model_dump()},
                 "cache_hit": facts_from_cache is not None,
+                # 新增：透传可决策度
+                "decision_readiness": facts.decision_readiness,
+                "decision_readiness_note": facts.decision_readiness_note,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -471,6 +486,9 @@ def run_with_events(
                 "elapsed_ms": agent2_elapsed,
                 "dispute_id": normalized_dispute_id,
                 "partial_report": {"strategy": strategy_output.model_dump()},
+                # 新增：透传责任归属
+                "responsibility": strategy_output.responsibility,
+                "responsibility_confidence": strategy_output.responsibility_confidence,
             },
         )
     except Exception as exc:  # noqa: BLE001

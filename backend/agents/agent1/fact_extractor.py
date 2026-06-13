@@ -252,6 +252,83 @@ def _derive_evidence_quality(has_text: bool, has_images: bool, has_logistics: bo
     return EVIDENCE_HIGH
 
 
+def _derive_decision_readiness(
+    *,
+    evidence_quality: str,
+    credential_trust: str,
+    missing_evidence: list[str],
+    visual_observations: list[str],
+    red_flags: list[str],
+    defect_type: str | None,
+    visual_defect_severity: str | None,
+) -> tuple[str, str]:
+    """
+    综合判断事实是否足以支撑终局决策（退款/补偿/拒赔）。
+
+    与 evidence_quality（覆盖度）的区别：
+    - evidence_quality 只看「文本+图+物流」三类材料有没有
+    - decision_readiness 还看图是否可信、视觉结论是否可用、缺陷严重度是否明确
+
+    参数:
+        evidence_quality: 材料覆盖度档位。
+        credential_trust: 举证图片可信度。
+        missing_evidence: 缺失的证据项列表。
+        visual_observations: 视觉观察结论列表。
+        red_flags: 疑点列表。
+        defect_type: 瑕疵类型。
+        visual_defect_severity: 视觉缺陷严重度。
+
+    返回:
+        (readiness_level, note) 元组。
+    """
+    if evidence_quality == EVIDENCE_LOW:
+        return EVIDENCE_LOW, "材料覆盖不足，关键信息缺失"
+
+    score = 0
+    reasons: list[str] = []
+
+    if visual_observations:
+        score += 1
+    else:
+        reasons.append("无可用视觉结论")
+
+    if credential_trust == CREDENTIAL_TRUST_TRUSTED:
+        score += 1
+    elif credential_trust == CREDENTIAL_TRUST_SUSPECT:
+        score -= 1
+        reasons.append("举证图可信度存疑")
+
+    if not missing_evidence:
+        score += 1
+    elif len(missing_evidence) >= 2:
+        score -= 1
+        reasons.append(f"缺{len(missing_evidence)}项关键证据")
+
+    if len(red_flags) >= 2:
+        score -= 1
+        reasons.append(f"有{len(red_flags)}个疑点待核实")
+
+    normalized_defect = str(defect_type or "").strip()
+    has_real_defect = normalized_defect and normalized_defect not in {"无", "暂无", "无瑕疵", "无质量问题", "无明显瑕疵", "没有瑕疵"}
+    if has_real_defect:
+        if visual_defect_severity in {"moderate", "severe"}:
+            score += 1
+        elif visual_defect_severity is None:
+            reasons.append("有瑕疵主张但无视觉严重度判定")
+
+    if score >= 2:
+        level = EVIDENCE_HIGH
+        note = "；".join(reasons) if reasons else "证据链基本完整，可支撑决策"
+    elif score >= 0:
+        level = EVIDENCE_MEDIUM
+        note = "；".join(reasons) if reasons else "部分维度待补充"
+    else:
+        level = EVIDENCE_LOW
+        note = "；".join(reasons) if reasons else "关键证据不足"
+
+    return level, note
+
+
 def _derive_confidence(evidence_quality: str, llm_confidence: float, red_flag_count: int) -> float:
     """
     融合档位与 LLM 置信度得到最终置信度。
@@ -425,9 +502,8 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     red_flags: list[str] = []
     uncertainty_reasons: list[str] = []
 
-    operational_gaps: list[str] = []
     if not order_id:
-        operational_gaps.append("缺少订单号，无法查询物流状态")
+        missing_evidence.append("缺少订单号，无法查询物流状态")
     if not image_urls:
         missing_evidence.append("缺少举证图片")
     if not text_context:
@@ -595,6 +671,17 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         red_flag_count=len(red_flags),
     )
 
+    # 可决策度：综合覆盖度、视觉结论、举证可信度、缺证、缺陷严重度
+    decision_readiness, decision_readiness_note = _derive_decision_readiness(
+        evidence_quality=evidence_quality,
+        credential_trust=credential_trust,
+        missing_evidence=missing_evidence,
+        visual_observations=visual_observations,
+        red_flags=red_flags,
+        defect_type=defect_type,
+        visual_defect_severity=visual_defect_severity,
+    )
+
     uncertain_fields = []
     for field_name, value in {
         "goods_received": goods_received,
@@ -631,9 +718,6 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         logger.warning("%s rule_match_plan 无 target_doc_ids，规则匹配将跳过", LOG_PREFIX)
 
     attributes = _merge_rule_context_attributes(attributes, materials)
-    if operational_gaps:
-        attributes = dict(attributes or {})
-        attributes["operational_gaps"] = list(dict.fromkeys(operational_gaps))
     primary_dispute_frame = resolve_primary_dispute_frame(
         materials=materials,
         intent_tags=intent_tags,
@@ -663,6 +747,8 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         credential_trust_note=credential_trust_note,
         primary_dispute_frame=primary_dispute_frame,
         evidence_quality=evidence_quality,
+        decision_readiness=decision_readiness,
+        decision_readiness_note=decision_readiness_note,
         confidence=confidence,
         uncertainty_note=uncertainty_note,
         rule_match_plan=rule_match_plan,

@@ -7,7 +7,7 @@
 约束：
 - 不修改辅助模式任何代码
 - 工具调用通过 xxx_simple 轻量入口
-- 状态更新通过 update_state 工具
+- 状态更新：LLM 通过 update_state；工具结论仅经 record_tool_finding 写入 Redis 并跨轮注入 prompt
 """
 
 from __future__ import annotations
@@ -32,16 +32,26 @@ from backend.tools.agent2_tools import (
 from backend.tools.intelligent_tools import (
     build_handoff_summary,
     check_handoff_threshold,
-    log_tool_call,
+    format_tool_findings_for_prompt,
+    record_tool_finding,
     update_state,
 )
+from backend.tools.platform_api import query_logistics
 from backend.tools.rule_matcher import match_rules_simple
+from backend.tools.simulation_fixture import (
+    apply_simulated_order_context,
+    get_simulated_logistics_text,
+)
 from backend.tools.llm_client import chat_completion_assistant_message
 from schemas import (
+    VALID_CREDENTIAL_TRUST,
     AgentReply,
     ChatTurn,
+    EVIDENCE_LOW,
+    EVIDENCE_MEDIUM,
     EvidenceSummary,
     EvidenceSummaryInput,
+    FactOutput,
     IntelligentContext,
     IntelligentState,
     KeyDecision,
@@ -72,7 +82,7 @@ def _load_system_prompt_template() -> str:
         )
 
 
-def _build_system_prompt(context: IntelligentContext) -> str:
+def _build_system_prompt(context: IntelligentContext, *, pending_attachments_addon: str = "") -> str:
     """
     将 system prompt 模板填充上下文变量。
 
@@ -120,7 +130,99 @@ def _build_system_prompt(context: IntelligentContext) -> str:
     if buyer_text:
         prompt += f"\n买家信息：{buyer_text}\n"
 
+    findings_text = format_tool_findings_for_prompt(state)
+    if findings_text:
+        prompt += f"\n{findings_text}\n"
+    if pending_attachments_addon.strip():
+        prompt += f"\n{pending_attachments_addon.strip()}\n"
+
     return prompt
+
+
+def _format_pending_attachments_addon(image_urls: list[str], buyer_claim: str) -> str:
+    """
+    本轮买家附图索引注入 system，供 LLM 以 image_index 调用 analyze_image_simple。
+
+    禁止在 prompt 中写入 data URL 全文：LLM 会原样回传导致 base64 被截断，百炼报格式非法。
+    """
+    if not image_urls:
+        return ""
+
+    lines = [
+        "---",
+        (
+            f"本轮买家附图共 {len(image_urls)} 张（须先调用 analyze_image_simple 分析后再回复买家；"
+            "参数用 image_index（从 1 起），勿传 image_url）："
+        ),
+        f"- 诉求锚点：{buyer_claim}",
+    ]
+    for idx in range(1, len(image_urls) + 1):
+        lines.append(f"- 附图{idx}")
+    return "\n".join(lines)
+
+
+def _resolve_analyze_image_url(
+    *,
+    pending_image_urls: list[str],
+    arguments: dict[str, Any],
+) -> str:
+    """
+    从本轮 pending 附图或工具参数解析完整 image_url。
+
+    优先 image_index；其次与 pending 精确匹配；单图时回退唯一附图；
+    兼容 LLM 误传被截断的 URL 前缀。
+    """
+    pending = [str(url).strip() for url in pending_image_urls if str(url).strip()]
+    if not pending:
+        return str(arguments.get("image_url") or "").strip()
+
+    raw_index = arguments.get("image_index")
+    if raw_index is not None:
+        try:
+            idx = int(raw_index)
+            if 1 <= idx <= len(pending):
+                return pending[idx - 1]
+        except (TypeError, ValueError):
+            pass
+
+    image_url = str(arguments.get("image_url") or "").strip()
+    if image_url in pending:
+        return image_url
+
+    if image_url.endswith("..."):
+        prefix = image_url[:-3]
+        for candidate in pending:
+            if candidate.startswith(prefix):
+                return candidate
+
+    if len(pending) == 1:
+        return pending[0]
+
+    if image_url:
+        for candidate in pending:
+            if candidate.startswith(image_url):
+                return candidate
+
+    return image_url
+
+
+def _build_buyer_claim_from_context(context: IntelligentContext) -> str:
+    """
+    从对话历史合成视觉分析锚点文本（buyer_claim）。
+
+    取最近若干轮买家文字，跳过纯 [图片] 占位；无有效文字时用通用说明。
+    """
+    buyer_parts: list[str] = []
+    for turn in context.chat_history:
+        if turn.role != "buyer":
+            continue
+        text = str(turn.content or "").strip()
+        if not text or text == "[图片]":
+            continue
+        buyer_parts.append(text)
+    if buyer_parts:
+        return "；".join(buyer_parts[-4:])
+    return "买家附图举证，请结合对话上下文判断诉求焦点与应关注的可见瑕疵。"
 
 
 def _build_chat_messages(system_prompt: str, context: IntelligentContext) -> list[dict[str, Any]]:
@@ -170,10 +272,16 @@ _TOOLS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_url": {"type": "string", "description": "图片URL"},
+                    "image_index": {
+                        "type": "integer",
+                        "description": "附图序号，从 1 开始，对应 system 提示中的附图列表",
+                    },
+                    "image_url": {
+                        "type": "string",
+                        "description": "公网可访问图片 URL（可选；本地/base64 附图必须用 image_index）",
+                    },
                     "buyer_claim": {"type": "string", "description": "买家的文字诉求描述，用于锚定分析焦点"},
                 },
-                "required": ["image_url"],
             },
         },
     },
@@ -303,6 +411,27 @@ _TOOLS: list[dict[str, Any]] = [
                         "items": {"type": "string"},
                         "description": "风险信号列表",
                     },
+                    "evidence_summary": {
+                        "type": "object",
+                        "description": "证据摘要更新",
+                        "properties": {
+                            "collected": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "已收集证据（与已有项合并）",
+                            },
+                            "missing": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "仍缺失的证据（覆盖写入）",
+                            },
+                            "quality": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                                "description": "证据质量",
+                            },
+                        },
+                    },
                     "update_reason": {"type": "string", "description": "本次更新原因（必填）"},
                 },
                 "required": ["update_reason"],
@@ -312,23 +441,119 @@ _TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _build_facts_from_context(context: IntelligentContext) -> FactOutput:
+    """
+    从上下文构建最小 FactOutput，供轻量工具入口补充事实字段。
+
+    missing_evidence 优先沿用 Redis 中 evidence_summary.missing；
+    仅在全新案件且无已收集项时使用默认缺证占位。
+    """
+    desc_parts: list[str] = []
+    for turn in context.chat_history:
+        if turn.content.strip() and turn.content.strip() != "[图片]":
+            desc_parts.append(turn.content.strip())
+    description = " ".join(desc_parts[-3:]) if desc_parts else "买家诉求待补充"
+
+    state = context.current_state
+    if state.evidence_summary.collected or state.evidence_summary.missing:
+        missing = list(state.evidence_summary.missing)
+    else:
+        missing = ["买家举证图片", "商品实物照片"]
+
+    quality = state.evidence_summary.quality or EVIDENCE_LOW
+    confidence = 0.5 if state.evidence_summary.collected else 0.3
+    return FactOutput(
+        issue_summary=description,
+        intent_tags=[],
+        evidence_quality=quality,
+        confidence=confidence,
+        missing_evidence=missing,
+    )
+
+
+def _merge_vision_into_facts(facts: FactOutput, vision: dict[str, Any]) -> None:
+    """
+    将视觉分析结果合并到已有的 FactOutput（原地修改）。
+
+    只写入视觉模块产出的字段，不覆盖 facts 中已有的非空值。
+    """
+    if not isinstance(vision, dict) or vision.get("error"):
+        return
+
+    # 视觉观察结论
+    visual_desc = vision.get("visual_description")
+    if isinstance(visual_desc, str) and visual_desc.strip() and visual_desc not in facts.visual_observations:
+        facts.visual_observations.append(visual_desc.strip())
+
+    for key in ("findings", "visual_red_flags"):
+        for item in vision.get(key) or []:
+            text = str(item or "").strip()
+            if text and text not in facts.visual_observations:
+                facts.visual_observations.append(text)
+
+    # 举证可信度
+    trust = str(vision.get("credential_trust", "") or "").strip().lower()
+    if trust in VALID_CREDENTIAL_TRUST and trust != "unknown":
+        facts.credential_trust = trust
+    trust_note = vision.get("credential_trust_note")
+    if isinstance(trust_note, str) and trust_note.strip() and not facts.credential_trust_note:
+        facts.credential_trust_note = trust_note.strip()
+
+    # 缺陷信息
+    defect_type = vision.get("defect_type")
+    if isinstance(defect_type, str) and defect_type.strip() and not facts.defect_type:
+        facts.defect_type = defect_type.strip()
+
+    defect_location = vision.get("defect_location")
+    if isinstance(defect_location, str) and defect_location.strip() and not facts.defect_location:
+        facts.defect_location = defect_location.strip()
+
+    # 严重度与可挽回性
+    severity = vision.get("visual_defect_severity")
+    if isinstance(severity, str) and severity.strip() and not facts.visual_defect_severity:
+        facts.visual_defect_severity = severity.strip()
+
+    recoverability = vision.get("visual_goods_recoverability")
+    if isinstance(recoverability, str) and recoverability.strip() and not facts.visual_goods_recoverability:
+        facts.visual_goods_recoverability = recoverability.strip()
+
+    # 疑点
+    for flag in vision.get("visual_red_flags") or []:
+        text = str(flag or "").strip()
+        if text and text not in facts.red_flags:
+            facts.red_flags.append(text)
+
+    # 视觉信息到手后，提升证据质量与置信度
+    if facts.visual_observations and facts.evidence_quality == EVIDENCE_LOW:
+        facts.evidence_quality = EVIDENCE_MEDIUM
+    if facts.confidence < 0.5:
+        facts.confidence = 0.5
+
+
 def _execute_tool_call(
     tool_name: str,
     arguments: dict[str, Any],
     context: IntelligentContext,
     round_count: int,
-) -> tuple[str, IntelligentState]:
+    accumulated_facts: FactOutput,
+    pending_image_urls: list[str] | None = None,
+) -> tuple[str, IntelligentState, FactOutput]:
     """
-    执行单个工具调用，返回结果文本和可能更新的状态。
+    执行单个工具调用，返回结果文本、可能更新的状态和累积事实。
+
+    accumulated_facts 在本轮对话的多轮工具调用间共享，使后续工具
+    （如 detect_malicious_simple）能读到前面工具（如 analyze_image_simple）
+    产出的视觉/举证信息，避免信息孤岛。
 
     参数:
         tool_name: 工具名称。
         arguments: 工具参数。
         context: 当前上下文。
         round_count: 当前轮次。
+        accumulated_facts: 跨工具轮次累积的 FactOutput。
 
     返回:
-        (result_text, updated_state)
+        (result_text, updated_state, updated_accumulated_facts)
     """
     state = context.current_state
     result_text = ""
@@ -340,40 +565,65 @@ def _execute_tool_call(
                 merchant_id=arguments.get("merchant_id", context.merchant_id),
             )
             result_text = profile.model_dump_json()
-            state = log_tool_call(state, tool_name, round_count, f"credit_level={profile.credit_level}")
+            state = record_tool_finding(state, tool_name, round_count, profile)
 
         elif tool_name == "analyze_image_simple":
+            claim = str(arguments.get("buyer_claim") or "").strip()
+            if not claim:
+                claim = _build_buyer_claim_from_context(context)
+            image_url = _resolve_analyze_image_url(
+                pending_image_urls=pending_image_urls or [],
+                arguments=arguments,
+            )
             result = analyze_image_simple(
-                image_url=arguments.get("image_url", ""),
-                buyer_claim=arguments.get("buyer_claim", ""),
+                image_url=image_url,
+                buyer_claim=claim,
             )
             result_text = json.dumps(result, ensure_ascii=False)
-            summary = result.get("visual_description", result.get("error", "完成"))
-            state = log_tool_call(state, tool_name, round_count, summary[:80])
+            state = record_tool_finding(
+                state,
+                tool_name,
+                round_count,
+                result,
+                extra_facts={"buyer_claim": claim, "image_url": image_url},
+            )
+            _merge_vision_into_facts(accumulated_facts, result)
 
         elif tool_name == "query_logistics":
-            # query_logistics 暂用简单实现：物流查询功能待接入平台API
             order_id = arguments.get("order_id", context.order_id)
-            result_text = json.dumps(
-                {"order_id": order_id, "status": "暂无物流数据", "note": "物流查询功能待接入平台API"},
-                ensure_ascii=False,
-            )
-            state = log_tool_call(state, tool_name, round_count, f"order_id={order_id}")
+            logistics = query_logistics(order_id)
+            status_text = get_simulated_logistics_text(order_id)
+            payload: dict[str, Any] = {
+                "order_id": order_id,
+                "is_shipped": logistics.is_shipped,
+                "is_signed": logistics.is_signed,
+                "stagnant_days": logistics.stagnant_days,
+                "is_abnormal": logistics.is_abnormal,
+            }
+            if status_text:
+                payload["status_text"] = status_text
+            result_text = json.dumps(payload, ensure_ascii=False)
+            state = record_tool_finding(state, tool_name, round_count, payload)
 
         elif tool_name == "match_rules_simple":
+            # LLM 参数优先；未传时从 context 回填品类/服务标，确保 doc_id 能被解析
+            arg_service_tags = arguments.get("service_tags")
+            arg_category_slug = arguments.get("category_slug", "")
             rule_result = match_rules_simple(
                 description=arguments.get("description", ""),
-                service_tags=arguments.get("service_tags"),
-                category_slug=arguments.get("category_slug", ""),
+                service_tags=arg_service_tags if arg_service_tags else context.platform_service_tags or None,
+                category_slug=arg_category_slug or context.product_category_slug or "",
             )
             # 精简输出：只返回 brief 和 display
             brief_texts = [b.brief for b in rule_result.rule_briefs[:5]]
             display_texts = [r.rule_summary for r in rule_result.display_rules[:3]]
-            result_text = json.dumps(
-                {"briefs": brief_texts, "display_rules": display_texts, "count": len(rule_result.matched_rules)},
-                ensure_ascii=False,
-            )
-            state = log_tool_call(state, tool_name, round_count, f"matched={len(rule_result.matched_rules)}")
+            rule_payload = {
+                "briefs": brief_texts,
+                "display_rules": display_texts,
+                "count": len(rule_result.matched_rules),
+            }
+            result_text = json.dumps(rule_payload, ensure_ascii=False)
+            state = record_tool_finding(state, tool_name, round_count, rule_payload)
 
         elif tool_name == "evaluate_customer_value_simple":
             cv = evaluate_customer_value_simple(
@@ -381,38 +631,39 @@ def _execute_tool_call(
                 merchant_id=arguments.get("merchant_id", context.merchant_id),
                 order_amount=arguments.get("order_amount", context.order_amount),
             )
-            result_text = json.dumps(
-                {
-                    "long_term_score": cv.long_term_score,
-                    "order_score": cv.order_score,
-                    "channel": cv.channel,
-                    "long_term_triggered": cv.long_term_triggered,
-                    "order_triggered": cv.order_triggered,
-                    "compensation_uplift": cv.compensation_uplift,
-                    "tone_suggestion": cv.tone_suggestion,
-                },
-                ensure_ascii=False,
-            )
-            state = log_tool_call(state, tool_name, round_count, f"channel={cv.channel}")
+            cv_payload = {
+                "long_term_score": cv.long_term_score,
+                "order_score": cv.order_score,
+                "channel": cv.channel,
+                "long_term_triggered": cv.long_term_triggered,
+                "order_triggered": cv.order_triggered,
+                "compensation_uplift": cv.compensation_uplift,
+                "tone_suggestion": cv.tone_suggestion,
+            }
+            result_text = json.dumps(cv_payload, ensure_ascii=False)
+            state = record_tool_finding(state, tool_name, round_count, cv_payload)
 
         elif tool_name == "detect_malicious_simple":
+            # LLM 参数优先；聊天历史与 context 合并，避免只用 LLM 传入的空列表
+            arg_chat = arguments.get("chat_history", [])
+            if not arg_chat and context.chat_history:
+                arg_chat = [turn.content for turn in context.chat_history if turn.content]
             mal = detect_malicious_simple(
-                chat_history=arguments.get("chat_history", []),
+                chat_history=arg_chat,
                 buyer_id=arguments.get("buyer_id", context.buyer_id),
                 merchant_id=arguments.get("merchant_id", context.merchant_id),
                 order_amount=arguments.get("order_amount", context.order_amount),
                 description=arguments.get("description", ""),
+                facts=accumulated_facts,
             )
-            result_text = json.dumps(
-                {
-                    "risk_score": mal.risk_score,
-                    "risk_level": mal.risk_level,
-                    "signals": [{"type": s.signal_type, "desc": s.description} for s in mal.triggered_signals[:5]],
-                    "disposition_advice": mal.disposition_advice,
-                },
-                ensure_ascii=False,
-            )
-            state = log_tool_call(state, tool_name, round_count, f"risk={mal.risk_level} score={mal.risk_score}")
+            mal_payload = {
+                "risk_score": mal.risk_score,
+                "risk_level": mal.risk_level,
+                "signals": [{"type": s.signal_type, "desc": s.description} for s in mal.triggered_signals[:5]],
+                "disposition_advice": mal.disposition_advice,
+            }
+            result_text = json.dumps(mal_payload, ensure_ascii=False)
+            state = record_tool_finding(state, tool_name, round_count, mal_payload)
 
         elif tool_name == "search_similar_cases_simple":
             cases = search_similar_cases_simple(
@@ -423,10 +674,19 @@ def _execute_tool_call(
                 {"case_id": c.case_id, "lesson": c.lesson, "outcome": c.outcome}
                 for c in cases
             ]
-            result_text = json.dumps({"cases": cases_data, "count": len(cases)}, ensure_ascii=False)
-            state = log_tool_call(state, tool_name, round_count, f"found={len(cases)}")
+            cases_payload = {"cases": cases_data, "count": len(cases)}
+            result_text = json.dumps(cases_payload, ensure_ascii=False)
+            state = record_tool_finding(state, tool_name, round_count, cases_payload)
 
         elif tool_name == "update_state":
+            evidence_input = None
+            raw_evidence = arguments.get("evidence_summary")
+            if isinstance(raw_evidence, dict):
+                evidence_input = EvidenceSummaryInput(
+                    collected=list(raw_evidence.get("collected") or []),
+                    missing=list(raw_evidence.get("missing") or []),
+                    quality=str(raw_evidence.get("quality") or EVIDENCE_MEDIUM),
+                )
             update_input = UpdateStateInput(
                 dispute_id=context.dispute_id,
                 update_reason=arguments.get("update_reason", ""),
@@ -437,6 +697,7 @@ def _execute_tool_call(
                 buyer_type=arguments.get("buyer_type"),
                 risk_level=arguments.get("risk_level"),
                 risk_signals=arguments.get("risk_signals"),
+                evidence_summary=evidence_input,
             )
             state = update_state(state, update_input)
             result_text = json.dumps({"status": "updated", "phase": state.phase}, ensure_ascii=False)
@@ -448,7 +709,7 @@ def _execute_tool_call(
         logger.error("%s 工具执行失败 tool=%s：%s", LOG_PREFIX, tool_name, exc)
         result_text = json.dumps({"error": f"工具执行失败：{exc}"}, ensure_ascii=False)
 
-    return result_text, state
+    return result_text, state, accumulated_facts
 
 
 def chat(
@@ -464,6 +725,8 @@ def chat(
     max_compensation: float = 0.0,
     chat_history: list[ChatTurn] | None = None,
     round_count: int = 0,
+    image_urls: list[str] | None = None,
+    dismiss_round_handoff: bool = False,
 ) -> AgentReply:
     """
     对话 Agent 主入口：接收买家消息，返回回复。
@@ -500,16 +763,25 @@ def chat(
         buyer_message[:60],
     )
 
-    # 1) 构建上下文
+    # 1) 模拟订单补全上下文
+    resolved_amount, resolved_buyer_id, resolved_category, resolved_tags = apply_simulated_order_context(
+        order_id=order_id,
+        order_amount=order_amount,
+        buyer_id=buyer_id,
+        product_category_slug=product_category_slug,
+        platform_service_tags=platform_service_tags,
+    )
+
+    # 2) 构建上下文
     context = build_initial_context(
         dispute_id=dispute_id,
         buyer_message=buyer_message,
         order_id=order_id,
-        order_amount=order_amount,
-        buyer_id=buyer_id,
+        order_amount=resolved_amount,
+        buyer_id=resolved_buyer_id,
         merchant_id=merchant_id,
-        product_category_slug=product_category_slug,
-        platform_service_tags=platform_service_tags,
+        product_category_slug=resolved_category,
+        platform_service_tags=resolved_tags,
         max_compensation=max_compensation,
     )
 
@@ -518,8 +790,8 @@ def chat(
         existing = list(context.chat_history)
         context.chat_history = chat_history + existing
 
-    # 2) 转人工阈值检查
-    should_handoff, handoff_reason = check_handoff_threshold(
+    # 3) 转人工阈值检查
+    force_handoff, suggest_handoff, handoff_reason = check_handoff_threshold(
         order_amount=context.order_amount,
         buyer_type=context.current_state.buyer_type,
         risk_level=context.current_state.risk_level,
@@ -527,9 +799,10 @@ def chat(
         platform_service_tags=context.platform_service_tags,
         round_count=round_count,
         max_compensation=context.max_compensation,
+        dismiss_round_handoff=dismiss_round_handoff,
     )
 
-    if should_handoff:
+    if force_handoff:
         handoff_summary = build_handoff_summary(context.current_state)
         logger.info(
             "%s 触发转人工 dispute_id=%s reason=%s",
@@ -554,15 +827,26 @@ def chat(
             handoff=True,
             handoff_reason=handoff_reason,
             handoff_summary=handoff_summary,
+            handoff_suggested=False,
             tools_called=[],
         )
 
-    # 3) 构建 prompt 和消息
-    system_prompt = _build_system_prompt(context)
-    messages = _build_chat_messages(system_prompt, context)
+    # 3) 构建 prompt 与累积事实（附图仅注入 URL，识图由 LLM 调工具完成）
+    accumulated_facts = _build_facts_from_context(context)
     state = context.current_state
     tools_called: list[str] = []
     state_updated = False
+
+    normalized_images = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+    attachments_addon = ""
+    if normalized_images:
+        attachments_addon = _format_pending_attachments_addon(
+            normalized_images,
+            _build_buyer_claim_from_context(context),
+        )
+
+    system_prompt = _build_system_prompt(context, pending_attachments_addon=attachments_addon)
+    messages = _build_chat_messages(system_prompt, context)
 
     # 4) LLM function calling 循环
     model_env_key = "CONVERSATION_AGENT_LLM_MODEL"
@@ -627,7 +911,14 @@ def chat(
                 tool_round + 1,
             )
 
-            result_text, state = _execute_tool_call(tc_name, tc_args, context, round_count + tool_round)
+            result_text, state, accumulated_facts = _execute_tool_call(
+                tc_name,
+                tc_args,
+                context,
+                round_count + tool_round,
+                accumulated_facts,
+                pending_image_urls=normalized_images,
+            )
             tools_called.append(tc_name)
 
             # 检测状态是否发生实质性变化（模型级比较）
@@ -674,5 +965,7 @@ def chat(
         state_updated=state_updated,
         state=state,
         handoff=False,
+        handoff_suggested=suggest_handoff,
+        handoff_reason=handoff_reason if suggest_handoff else "",
         tools_called=tools_called,
     )

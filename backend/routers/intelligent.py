@@ -36,6 +36,16 @@ class IntelligentMessageRequest(BaseModel):
     max_compensation: float = Field(default=0.0, description="商家赔偿上限（元），0 表示不限制")
     chat_history: list[dict[str, Any]] = Field(default_factory=list, description="额外历史对话")
     round_count: int = Field(default=0, description="当前对话轮次")
+    image_urls: list[str] = Field(default_factory=list, description="买家附图 data URL 列表")
+    dismiss_round_handoff: bool = Field(default=False, description="用户选择继续对话，忽略轮次转人工建议")
+
+
+class SimulationFixturePayload(BaseModel):
+    """PUT /intelligent/simulation 请求体。"""
+
+    enabled: bool = Field(default=True, description="是否启用模拟数据")
+    orders: dict[str, Any] = Field(default_factory=dict, description="按订单号索引的模拟订单")
+    buyers: dict[str, Any] = Field(default_factory=dict, description="按买家ID索引的模拟画像")
 
 
 class IntelligentTakeoverRequest(BaseModel):
@@ -71,6 +81,8 @@ def intelligent_message(request: IntelligentMessageRequest):
             max_compensation=request.max_compensation,
             chat_history=request.chat_history,
             round_count=request.round_count,
+            image_urls=request.image_urls,
+            dismiss_round_handoff=request.dismiss_round_handoff,
         )
         return reply
     except ValueError as exc:
@@ -97,7 +109,7 @@ def intelligent_takeover(request: IntelligentTakeoverRequest):
         from backend.agents.conversation_agent.context import load_state_from_redis
         from backend.tools.intelligent_tools import build_handoff_summary
         from schemas import INTEL_PHASE_HANDOFF, UpdateStateInput
-        from backend.tools.intelligent_tools import update_state, log_tool_call
+        from backend.tools.intelligent_tools import update_state
 
         state = load_state_from_redis(request.dispute_id)
         if state is None:
@@ -157,3 +169,40 @@ def intelligent_status(dispute_id: str):
     except Exception as exc:  # noqa: BLE001
         logger.error("%s GET /intelligent/status/%s 失败：%s", API_LOG_PREFIX, dispute_id, exc)
         raise HTTPException(status_code=500, detail=f"查询状态失败：{exc}")
+
+
+# ---------- 端点：测试模拟数据读写 ----------
+@router.get("/intelligent/simulation")
+def get_simulation_fixture():
+    """读取本地测试用订单/买家模拟配置。"""
+    try:
+        from backend.tools.simulation_fixture import get_fixture_path, load_simulation_fixture
+
+        data = load_simulation_fixture()
+        return {
+            "path": str(get_fixture_path()),
+            **data,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s GET /intelligent/simulation 失败：%s", API_LOG_PREFIX, exc)
+        raise HTTPException(status_code=500, detail=f"读取模拟配置失败：{exc}")
+
+
+@router.put("/intelligent/simulation")
+def put_simulation_fixture(payload: SimulationFixturePayload):
+    """保存本地测试用订单/买家模拟配置。"""
+    try:
+        from backend.tools.simulation_fixture import get_fixture_path, save_simulation_fixture
+
+        save_simulation_fixture(payload.model_dump())
+        return {
+            "status": "saved",
+            "path": str(get_fixture_path()),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s PUT /intelligent/simulation 失败：%s", API_LOG_PREFIX, exc)
+        raise HTTPException(status_code=500, detail=f"保存模拟配置失败：{exc}")

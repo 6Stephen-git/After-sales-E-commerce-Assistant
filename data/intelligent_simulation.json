@@ -1,0 +1,31 @@
+{
+  "enabled": true,
+  "orders": {
+    "9999": {
+      "order_amount": 89,
+      "product_name": "封皮本",
+      "product_category_slug": "",
+      "platform_service_tags": [],
+      "buyer_id": "test_buyer_001",
+      "logistics": {
+        "is_shipped": true,
+        "is_signed": true,
+        "stagnant_days": 0,
+        "is_abnormal": false,
+        "status_text": "已签收，1天前送达"
+      }
+    }
+  },
+  "buyers": {
+    "test_buyer_001": {
+      "purchase_count": 8,
+      "dispute_count": 0,
+      "dispute_rate": 0,
+      "avg_order_value": 75,
+      "return_rate": 0.05,
+      "malicious_flags": 0,
+      "positive_review_count": 6,
+      "credit_level": "high"
+    }
+  }
+}

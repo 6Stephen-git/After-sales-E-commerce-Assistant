@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from schemas import (
+    ACTION_DEFEND_PREPARE,
     ACTION_MERCHANT_REMEDY,
     ACTION_MONETARY_SETTLE,
     ACTION_RULE_EXPLAIN,
@@ -143,17 +144,40 @@ def _resolve_dialogue_context(input_data: ScriptInput) -> DialogueContext:
     return _minimal_dialogue_context(input_data)
 
 
+_ACTION_TONE_MAP: dict[str, str] = {
+    ACTION_EVIDENCE_REQUEST: "专业、引导、不施压，像帮朋友补材料",
+    ACTION_RETURN_INSPECTION: "专业、引导、不施压，语气平和",
+    ACTION_RULE_EXPLAIN: "冷静、有理有据、不卑不亢",
+    ACTION_MONETARY_SETTLE: "果断、清晰、有担当，主动给方案",
+    ACTION_MERCHANT_REMEDY: "真诚、贴心、有温度，像店主亲自善后",
+    ACTION_DEFEND_PREPARE: "冷静、有理有据、不卑不亢，守住底线",
+}
+
+
 def _build_tone_hint(input_data: ScriptInput) -> str:
-    """合并情绪与客户价值语气提示。"""
+    """
+    按 action_type 动态生成语气指导，并叠加情绪与客户价值提示。
+
+    输入：ScriptInput（含 strategy_output、emotion_note）
+    输出：一句话语气指导字符串
+    """
     parts: list[str] = []
+
+    # 1. 按动作类型给基调
+    action = (input_data.strategy_output.action_type or "").strip().lower()
+    base_tone = _ACTION_TONE_MAP.get(action, "亲切自然、像店主本人")
+    parts.append(base_tone)
+
+    # 2. 叠加情绪提示
     emotion = _normalize_text(input_data.emotion_note)
     if emotion:
         parts.append(emotion)
+
+    # 3. 叠加客户价值建议
     customer_value = input_data.strategy_output.customer_value
     if customer_value and customer_value.tone_suggestion:
         parts.append(str(customer_value.tone_suggestion).strip())
-    if not parts:
-        return "亲切热情、自然真诚，像店主本人；适度即可，短句优先"
+
     return "；".join(parts) + "；短句优先"
 
 

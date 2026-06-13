@@ -348,7 +348,7 @@ def _analyze_image_dashscope(
     payload = _build_dashscope_payload(image_ref=image_ref, model=model, guidance=guidance)
     backoff_seconds = [0.2, 0.4, 0.8]
 
-    logger.info("%s 开始调用百炼多模态，model=%s", LOG_PREFIX, model)
+    logger.info("%s 开始调用百炼多模态，endpoint=%s model=%s", LOG_PREFIX, endpoint, model)
     for attempt in range(3):
         try:
             with httpx.Client(timeout=60.0) as client:
@@ -362,9 +362,11 @@ def _analyze_image_dashscope(
             except Exception:  # noqa: BLE001
                 detail = str(exc)
             logger.error(
-                "%s 第%d次调用失败：HTTP 状态异常，status=%s，详情=%s",
+                "%s 第%d次调用失败：HTTP 状态异常，endpoint=%s model=%s status=%s，详情=%s",
                 LOG_PREFIX,
                 attempt + 1,
+                endpoint,
+                model,
                 exc.response.status_code,
                 detail,
             )
@@ -500,6 +502,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
     if _is_dashscope_multimodal_endpoint(endpoint=endpoint):
         # 默认视觉模型与 .env.example 一致；覆盖时请设环境变量 VISION_API_MODEL
         model = os.getenv("VISION_API_MODEL", "").strip() or "qwen3-vl-flash"
+        logger.info("%s 视觉走百炼多模态协议，endpoint=%s model=%s", LOG_PREFIX, endpoint, model)
         return _analyze_image_dashscope(
             endpoint=endpoint,
             api_key=api_key,
@@ -508,6 +511,11 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
             guidance=guidance,
         )
 
+    logger.warning(
+        "%s 视觉走 legacy 协议（非百炼 endpoint），请确认 VISION_API_ENDPOINT 是否配置正确：%s",
+        LOG_PREFIX,
+        endpoint,
+    )
     legacy_result = _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)
     if legacy_result.get("error"):
         return legacy_result

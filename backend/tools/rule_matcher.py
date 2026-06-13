@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from backend.db.connection import get_engine
 from backend.db.models import PlatformRule
-from backend.tools.rule_lexicon import CE_CONFIDENCE_THRESHOLD, get_doc_by_id
+from backend.tools.rule_lexicon import (
+    CE_CONFIDENCE_THRESHOLD,
+    get_doc_by_id,
+    resolve_doc_ids_from_materials,
+)
 from schemas import (
     RULE_RELEVANCE_MUST,
     RULE_RELEVANCE_SHOULD,
@@ -507,10 +511,9 @@ def _classify_relevance(
 
 def _infer_stance(content: str) -> str:
     """从处理标准归纳站位提示。"""
-    text = content.lower()
     if "支持打款" in content or "驳回买家" in content:
         return RULE_STANCE_MERCHANT
-    if "支持买家" in content or "退货退款" in content and "卖家" in content:
+    if "支持买家" in content or ("退货退款" in content and "卖家" in content):
         return RULE_STANCE_BUYER
     if "支持退款" in content:
         return RULE_STANCE_BUYER
@@ -712,7 +715,6 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
     if ratio_cap is None and isinstance(policy_limits, dict):
         ratio_cap = _coerce_float(policy_limits.get("compensation_ratio_cap"))
 
-    evidence_constraint_added = False
     for rule in pool:
         source_rule_id = rule.rule_id
         for text in rule.strategy_constraints or []:
@@ -768,30 +770,17 @@ def _build_rule_constraints(pool: list[MatchedRule], facts: FactOutput) -> list[
         skip_generic_evidence = frame in FRAMES_SKIP_QUALITY_EVIDENCE_GATE and is_no_defect_claim(
             facts.defect_type
         )
-        if (
-            not evidence_constraint_added
-            and not skip_generic_evidence
-            and ("举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text)
+        if not skip_generic_evidence and (
+            "举证" in rule_text or "凭证" in rule_text or "照片" in rule_text or "视频" in rule_text
         ):
-            from backend.agents.agent2.evidence_readiness import (
-                buyer_facing_missing_evidence,
-                evidence_gap_blocks_settlement,
-            )
-
-            buyer_gaps = buyer_facing_missing_evidence(facts)
-            if buyer_gaps and evidence_gap_blocks_settlement(facts):
-                evidence_status = RULE_CONSTRAINT_MISSING_FACT
-            else:
-                evidence_status = RULE_CONSTRAINT_APPLIES
             _append_constraint(
                 constraints,
                 constraint_type=RULE_CONSTRAINT_EVIDENCE,
                 text="处理退款或补偿前，应先核验买家举证是否满足规则要求，并固定商品照片、视频、快递单和聊天记录",
-                status=evidence_status,
+                status=RULE_CONSTRAINT_APPLIES,
                 source_rule_id=source_rule_id,
                 confidence=0.8,
             )
-            evidence_constraint_added = True
 
     if ratio_cap is not None:
         _append_constraint(
@@ -897,6 +886,7 @@ def match_rules_simple(
     轻量规则匹配入口：从自然语言描述构建最小 FactOutput，内部走完整匹配链路。
 
     与 match_rules_from_facts 的区别：无需上游 Agent1 完整输出，直接传描述文本。
+    doc_id 由 lexicon lanes 按 category_slug / service_tags 确定性解析，与 Agent1 一致。
 
     参数:
         description: 纠纷自然语言描述（买家说了什么、什么问题）。
@@ -908,14 +898,12 @@ def match_rules_simple(
     """
     logger.info("%s 轻量规则匹配开始 description=%s", LOG_PREFIX, description[:80])
 
-    # 构建最小 rule_match_plan，用描述文本中的关键词做检索
     terms_text = description.strip()
     if not terms_text:
         return RuleMatchResult()
 
     # 用简单分词提取检索词（不依赖 NLP 分词，直接按标点和空格拆分）
-    import re as _re
-    raw_tokens = _re.split(r"[，。；！？、\s]+", terms_text)
+    raw_tokens = re.split(r"[，。；！？、\s]+", terms_text)
     tokens = [t.strip() for t in raw_tokens if len(t.strip()) >= 2]
 
     # must_terms 取较长的关键词，should_terms 取全部
@@ -929,9 +917,24 @@ def match_rules_simple(
             if tag_text and tag_text not in must_terms:
                 must_terms.append(tag_text)
 
+    # 通过 lexicon lanes 确定性解析 doc_id，与 Agent1 的 rule_plan 逻辑一致
+    materials: dict[str, Any] = {}
+    if category_slug:
+        materials["product_category_slug"] = category_slug
+    if service_tags:
+        materials["platform_service_tags"] = list(service_tags)
+    target_doc_ids, activated_lanes = resolve_doc_ids_from_materials(materials)
+
+    logger.info(
+        "%s 轻量规则匹配 doc_ids=%s lanes=%s",
+        LOG_PREFIX,
+        target_doc_ids,
+        activated_lanes,
+    )
+
     plan = RuleMatchPlan(
-        activated_lanes=[],
-        target_doc_ids=[],  # 无 doc_id 时会走字面降级
+        activated_lanes=activated_lanes,
+        target_doc_ids=target_doc_ids,
         section_selections=[],
         search_terms=RuleSearchTerms(
             must_terms=must_terms,

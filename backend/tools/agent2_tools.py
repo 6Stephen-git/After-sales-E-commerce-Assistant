@@ -152,6 +152,14 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
     )
 
     try:
+        # 本地模拟画像优先（智能模式联调）
+        from backend.tools.simulation_fixture import get_simulated_buyer_profile
+
+        simulated_profile = get_simulated_buyer_profile(normalized_buyer_id)
+        if simulated_profile is not None:
+            logger.info("%s 使用模拟买家画像 buyer_id=%s", AGENT2_LOG_PREFIX, normalized_buyer_id)
+            return simulated_profile
+
         default_profile = _build_default_buyer_profile(normalized_buyer_id)
         if not normalized_merchant_id or not normalized_buyer_id:
             logger.info("%s merchant_id/buyer_id 为空，返回默认画像", AGENT2_LOG_PREFIX)
@@ -996,6 +1004,7 @@ def detect_malicious_simple(
     merchant_id: str = "",
     order_amount: float = 0.0,
     description: str = "",
+    facts: FactOutput | None = None,
 ) -> MaliciousDetectionOutput:
     """
     轻量恶意检测：从聊天记录与描述构建最小输入，内部调用完整检测链路。
@@ -1006,15 +1015,17 @@ def detect_malicious_simple(
         merchant_id: 商家ID（可选）。
         order_amount: 订单金额。
         description: 纠纷描述。
+        facts: 上游已有的 FactOutput（可选）。传入时优先使用，避免用默认空事实
+               导致 credential_trust / logistics_normal / red_flags 等字段全部丢失。
 
     返回:
         MaliciousDetectionOutput。
     """
     profile = query_buyer_profile(buyer_id=buyer_id, merchant_id=merchant_id) if buyer_id else _build_default_buyer_profile("")
-    facts = _build_default_facts(description or "（无描述）")
+    resolved_facts = facts if facts is not None else _build_default_facts(description or "（无描述）")
     md_input = MaliciousDetectionInput(
         buyer_profile=profile,
-        facts=facts,
+        facts=resolved_facts,
         order_amount=max(0.0, order_amount),
         chat_history=[str(s).strip() for s in (chat_history or []) if str(s).strip()],
     )

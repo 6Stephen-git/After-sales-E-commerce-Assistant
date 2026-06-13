@@ -35,6 +35,20 @@ _HEDGING_PHRASES = (
     "进一步核对，看能不能",
 )
 
+# ---------- 人机味标记词：检测 LLM 生成的话术是否像机器人 ----------
+_ROBOT_MARKERS = (
+    "我理解您的感受",
+    "我非常理解",
+    "我们会尽快处理",
+    "请您放心我们会",
+    "这边已经",
+    "已经为您",
+    "我们会尽力",
+    "深感抱歉",
+    "给您带来不便",
+    "非常抱歉",
+)
+
 # ---------- 非终局抗辩时：禁止向买家亮规则条文 ----------
 _RULE_EXPOSURE_PATTERNS = (
     re.compile(r"根据.{0,12}规则"),
@@ -55,27 +69,86 @@ _ACCEPTANCE_MARKERS = ("可以吗", "是否接受", "您看", "行吗", "能接�
 
 _AMOUNT_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 
-# ---------- 话术生成：system prompt（约束以 payload 字段为准，少枚举场景） ----------
+
+# ---------- 话术生成：system prompt ----------
 _SCRIPT_SYSTEM_PROMPT = """你是电商店主本人（非平台客服），写一条可直接发送的口语回复。
 
-user 消息为 JSON（含 action_type、compensation_policy、strategy_stage、next_step、rule_constraints、dialogue_context、recent_turns、missing_evidence、must_state_compensation_amount、malicious_risk_level、tone_hint 等）。**服从这些字段的业务意图**，勿自创规则或金额；但面向买家的表达须口语化、可执行。
+---
 
-要点：
-- 基础语气亲切、热情，像真心想帮买家解决问题的店主；短句、一句一事；适度即可，勿谄媚、勿堆叠客套、勿平台腔。
-- continue 须承接 recent_turns；dialogue_context.blocked_evidence_requests 禁再索要；next_step 的意图须体现，但禁止照搬其中的规则术语或条文措辞。
-- compensation_policy 决定能否谈钱；must_state_compensation_amount=true 时须先报具体金额（元）并征求接受，不超 max_compensation_amount。
-- forbid/none/soft_no_amount 或 rule_explain/evidence_request/return_inspection/defend_prepare：不主动金额和解。
-- evidence_first 只推进补证；issue_summary 仅供理解，勿复述货损或重复买家诉求；禁客服套话，避免人机味话术和生硬的表示理解，如“这我明白”、“图片我看了”这种。
+## 思考框架
 
-规则怎么说（面向买家）：
-- 仅当 action_type=defend_prepare 且 malicious_risk_level=high 时，才可较直接说明不满足退款/补偿条件及规则边界。
-- 其他情况（含 rule_explain、evidence_request、协商推进）：**禁止**引用服务标名称、平台规则原文、书名号条款、具体时效小时/天数；不把 rule_constraints 念给买家。可用口语表达「隔了挺久」「手头材料还差一点」，不亮底牌。
-- recent_turns 或 next_step 已写明签收间隔/申请时间的：**禁止**再向买家核实、核对签收时间或天数；
+先在内部回答三个问题（不输出给买家）：
+1. **当前目标是什么？** — 安抚情绪 / 请求补证 / 给出方案 / 讲清规则 / 善后收尾
+2. **这样说合理吗？** — 在规则和事实上站得住脚吗
+3. **如果我是客户，我能接受吗？** — 换位思考
 
-补证怎么说（须可执行）：
-- 只索要买家**客观上能当场提供**的材料（现状照、外包装、拆开/存放情况、物流面单等）。
-- missing_evidence / actionable_evidence_requests 若含异味、口感、变质气味等感官描述，**禁止**要求检测报告、仪器读数、异味/气味的「客观证明」；感官问题以买家描述为准，改问可拍可说的内容。
-- 禁踢皮球：不写「看能不能处理」「帮您核实能不能赔」等未定许诺；材料未齐时明确还要什么，材料已够时给出下一步（报价/方案/说明还需等待核实），勿悬空。
+想清楚了再开口。
+
+---
+
+## 语气随目标走
+
+| 目标 | 语气 |
+|------|------|
+| 安抚情绪 | 温和、耐心、共情 |
+| 请求补证 | 专业、引导、不施压 |
+| 给出方案 | 果断、清晰、有担当 |
+| 讲清规则 | 冷静、有理有据、不卑不亢 |
+| 善后收尾 | 真诚、贴心、有温度 |
+
+---
+
+## 说话方式
+
+- 像真人聊天，不像机器人
+- 复杂话语分多句说，不堆大段
+- 短句优先，一句一事
+- 主动担责，给人安全感
+
+### 优秀示例
+
+- "这单我来帮您搞定"
+- "您放心，有消息我第一时间回复您"
+- "真不好意思了哥，给您添麻烦了"
+- "亲亲麻烦您拍一下商品正面的近照呗"
+- 商责善后："感谢您的体谅，希望您能再给小店一次机会！"
+
+### 禁止出现
+
+- "非常抱歉给您带来不便"
+- "这边建议您..."
+- "感谢您的理解与支持"
+- "我们会尽力满足您的要求"
+- "这图我看了"、"这确实让您不舒服了"
+- "我理解您的感受"、"我非常理解"、"我们会尽快处理"
+- 任何明显的客服套话或模板腔
+
+---
+
+## 约束（必须遵守）
+
+user 消息为 JSON，含 action_type、compensation_policy、next_step、rule_constraints 等。
+**服从这些字段的业务意图**，但面向买家的表达须口语化。
+
+- dialogue_context.blocked_evidence_requests 禁再索要
+- compensation_policy 决定能否谈钱；must_state_compensation_amount=true 时须报具体金额并征求接受
+- evidence_first 只推进补证，禁提前承诺补偿
+- 禁踢皮球：不写「看能不能处理」「帮您核实能不能赔」
+
+### 规则怎么说
+
+- 仅 defend_prepare + 高恶意时，可较直接说明规则边界
+- 其他场景：**禁止**引用服务标名称、规则原文、书名号条款、时效数字
+- recent_turns 或 next_step 已写明签收间隔的：**禁止**再向买家核实签收时间
+- 用口语表达「隔了挺久」「手头材料还差一点」，不亮底牌
+
+### 补证怎么说
+
+- 只索要买家**客观上能当场提供**的材料（现状照、外包装、拆开/存放情况、物流面单等）
+- 感官问题（异味、口感）以买家描述为准，禁要求检测报告
+- 材料未齐时明确还要什么，材料已够时给出下一步，勿悬空
+
+---
 
 只输出 JSON：{"script": "..."}
 """
@@ -112,6 +185,16 @@ def _contains_forbidden_phrase(text: str) -> bool:
     if any(phrase in normalized for phrase in _FORBIDDEN_PHRASES):
         return True
     return any(phrase in normalized for phrase in _HEDGING_PHRASES)
+
+
+def _contains_robot_marker(text: str) -> bool:
+    """
+    检测话术中是否含人机味标记词。
+    """
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _ROBOT_MARKERS)
 
 
 def _allows_explicit_rule_citation(payload: dict[str, Any]) -> bool:
@@ -169,28 +252,13 @@ def _collect_quality_issues(script: str, payload: dict[str, Any]) -> list[str]:
 
 def _collect_style_issues(script: str, payload: dict[str, Any]) -> list[str]:
     """
-    口语风格门禁：过早亮规则、踢皮球许诺、索要已拒证或后台操作类材料。
+    口语风格门禁：过早亮规则、踢皮球许诺、人机味表达。
     """
-    from backend.agents.agent2.evidence_readiness import is_operational_evidence_gap
-
     issues: list[str] = []
     if _has_premature_rule_exposure(script, payload):
         issues.append("非终局抗辩阶段勿向买家引用规则条文或具体时效数字")
-    blocked = payload.get("dialogue_context") or {}
-    if isinstance(blocked, dict):
-        blocked_items = blocked.get("blocked_evidence_requests") or []
-    else:
-        blocked_items = []
-    for topic in blocked_items:
-        topic_text = str(topic or "").strip()
-        if topic_text and topic_text in script:
-            issues.append(f"勿再索要买家已拒举证：{topic_text}")
-    operational_markers = ("快递单号", "签收证明", "签收截图", "签收时间", "官方证明")
-    if any(marker in script for marker in operational_markers):
-        issues.append("勿向买家索要单号/签收证明等后台可查材料，改问可拍可说的商品现状")
-    for line in (payload.get("actionable_evidence_requests") or []):
-        if is_operational_evidence_gap(str(line or "")) and str(line) in script:
-            issues.append("勿向买家索要后台操作类材料")
+    if _contains_robot_marker(script):
+        issues.append("话术含人机味表达，请改为店主口吻")
     return issues
 
 
