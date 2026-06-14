@@ -168,9 +168,15 @@ export function use_dispute() {
 
         if (stream_error) {
           const message = String(stream_error.message || '')
-          const can_fallback = message.includes('流式分析未启用') || message.includes('404')
+          const is_stream_abort = /aborted|BodyStreamBuffer/i.test(message)
+          const can_fallback =
+            message.includes('流式分析未启用') ||
+            message.includes('404') ||
+            (is_stream_abort && !report.value?.strategy)
           if (can_fallback) {
-            progress_message.value = '流式不可用，已回退普通分析...'
+            progress_message.value = is_stream_abort
+              ? '流式连接中断，正在拉取完整报告...'
+              : '流式不可用，已回退普通分析...'
             report.value = await analyzeDispute(payload)
             progress_message.value = '分析完成'
           } else {

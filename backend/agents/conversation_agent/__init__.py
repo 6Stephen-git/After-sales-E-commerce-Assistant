@@ -52,6 +52,11 @@ from schemas import (
     EvidenceSummary,
     EvidenceSummaryInput,
     FactOutput,
+    INTEL_PHASE_DEFENSE,
+    INTEL_PHASE_EVIDENCE,
+    INTEL_PHASE_HANDOFF,
+    INTEL_PHASE_SETTLE,
+    INTEL_PHASE_STRATEGY,
     IntelligentContext,
     IntelligentState,
     KeyDecision,
@@ -82,9 +87,99 @@ def _load_system_prompt_template() -> str:
         )
 
 
+def _tools_already_called(state: IntelligentState) -> set[str]:
+    """汇总历史 tool_findings 中已执行过的工具名。"""
+    return {str(item.tool).strip() for item in state.tool_findings if str(item.tool).strip()}
+
+
+def _format_phase_tool_suggestions(context: IntelligentContext) -> str:
+    """
+    按当前阶段与上下文生成工具建议（按需选用，不写死顺序）。
+    """
+    state = context.current_state
+    phase = str(state.phase or INTEL_PHASE_EVIDENCE).strip()
+    called = _tools_already_called(state)
+    picks: list[str] = []
+
+    if phase == INTEL_PHASE_EVIDENCE:
+        if context.buyer_id and "query_buyer_profile" not in called:
+            picks.append("query_buyer_profile")
+        if context.order_id and "query_logistics" not in called:
+            picks.append("query_logistics")
+        if "match_rules_simple" not in called:
+            picks.append("match_rules_simple")
+    elif phase == INTEL_PHASE_STRATEGY:
+        if "match_rules_simple" not in called:
+            picks.append("match_rules_simple")
+        if context.buyer_id and "evaluate_customer_value_simple" not in called:
+            picks.append("evaluate_customer_value_simple")
+        picks.append("detect_malicious_simple（有疑点时）")
+        if "search_similar_cases_simple" not in called:
+            picks.append("search_similar_cases_simple")
+    elif phase == INTEL_PHASE_SETTLE:
+        picks.append("update_state（记录方案与阶段）")
+        if state.evidence_summary.missing:
+            picks.append("先退回 evidence_collection 补证，再谈结案")
+    elif phase == INTEL_PHASE_DEFENSE:
+        if "match_rules_simple" not in called:
+            picks.append("match_rules_simple")
+        picks.append("detect_malicious_simple（有疑点时）")
+        if "search_similar_cases_simple" not in called:
+            picks.append("search_similar_cases_simple")
+    elif phase == INTEL_PHASE_HANDOFF:
+        picks.append("update_state（phase=handoff）")
+
+    if not picks:
+        return ""
+    return "- 本阶段可考虑工具：" + "、".join(picks) + "（按需选用，非固定顺序）"
+
+
+def _format_phase_stage_hint(context: IntelligentContext) -> str:
+    """
+    按当前 phase 与证据缺口生成本轮操作提醒（约束决策边界，不限具体说法）。
+    """
+    state = context.current_state
+    phase = str(state.phase or INTEL_PHASE_EVIDENCE).strip()
+    missing = [str(item).strip() for item in (state.evidence_summary.missing or []) if str(item).strip()]
+
+    lines = ["---", "本阶段操作提醒（约束决策边界，不限说法）："]
+
+    if phase == INTEL_PHASE_EVIDENCE:
+        lines.append("- 当前重心：固定事实与举证，弄清问题、责任线索与材料缺口。")
+        if missing:
+            lines.append(
+                "- 缺失证据未补齐前：勿承诺退款、仅退款或具体赔偿金额；可说核实后再定方案。"
+            )
+        else:
+            lines.append(
+                "- 关键材料基本齐全：可经 update_state 进入 strategy_negotiation 定策略方向。"
+            )
+        lines.append("- 过关自问：责任能判断吗？疑点核实了吗？还缺什么？")
+    elif phase == INTEL_PHASE_STRATEGY:
+        lines.append("- 当前重心：定策略方向（补证/协商/守底线），原则上不落地具体金额。")
+        lines.append("- 过关自问：诉求在规则内吗？策略与证据一致吗？")
+    elif phase == INTEL_PHASE_SETTLE:
+        lines.append("- 当前重心：在赔偿上限内给出明确方案，争取买家确认。")
+        if missing:
+            lines.append("- 仍有缺失证据：应先退回 evidence_collection 补证，勿强行结案。")
+    elif phase == INTEL_PHASE_DEFENSE:
+        lines.append("- 当前重心：守底线、留痕，整理材料应对平台介入；冷静有据，不激化。")
+    elif phase == INTEL_PHASE_HANDOFF:
+        lines.append("- 当前重心：交接人工，说明现状与已收集材料。")
+    else:
+        lines.append("- 阶段未识别：建议先 evidence_collection 固定事实。")
+
+    tool_line = _format_phase_tool_suggestions(context)
+    if tool_line:
+        lines.append(tool_line)
+
+    lines.append("- 阶段变化须 update_state 并写 update_reason；买家新举证或改口可退回上一阶段。")
+    return "\n".join(lines)
+
+
 def _build_system_prompt(context: IntelligentContext, *, pending_attachments_addon: str = "") -> str:
     """
-    将 system prompt 模板填充上下文变量。
+    将 system prompt 模板填充上下文变量，并注入阶段导航动态提醒。
 
     参数:
         context: 对话上下文。
@@ -127,6 +222,7 @@ def _build_system_prompt(context: IntelligentContext, *, pending_attachments_add
 
     prompt = template.replace("{max_compensation}", max_comp_text)
     prompt += state_text
+    prompt += f"\n{_format_phase_stage_hint(context)}\n"
     if buyer_text:
         prompt += f"\n买家信息：{buyer_text}\n"
 
@@ -139,26 +235,74 @@ def _build_system_prompt(context: IntelligentContext, *, pending_attachments_add
     return prompt
 
 
-def _format_pending_attachments_addon(image_urls: list[str], buyer_claim: str) -> str:
+def _format_pending_attachments_addon(
+    image_urls: list[str],
+    buyer_claim: str,
+    *,
+    pre_analyzed: bool = False,
+) -> str:
     """
-    本轮买家附图索引注入 system，供 LLM 以 image_index 调用 analyze_image_simple。
+    本轮买家附图说明注入 system。
 
-    禁止在 prompt 中写入 data URL 全文：LLM 会原样回传导致 base64 被截断，百炼报格式非法。
+    pre_analyzed=True 时表示服务端已在 LLM 前完成识图，结论在 tool_findings。
     """
     if not image_urls:
         return ""
 
-    lines = [
-        "---",
-        (
+    if pre_analyzed:
+        lead = (
+            f"本轮买家附图共 {len(image_urls)} 张（回复前已完成视觉分析，结论见下方工具发现；"
+            "勿重复调用 analyze_image_simple，除非买家新发图）："
+        )
+    else:
+        lead = (
             f"本轮买家附图共 {len(image_urls)} 张（须先调用 analyze_image_simple 分析后再回复买家；"
             "参数用 image_index（从 1 起），勿传 image_url）："
-        ),
-        f"- 诉求锚点：{buyer_claim}",
-    ]
+        )
+
+    lines = ["---", lead, f"- 诉求锚点：{buyer_claim}"]
     for idx in range(1, len(image_urls) + 1):
         lines.append(f"- 附图{idx}")
     return "\n".join(lines)
+
+
+def _preanalyze_pending_images(
+    *,
+    image_urls: list[str],
+    context: IntelligentContext,
+    state: IntelligentState,
+    accumulated_facts: FactOutput,
+    turn: int,
+) -> tuple[IntelligentState, FactOutput, list[str], bool]:
+    """
+    本轮附图在 LLM 循环前由服务端识图，避免模型只查物流、跳过视觉分析。
+    """
+    tools_called: list[str] = []
+    if not image_urls:
+        return state, accumulated_facts, tools_called, False
+
+    claim = _build_buyer_claim_from_context(context)
+    state_updated = False
+    for idx, image_url in enumerate(image_urls, start=1):
+        logger.info(
+            "%s 本轮附图预分析 image_index=%s dispute_id=%s",
+            LOG_PREFIX,
+            idx,
+            context.dispute_id,
+        )
+        result = analyze_image_simple(image_url=image_url, buyer_claim=claim)
+        state = record_tool_finding(
+            state,
+            "analyze_image_simple",
+            turn,
+            result,
+            extra_facts={"buyer_claim": claim, "image_url": image_url, "image_index": idx},
+        )
+        _merge_vision_into_facts(accumulated_facts, result)
+        tools_called.append("analyze_image_simple")
+        state_updated = True
+
+    return state, accumulated_facts, tools_called, state_updated
 
 
 def _resolve_analyze_image_url(
@@ -223,6 +367,31 @@ def _build_buyer_claim_from_context(context: IntelligentContext) -> str:
     if buyer_parts:
         return "；".join(buyer_parts[-4:])
     return "买家附图举证，请结合对话上下文判断诉求焦点与应关注的可见瑕疵。"
+
+
+# 本轮附图标注：写入买家 user 消息，与 system 中识图结论对齐
+_BUYER_ATTACHMENT_NOTE = (
+    "[本轮买家已附图，服务端已完成视觉分析，结论见 system 工具事实；"
+    "请据此回复，勿要求买家再发本轮已有的图]"
+)
+
+
+def _mark_current_turn_has_attachments(context: IntelligentContext, image_count: int) -> None:
+    """
+    在最后一轮买家消息中标注已附图。
+
+    图与文字虽同一次 API 传入，但 messages 里 user 仅含 buyer_message 文本；
+    """
+    if image_count <= 0 or not context.chat_history:
+        return
+    last = context.chat_history[-1]
+    if last.role != "buyer":
+        return
+    if _BUYER_ATTACHMENT_NOTE in str(last.content or ""):
+        return
+    base = str(last.content or "").strip() or "[图片]"
+    extra = f"\n[本轮共附图{image_count}张]\n{_BUYER_ATTACHMENT_NOTE}" if image_count > 1 else f"\n{_BUYER_ATTACHMENT_NOTE}"
+    context.chat_history[-1] = ChatTurn(role="buyer", content=f"{base}{extra}")
 
 
 def _build_chat_messages(system_prompt: str, context: IntelligentContext) -> list[dict[str, Any]]:
@@ -831,18 +1000,35 @@ def chat(
             tools_called=[],
         )
 
-    # 3) 构建 prompt 与累积事实（附图仅注入 URL，识图由 LLM 调工具完成）
+    # 3) 构建 prompt 与累积事实；附图由服务端先识图，再进入 LLM 循环
     accumulated_facts = _build_facts_from_context(context)
     state = context.current_state
     tools_called: list[str] = []
     state_updated = False
 
     normalized_images = [str(url).strip() for url in (image_urls or []) if str(url).strip()]
+    vision_preanalyzed = False
+    if normalized_images:
+        state, accumulated_facts, pre_tools, pre_updated = _preanalyze_pending_images(
+            image_urls=normalized_images,
+            context=context,
+            state=state,
+            accumulated_facts=accumulated_facts,
+            turn=round_count,
+        )
+        tools_called.extend(pre_tools)
+        vision_preanalyzed = bool(pre_tools)
+        if pre_updated:
+            state_updated = True
+        context.current_state = state
+        _mark_current_turn_has_attachments(context, len(normalized_images))
+
     attachments_addon = ""
     if normalized_images:
         attachments_addon = _format_pending_attachments_addon(
             normalized_images,
             _build_buyer_claim_from_context(context),
+            pre_analyzed=vision_preanalyzed,
         )
 
     system_prompt = _build_system_prompt(context, pending_attachments_addon=attachments_addon)
@@ -876,10 +1062,10 @@ def chat(
             save_state_to_redis(state)
             return AgentReply(
                 reply_text=fallback_reply,
-                state_updated=False,
+                state_updated=state_updated,
                 state=state,
                 handoff=False,
-                tools_called=[],
+                tools_called=tools_called,
             )
 
         # 追加 assistant 消息到 messages

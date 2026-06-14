@@ -27,6 +27,7 @@ from backend.tools.llm_client import chat_completion  # noqa: E402
 from backend.tools.text_signals import (  # noqa: E402
     contains_any,
     facts_has_deceptive_credential_clues,
+    pick_balanced_visual_observations,
     signal_group,
 )
 from schemas import (  # noqa: E402
@@ -652,7 +653,10 @@ def _build_malicious_facts_summary(facts: FactOutput) -> dict[str, Any]:
         "evidence_quality": facts.evidence_quality,
         "credential_trust": facts.credential_trust,
         "red_flags": list((facts.red_flags or [])[:MALICIOUS_FACT_RED_FLAGS_MAX]),
-        "visual_observations": list((facts.visual_observations or [])[:MALICIOUS_FACT_VISUAL_OBS_MAX]),
+        "visual_observations": pick_balanced_visual_observations(
+            facts,
+            max_items=MALICIOUS_FACT_VISUAL_OBS_MAX,
+        ),
     }
     if facts.credential_trust_note:
         summary["credential_trust_note"] = facts.credential_trust_note

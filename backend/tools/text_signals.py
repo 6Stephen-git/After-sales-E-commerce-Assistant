@@ -189,3 +189,88 @@ def visual_observations_suspicious(facts: Any) -> bool:
     return facts_has_deceptive_credential_clues(facts)
 
 
+def _read_facts_attributes(facts: Any) -> dict[str, Any]:
+    """读取 FactOutput 或 dict 上的 attributes 字段。"""
+    if hasattr(facts, "attributes"):
+        raw = getattr(facts, "attributes", None)
+    elif isinstance(facts, dict):
+        raw = facts.get("attributes")
+    else:
+        raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _read_visual_observations_list(facts: Any) -> list[str]:
+    """读取 visual_observations 并过滤空白项。"""
+    if hasattr(facts, "visual_observations"):
+        raw = getattr(facts, "visual_observations", None)
+    elif isinstance(facts, dict):
+        raw = facts.get("visual_observations")
+    else:
+        raw = None
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def pick_balanced_visual_observations(facts: Any, *, max_items: int) -> list[str]:
+    """
+    为下游 LLM 选取视觉观察：多图时轮询每图至少一条，避免截断后只剩第一张图结论。
+
+    参数:
+        facts: FactOutput 或等价 dict。
+        max_items: 最多返回条数。
+
+    返回:
+        带图序前缀的观察短句列表；无 per-image 摘要时回退 visual_observations 截断。
+    """
+    limit = max(1, int(max_items))
+    attrs = _read_facts_attributes(facts)
+    summaries = attrs.get("image_vision_summaries")
+    if not isinstance(summaries, list) or len(summaries) <= 1:
+        return _read_visual_observations_list(facts)[:limit]
+
+    per_image_lines: list[list[str]] = []
+    for item in summaries:
+        if not isinstance(item, dict) or item.get("error"):
+            per_image_lines.append([])
+            continue
+        index = item.get("index", len(per_image_lines) + 1)
+        lines: list[str] = []
+        desc = str(item.get("visual_description") or "").strip()
+        if desc:
+            lines.append(f"图{index}：{desc}")
+        defect = str(item.get("defect_type") or "").strip()
+        if defect and defect not in {"无", "暂无", "无瑕疵", "无质量问题", "无明显瑕疵", "没有瑕疵"}:
+            lines.append(f"图{index}瑕疵：{defect}")
+        trust = str(item.get("credential_trust") or "").strip().lower()
+        if trust == CREDENTIAL_TRUST_SUSPECT:
+            note = str(item.get("credential_trust_note") or "").strip()
+            lines.append(note or f"图{index}举证来源可疑")
+        for flag in item.get("visual_red_flags") or []:
+            text = str(flag).strip()
+            if text:
+                lines.append(f"图{index}疑点：{text}")
+        per_image_lines.append(lines)
+
+    if not any(per_image_lines):
+        return _read_visual_observations_list(facts)[:limit]
+
+    picked: list[str] = []
+    round_idx = 0
+    while len(picked) < limit:
+        added = False
+        for lines in per_image_lines:
+            if round_idx >= len(lines):
+                continue
+            line = lines[round_idx]
+            if line not in picked:
+                picked.append(line)
+                added = True
+            if len(picked) >= limit:
+                break
+        if not added:
+            break
+        round_idx += 1
+    return picked
+

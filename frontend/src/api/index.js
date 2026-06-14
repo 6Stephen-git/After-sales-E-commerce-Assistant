@@ -1,8 +1,8 @@
 import axios from 'axios'
 
 // ---------- 分析链路耗时常超过普通接口：后端多 Agent + 外部 LLM，需单独拉长等待时间 ----------
-const ANALYZE_HTTP_TIMEOUT_MS = 180000
-const ANALYZE_STREAM_TIMEOUT_MS = 180000
+const ANALYZE_HTTP_TIMEOUT_MS = 600000
+const ANALYZE_STREAM_TIMEOUT_MS = 600000
 
 // ---------- Axios 实例：统一管理前端到后端的 HTTP 请求 ----------
 const httpClient = axios.create({
@@ -33,6 +33,34 @@ export async function analyzeDispute(payload) {
 }
 
 // ---------- 流式分析请求：按阶段消费 SSE 事件，支持先展示部分结果 ----------
+function _consume_sse_buffer(buffer, on_event) {
+  let rest = buffer
+  while (rest.includes('\n\n')) {
+    const frame_end = rest.indexOf('\n\n')
+    const frame = rest.slice(0, frame_end)
+    rest = rest.slice(frame_end + 2)
+
+    let event_type = 'message'
+    let event_data = {}
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) {
+        event_type = line.slice(6).trim()
+      } else if (line.startsWith('data:')) {
+        const raw = line.slice(5).trim()
+        try {
+          event_data = JSON.parse(raw)
+        } catch {
+          event_data = { raw }
+        }
+      }
+    }
+    if (typeof on_event === 'function') {
+      on_event(event_type, event_data)
+    }
+  }
+  return rest
+}
+
 export async function analyzeDisputeStream(payload, handlers = {}) {
   const { on_event, on_done, on_error } = handlers
   const controller = new AbortController()
@@ -65,34 +93,14 @@ export async function analyzeDisputeStream(payload, handlers = {}) {
 
     while (true) {
       const { value, done } = await reader.read()
-      if (done) {
-        break
+      if (value) {
+        buffer += decoder.decode(value, { stream: true })
+        buffer = _consume_sse_buffer(buffer, on_event)
       }
-      buffer += decoder.decode(value, { stream: true })
-
-      while (buffer.includes('\n\n')) {
-        const frame_end = buffer.indexOf('\n\n')
-        const frame = buffer.slice(0, frame_end)
-        buffer = buffer.slice(frame_end + 2)
-
-        let event_type = 'message'
-        let event_data = {}
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) {
-            event_type = line.slice(6).trim()
-          } else if (line.startsWith('data:')) {
-            const raw = line.slice(5).trim()
-            try {
-              event_data = JSON.parse(raw)
-            } catch {
-              event_data = { raw }
-            }
-          }
-        }
-
-        if (typeof on_event === 'function') {
-          on_event(event_type, event_data)
-        }
+      if (done) {
+        buffer += decoder.decode(undefined, { stream: false })
+        buffer = _consume_sse_buffer(buffer, on_event)
+        break
       }
     }
     if (typeof on_done === 'function') {

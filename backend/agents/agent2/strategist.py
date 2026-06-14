@@ -46,7 +46,7 @@ from schemas import (
     StrategyOutput,
 )
 from backend.tools.llm_client import chat_completion
-from backend.tools.text_signals import contains_any, signal_group
+from backend.tools.text_signals import contains_any, pick_balanced_visual_observations, signal_group
 
 
 AGENT2_LOG_PREFIX = "[Agent2]"
@@ -818,7 +818,10 @@ def _build_strategy_facts_summary(input_data: StrategyInput) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "issue_summary": facts.issue_summary,
         "intent_tags": list(facts.intent_tags or []),
-        "visual_observations": list((facts.visual_observations or [])[:STRATEGY_VISUAL_OBS_MAX]),
+        "visual_observations": pick_balanced_visual_observations(
+            facts,
+            max_items=STRATEGY_VISUAL_OBS_MAX,
+        ),
         "defect_type": facts.defect_type,
         "defect_location": facts.defect_location,
         "goods_received": facts.goods_received,

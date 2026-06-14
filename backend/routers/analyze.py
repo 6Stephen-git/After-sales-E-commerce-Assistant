@@ -187,7 +187,12 @@ def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
         yield _sse_pack("connected", {"dispute_id": normalized_dispute_id})
 
         while True:
-            item = event_queue.get()
+            try:
+                item = event_queue.get(timeout=20)
+            except queue.Empty:
+                # Agent 阶段耗时长时发心跳，避免代理/浏览器因空闲断开 SSE
+                yield _sse_pack("heartbeat", {"dispute_id": normalized_dispute_id})
+                continue
             if item is None:
                 break
             event_type, payload = item

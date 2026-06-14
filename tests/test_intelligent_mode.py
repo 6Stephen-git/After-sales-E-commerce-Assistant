@@ -426,6 +426,45 @@ class TestResolveAnalyzeImageUrl:
         assert url == full
 
 
+class TestPhaseStageHint:
+    """阶段导航动态提醒。"""
+
+    def test_evidence_phase_with_missing_warns_no_settlement(self):
+        from backend.agents.conversation_agent import _format_phase_stage_hint
+
+        context = IntelligentContext(
+            dispute_id="phase_001",
+            current_state=IntelligentState(
+                dispute_id="phase_001",
+                phase="evidence_collection",
+                evidence_summary=EvidenceSummary(
+                    missing=["开箱连续视频", "内页使用痕迹"],
+                ),
+            ),
+        )
+        hint = _format_phase_stage_hint(context)
+        assert "勿承诺退款" in hint
+        assert "过关自问" in hint
+
+    def test_evidence_phase_suggests_profile_and_logistics(self):
+        from backend.agents.conversation_agent import _format_phase_stage_hint
+
+        context = IntelligentContext(
+            dispute_id="phase_003",
+            buyer_id="buyer_01",
+            order_id="9999",
+            merchant_id="m1",
+            current_state=IntelligentState(
+                dispute_id="phase_003",
+                phase="evidence_collection",
+            ),
+        )
+        hint = _format_phase_stage_hint(context)
+        assert "query_buyer_profile" in hint
+        assert "query_logistics" in hint
+        assert "match_rules_simple" in hint
+
+
 # ---------- 构建转人工摘要测试 ----------
 class TestHandoffSummary:
     """build_handoff_summary 核心契约。"""
@@ -857,11 +896,10 @@ class TestConversationAgentChat:
         assert reply.handoff is False
 
     def test_chat_with_image_syncs_state_and_injects_vision_context(self, monkeypatch):
-        """附图时 LLM 调 analyze_image_simple 后应写入 tool_findings 与 evidence_summary。"""
+        """附图时服务端预识图，应写入 tool_findings 与 evidence_summary。"""
         from backend.agents import conversation_agent
 
         captured: dict[str, Any] = {}
-        llm_round = {"n": 0}
         vision_calls: list[dict[str, Any]] = []
 
         def mock_vision(image_url: str, buyer_claim: str = "") -> dict[str, Any]:
@@ -873,29 +911,9 @@ class TestConversationAgentChat:
             }
 
         def mock_llm(**kwargs):
-            llm_round["n"] += 1
             messages = kwargs.get("messages") or []
-            if llm_round["n"] == 1:
-                captured["system"] = messages[0]["content"] if messages else ""
-                return {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_img",
-                            "type": "function",
-                            "function": {
-                                "name": "analyze_image_simple",
-                                "arguments": json.dumps(
-                                    {
-                                        "image_index": 1,
-                                        "buyer_claim": "本子翘边；9999",
-                                    }
-                                ),
-                            },
-                        }
-                    ],
-                }
+            captured["system"] = messages[0]["content"] if messages else ""
+            captured["messages"] = messages
             return {
                 "role": "assistant",
                 "content": "看到了，翘边问题我这边给您处理",
@@ -922,9 +940,47 @@ class TestConversationAgentChat:
         assert len(reply.state.tool_findings) >= 1
         assert "笔记本边角翘起" in reply.state.tool_findings[-1].summary
         assert "附图1" in captured.get("system", "")
-        assert "data:image/png;base64,abc" not in captured.get("system", "")
+        assert "已完成视觉分析" in captured.get("system", "")
         assert len(vision_calls) == 1
         assert vision_calls[0]["image_url"] == "data:image/png;base64,abc"
+        last_user = next(m for m in reversed(captured.get("messages") or []) if m.get("role") == "user")
+        assert "本轮买家已附图" in last_user.get("content", "")
+        assert "9999" in last_user.get("content", "")
+
+    def test_short_reply_with_image_marks_user_message(self, monkeypatch):
+        """短回复「行」+ 附图时，user 消息应标注已附图。"""
+        from backend.agents import conversation_agent
+
+        captured: dict[str, Any] = {}
+
+        def mock_vision(image_url: str, buyer_claim: str = "") -> dict[str, Any]:
+            return {"visual_description": "耳机插头近景", "defect_type": "使用痕迹"}
+
+        def mock_llm(**kwargs):
+            captured["messages"] = kwargs.get("messages") or []
+            return {"role": "assistant", "content": "好的哥", "tool_calls": None}
+
+        monkeypatch.setattr(conversation_agent, "analyze_image_simple", mock_vision)
+        monkeypatch.setattr(conversation_agent, "chat_completion_assistant_message", mock_llm)
+        monkeypatch.setattr(
+            "backend.agents.conversation_agent.context.load_state_from_redis",
+            lambda _id: None,
+        )
+
+        conversation_agent.chat(
+            buyer_message="行",
+            dispute_id="attach_mark_001",
+            chat_history=[
+                ChatTurn(role="buyer", content="感觉有人用过"),
+                ChatTurn(role="merchant", content="麻烦拍几张近照"),
+            ],
+            image_urls=["data:image/jpeg;base64,xyz"],
+            round_count=3,
+        )
+
+        last_user = next(m for m in reversed(captured["messages"]) if m.get("role") == "user")
+        assert last_user["content"].startswith("行")
+        assert "本轮买家已附图" in last_user["content"]
 
     def test_cross_round_tool_findings_in_prompt(self, monkeypatch):
         """第二轮应能在 system 中看到第一轮持久化的 tool_findings。"""

@@ -1,324 +1,394 @@
 # 智能模式设计文档
 
-## 一、项目定位
+## 一、定位与边界
 
 智能模式不是「辅助模式的自动化版本」，而是**具备自主决策能力的客服主控系统**。
 
-核心目标：
+| 维度 | 说明 |
+| ---- | ---- |
+| 核心目标 | 替代人工处理大部分售后；阈值内自主对话与处置；超阈值转人工并输出交接摘要 |
+| 与辅助模式关系 | **共用底层工具**（物流、视觉、规则、画像等），**不走** Agent1→2→3 管道 |
+| 决策方式 | 单轮对话内 LLM + function calling 自主选工具、更新状态、生成回复 |
+| 状态 | 有状态：`IntelligentState` 存 Redis，跨轮延续 |
 
-- 替代人工处理大部分售后问题
-- 在阈值内自主对话与处置
-- 超阈值转人工，并给**交接画像 + 处置建议**
-- 与辅助模式**共用工具**，但**不走 Agent1→2→3 管道**
+**工程边界（仍有效）**
 
----
-
-## 二、双模式并行原则
-
-- **新增为主，改动极小为辅**：智能模式尽量新建独立模块，对现有系统只做追加式接入
-- **禁止修改辅助模式核心链路**：`assisted_controller.py`、`analyze.py`、Agent1/2/3 入口签名与返回值语义
-- **schemas.py 只增不改**：可新增智能模式结构，不改 `FactOutput / StrategyInput / ScriptInput / AnalysisReport`
-- **工具复用但不侵入**：新增 `xxx_simple` 只做轻量封装入口，不改变原有工具行为
-- **路由接入是追加一行**：新增 `intelligent_controller.py` + `intelligent.py` router，仅在 `main.py` 增加一行注册
+- 新增为主：智能模式独立模块，辅助模式核心链路不改动
+- `schemas.py` 只增不改：智能模式专用类型见 `IntelligentState` / `AgentReply` 等，不改 `FactOutput` / `AnalysisReport` 语义
+- 工具复用：`xxx_simple` 为轻量入口，不改变辅助模式原有函数行为
+- 路由追加：`intelligent_controller.py` + `routers/intelligent.py`，在 `main.py` 注册
 
 ---
 
-## 三、核心设计哲学
+## 二、模块与文件
 
-### 3.1 责任归属是一切策略的根源
+```
+frontend/
+  src/views/IntelligentView.vue      # 智能模式页面（对话 + 状态侧栏）
+  src/composables/useIntelligent.js  # 会话状态、发消息、接管、模拟配置
+  src/api/index.js                   # /intelligent/* HTTP 封装
 
-所有工具调用、补证请求、策略选择，归根结底是在判断**责任归属**：
+backend/
+  routers/intelligent.py             # API 路由
+  controllers/intelligent_controller.py  # 薄控制器：校验 → chat()
+  agents/conversation_agent/
+    __init__.py                      # 对话主控：LLM 循环 + 工具执行
+    context.py                       # IntelligentContext、Redis 读写
+    prompts/system_prompt.md         # System Prompt 模板（运行时注入状态）
+  tools/intelligent_tools.py         # update_state、record_tool_finding、转人工
+  tools/simulation_fixture.py        # 本地联调：订单/买家模拟数据
+  tools/agent1_tools.py              # analyze_image_simple
+  tools/agent2_tools.py              # evaluate/detect/search *_simple
+  tools/rule_matcher.py              # match_rules_simple
 
-- **商责**：不扯皮，尽快善后，态度好，补偿到位
-- **买家责任**：看情况，老客适当照顾，恶意守住底线
-- **责任不清**：先补证，证据到位再定策略
+data/intelligent_simulation.json     # 模拟订单与买家画像（可 API 编辑）
 
-### 3.2 个性化赔偿上限
-
-商家可配置可接受的最大赔偿金额（`MerchantConfig.max_compensation`），Agent 在该上限内自由决策，不能超过。
-
-### 3.3 反思机制（回复前必做三问）
-
-每轮回复前，Agent 先在内部回答三个问题：
-
-1. **当前目标是什么？** — 安抚情绪/请求补证/给出方案/善后收尾
-2. **这样说合理吗？** — 逻辑和规则上站得住脚吗
-3. **如果我是客户，我能接受吗？** — 换位思考
-
-三个问题都过了，再开口。
-
-### 3.4 人情世故
-
-Agent 首先是人，然后才是客服。它要理解：
-
-- 买家不是机器，有情绪、有面子、有感受
-- 电商是互利共赢，不是对立关系
-- 处理得好，坏事变好事；处理不好，小事变大事
-- 恶意行为要识别，但不能因此对所有买家都防备
+schemas.py                           # IntelligentState、AgentReply、枚举常量
+tests/test_intelligent_mode.py       # 契约与端到端 mock 测试
+```
 
 ---
 
-## 四、Agent 人格画像
+## 三、单轮数据流
 
-> 一个有经验的年轻店主（或店主助理）
->
-> 性格：温和、耐心、有担当、懂人情世故
->
-> 处事风格：
->
-> - 先判断谁的责任，再定策略
-> - 商责就主动善后，不扯皮
-> - 买家责任就看情况，老客适当照顾，恶意守住底线
-> - 每次回复前都想清楚：目标是什么，这样说合理吗，客户能接受吗
->
-> 核心价值观：
->
-> - 电商是互利共赢，不是单方面获利
-> - 处理得好，坏事变好事
-> - 恶意行为不怕，但要专业冷静
-> - 维护商客关系是长期收益的关键
+```mermaid
+sequenceDiagram
+  participant FE as 前端
+  participant API as /intelligent/message
+  participant IC as IntelligentController
+  participant CA as conversation_agent.chat
+  participant Redis as Redis intel_state
+  participant LLM as LLM function calling
+  participant Tools as xxx_simple 工具
 
----
+  FE->>API: buyer_message, chat_history, image_urls, round_count...
+  API->>IC: run_with_events
+  IC->>CA: chat(...)
+  CA->>Redis: load IntelligentState
+  CA->>CA: check_handoff_threshold
+  alt 强制转人工
+    CA-->>FE: AgentReply handoff=true
+  else 继续对话
+    CA->>CA: 附图服务端预识图 analyze_image_simple
+    CA->>LLM: system + 历史 + tools
+    loop 最多 MAX_TOOL_ROUNDS=5
+      LLM->>Tools: tool_calls
+      Tools->>CA: record_tool_finding / update_state
+    end
+    CA->>Redis: save IntelligentState
+    CA-->>FE: AgentReply reply_text + state
+  end
+```
 
-## 五、话术规范
+**要点**
 
-### 5.1 基调（始终如一）
-
-耐心、积极、温和。不管什么情况，这三个不变。
-
-### 5.2 说话方式
-
-- 像真人聊天，不像机器人
-- 复杂话语分多句说，不要堆大段
-- 主动担责，给人安全感
-- 该专业时专业，该亲切时亲切
-- 闲聊也接得住
-
-### 5.3 主动担当及正确表达示例
-
-- "这单我来帮您搞定"
-- "您放心，有消息我第一时间回复您"
-- "真不好意思了哥，给您添麻烦了"
-- "亲亲麻烦您拍一下商品正面的近照呗"
-- "亲亲对处理和商品满意的话，可以留个带图好评吗，谢谢您啦"
-- 商责完结："感谢您的体谅，希望您能再给小店一次机会！"
-- 融洽结尾："祝您顺风顺水顺财神，朝朝暮暮有人疼！下次有需要再光临小店啊！"
-
-### 5.4 禁止的人机感表达示例
-
-- "非常抱歉给您带来不便"
-- "这边建议您..."
-- "感谢您的理解与支持"
-- "我们会尽力满足您的要求"
-- "这图我看了"（不像人话）
-- "这确实让您不舒服了"（太模板）
-
-### 5.5 语气随策略走
-
-
-| 策略   | 语气           |
-| ---- | ------------ |
-| 安抚情绪 | 温和、耐心、共情     |
-| 收集证据 | 专业、引导、不施压    |
-| 给出方案 | 果断、清晰、有担当    |
-| 守住底线 | 冷静、有理有据、不卑不亢 |
-| 善后维护 | 真诚、贴心、有温度    |
-
+1. **无 Agent1/2/3 串行管道**；事实来自工具结论 + `tool_findings` 跨轮注入，而非 `FactOutput` 全量提取。
+2. **附图预分析**：买家本轮 `image_urls` 在进 LLM 前由服务端逐张调用 `analyze_image_simple`，写入 `tool_findings` 并同步 `evidence_summary`，避免模型跳过识图。
+3. **轮内事实累积**：同一轮多次工具调用共享 `accumulated_facts`（内存 `FactOutput`），供 `detect_malicious_simple` 等读取视觉/举证字段。
+4. **对话历史**：前端每次请求带 `chat_history`（不含当前条）；后端与 Redis 状态合并后组 messages。
 
 ---
 
-## 六、策略层设计
+## 四、核心设计哲学
 
-### 6.1 核心理念
+### 4.1 责任归属是策略根源
 
-策略层不是流程图，是**局势评估器**。每收到一条新消息，Agent 做的不是"我现在在流程的第几步"，而是"局势变了没有，我该怎么应对"。
+- **商责**：不扯皮，尽快善后
+- **买家责任**：看画像与价值，恶意守底线
+- **责任不清**：先补证，再定策略
 
-### 6.2 策略层三层结构
+对应 `IntelligentState.responsibility`：`merchant_fault` / `buyer_fault` / `unclear` / `mixed`。
 
-**第一层：局势判断（每轮必做）**
+### 4.2 局势三问 + 反思三问
 
-1. 这个买家是什么类型？（老客/新客/高价值/情绪化/恶意）
-2. 这件事到了什么阶段？（初次接触/补充证据/协商方案/善后/升级）
-3. 当前最大的风险点是什么？（情绪失控/平台介入/恶意套利/证据丢失）
+运行时写在 `system_prompt.md`，每轮回复前内部完成（不展示给买家）：
 
-**第二层：阶段识别（非固定流程，可自由跳转）**
+**局势三问**
 
+1. 这个买家值不值得保？
+2. 这件事谁理亏，理亏多少？
+3. 怎么处理对我们最有利？（长期收益最大化）
 
-| 阶段          | 含义      | 触发条件      |
-| ----------- | ------- | --------- |
-| Connecting  | 建立关系    | 对话开始      |
-| Identifying | 识别问题和情绪 | 买家描述问题    |
-| Exploring   | 探索方案    | 需要更多信息或工具 |
-| Resolving   | 实施解决    | 策略确定，给出方案 |
-| Maintaining | 关系维护    | 问题基本解决，善后 |
+**反思三问**
 
+1. 当前目标是什么？
+2. 这样说合理吗？
+3. 如果我是客户，我能接受吗？
 
-Agent 可以在阶段间自由跳转，不强制线性推进。
+### 4.3 个性化赔偿上限
 
-**第三层：策略选择（每轮一个）**
+`max_compensation`（元）：`0` 表示不限制；非零时 Agent 不得在 settlement 阶段承诺超额补偿。注入 system prompt 的 `{max_compensation}`。
 
+### 4.4 人情世故
 
-| 阶段          | 可选策略                 |
-| ----------- | -------------------- |
-| Connecting  | 问候、身份确认              |
-| Identifying | 复述确认、情绪管理、问题细化       |
-| Exploring   | 建议提供、工具调用（规则/画像/物流等） |
-| Resolving   | 信息告知、方案执行、补偿协商       |
-| Maintaining | 反馈请求、感谢收尾、关系延续       |
-
-
-决策逻辑：
-
-- 情绪优先：买家情绪激动时先安抚再处理问题
-- 证据优先：关键证据缺失时先收集信息再给方案
-- 规则优先：涉及规则边界时先查规则再定策略
-- 长期优先：高价值老客优先保护关系，适当让利
+见 `system_prompt.md`「关于人情世故」：买家有情绪与面子；售后本质是维护商客关系；恶意要专业冷静，不对所有买家防备。
 
 ---
 
-## 七、状态管理
+## 五、阶段与策略（已实现）
 
-### 7.1 IntelligentState
+售后阶段以 `IntelligentState.phase` 为准，**可前进也可因新举证退回**，非固定流水线。
 
-独立于对话历史，维护一个结构化状态，仅在**案件情况发生实质性变化时**才更新。
+| phase | 含义 | 边界约束（system 动态注入） |
+| ----- | ---- | --------------------------- |
+| `evidence_collection` | 固定事实与举证缺口 | 缺证时不承诺退款/具体金额 |
+| `strategy_negotiation` | 定方向（补证/协商/守底线） | 原则上不落地具体金额 |
+| `settlement` | 在赔偿上限内给出明确方案 | 仍有缺证时应退回补证 |
+| `defense` | 守底线、留痕，应对平台介入 | 冷静有据 |
+| `handoff` | 交人工 | 强制/主动接管后 |
 
-**触发更新的时机（三类核心事件）**：
+当前策略 `current_strategy`：`collect_evidence` / `negotiate` / `compensate` / `defend`。
 
-1. 新证据进入：买家发图片、视频、物流状态更新
-2. 新风险信号出现：买家情绪升级、威胁投诉、恶意信号增强
-3. 策略方向发生转变：从"补证"转"协商"，从"协商"转"抗辩"
+阶段变化须 LLM 调用 `update_state` 并填写 `update_reason`。`conversation_agent` 还会按 phase 向 system 追加「本阶段操作提醒」与「可考虑工具」列表（非强制顺序）。
 
-**状态结构**：
+> 说明：早期文档中的 Connecting / Identifying / Exploring 等 CRM 阶段名为概念参考，**代码与 Prompt 均以本节 phase 枚举为准**。
+
+---
+
+## 六、状态管理
+
+### 6.1 IntelligentState
 
 ```json
 {
-  "dispute_id": "12345",
-  "phase": "evidence_collection | strategy_negotiation | settlement | defense | handoff",
-  "responsibility": "merchant_fault | buyer_fault | unclear | mixed",
-  "current_strategy": "collect_evidence | negotiate | compensate | defend",
-  "strategy_rationale": "老客高价值，虽证据不足但避免激化",
-  "buyer_type": "high_value_old | normal | first_time | suspicious | malicious",
+  "dispute_id": "D001",
+  "phase": "evidence_collection",
+  "responsibility": "unclear",
+  "current_strategy": "collect_evidence",
+  "strategy_rationale": "",
+  "buyer_type": "normal",
   "evidence_summary": {
-    "collected": ["buyer_photo", "logistics_normal"],
-    "missing": ["unboxing_video"],
+    "collected": ["买家举证图片（污渍）"],
+    "missing": ["开箱连续视频"],
     "quality": "medium"
   },
-  "risk_level": "low | medium | high",
-  "risk_signals": ["buyer_mentioned_complaint"],
+  "risk_level": "low",
+  "risk_signals": [],
   "key_decisions": [
-    {"turn": 3, "decision": "先要照片再定策略", "reason": "证据不足"}
+    {"turn": 2, "decision": "先要近景再定责", "reason": "瑕疵位置不清"}
   ],
   "tool_findings": [
     {
-      "tool": "query_logistics",
-      "turn": 2,
-      "summary": "订单12345已签收1天",
-      "facts": {"order_id": "12345", "is_signed": true}
+      "tool": "analyze_image_simple",
+      "turn": 1,
+      "summary": "袖口有明显污渍；现象：污渍",
+      "facts": {"visual_description": "...", "defect_type": "污渍", "image_index": 1}
     }
   ],
-  "last_update_reason": "收到买家照片后，结合老客画像调整为协商策略",
-  "updated_at": "2026-06-11T15:00:00"
+  "last_update_reason": "收到买家照片后调整策略",
+  "updated_at": "2026-06-14T08:00:00+00:00"
 }
 ```
 
-**状态更新方式**：
-- 策略/阶段：`update_state` 工具（LLM 主动调用）
-- 工具结论：`record_tool_finding` 自动写入 `tool_findings`，每轮注入 system prompt
+### 6.2 更新方式
 
-**存储**：Redis，按 `dispute_id` 为 key，TTL 24h。
+| 路径 | 触发 | 写入字段 |
+| ---- | ---- | -------- |
+| `update_state`（LLM 工具） | 阶段/责任/策略/风险/证据摘要变化 | phase、responsibility、evidence_summary 等 |
+| `record_tool_finding`（服务端） | 任意业务工具返回后 | `tool_findings`；视觉/物流成功时联动 `evidence_summary` |
+
+**自动证据同步**
+
+- `analyze_image_simple` 成功 → 核销「买家举证图片」「商品实物照片」等通用缺证项；按严重度抬升 `quality`
+- `query_logistics` 成功 → 记入「物流状态」，核销「物流信息」类缺证项
+
+`tool_findings` 上限 **24** 条，超出丢弃最旧。每轮 system prompt 注入格式化后的工具事实，**勿向买家复述**。
+
+### 6.3 存储
+
+- **Key**：`intel_state:{dispute_id}`
+- **TTL**：86400 秒（24h）
+- **实现**：`context.load_state_from_redis` / `save_state_to_redis`；Redis 不可用时记录错误，不阻断单轮（状态仅当轮有效）
+
+---
+
+## 七、对话 Agent（conversation_agent）
+
+### 7.1 入口
+
+```python
+def chat(
+    buyer_message: str,
+    *,
+    dispute_id: str,
+    order_id: str = "",
+    order_amount: float = 0.0,
+    buyer_id: str = "",
+    merchant_id: str = "",
+    product_category_slug: str = "",
+    platform_service_tags: list[str] | None = None,
+    max_compensation: float = 0.0,
+    chat_history: list[ChatTurn] | None = None,
+    round_count: int = 0,
+    image_urls: list[str] | None = None,
+    dismiss_round_handoff: bool = False,
+) -> AgentReply
+```
+
+### 7.2 LLM 配置
+
+| 项 | 值 |
+| -- | -- |
+| 主模型环境变量 | `CONVERSATION_AGENT_LLM_MODEL` |
+| 回退模型 | `AGENT2_LLM_MODEL` |
+| temperature | 0.6 |
+| 最大工具轮次 | `MAX_TOOL_ROUNDS = 5` |
+| 调用方式 | OpenAI 兼容 `chat_completion_assistant_message` + `tools` |
+
+### 7.3 附图处理
+
+1. 前端传 `image_urls`（通常为 data URL）
+2. `_preanalyze_pending_images` 按序识图，`buyer_claim` 取自最近 4 条买家文字
+3. system 注入「本轮附图 N 张，已预分析」；user 消息追加 `[本轮买家已附图…]` 标注
+4. LLM 侧应用 `image_index`（从 1 起）解析附图，避免传超长 base64
+
+### 7.4 模拟数据补全
+
+`apply_simulated_order_context`：当 `data/intelligent_simulation.json` 启用且订单号命中时，自动补全 `order_amount`、`buyer_id`、`product_category_slug`、`platform_service_tags`；物流文案可走 `get_simulated_logistics_text`。
 
 ---
 
 ## 八、工具集
 
-### 8.1 工具清单
+### 8.1 Function Calling 清单
 
+| 工具 | 说明 | 备注 |
+| ---- | ---- | ---- |
+| `query_buyer_profile` | 买家画像 | 对话初期优先 |
+| `analyze_image_simple` | 视觉事实 | 附图预分析后勿重复；参数用 `image_index` |
+| `query_logistics` | 物流状态 | 需 `order_id` |
+| `match_rules_simple` | 规则边界 | 未传品类/服务标时从 context 回填 |
+| `evaluate_customer_value_simple` | 客户价值 | 让利决策参考 |
+| `detect_malicious_simple` | 恶意检测 | 有疑点再调；可读 `accumulated_facts` |
+| `search_similar_cases_simple` | 相似判例 | 参考 lesson/outcome |
+| `update_state` | 更新案件状态 | 实质性变化时；必填 `update_reason` |
 
-| 优先级     | 工具                               | 何时调       |
-| ------- | -------------------------------- | --------- |
-| 高（对话初期） | `query_buyer_profile`            | 知道和谁说话    |
-| 中（按需）   | `match_rules_simple`             | 需要规则边界    |
-| 中（按需）   | `query_logistics`                | 需要物流状态    |
-| 中（按需）   | `analyze_image_simple`           | 买家发了图片（system 注入 URL，LLM 主动调用） |
-| 低（特定场景） | `evaluate_customer_value_simple` | 不确定客户价值   |
-| 低（特定场景） | `detect_malicious_simple`        | 怀疑恶意行为    |
-| 低（特定场景） | `search_similar_cases_simple`    | 需要参考案例    |
-| 低（按需）   | `analyze_sentiment`              | 需要情绪分析    |
-| 按需      | `update_state`                   | 局势变化时更新状态 |
-
+**未接入**：`analyze_sentiment`（情绪由对话与 `detect_malicious_simple` 覆盖，无独立工具）。
 
 ### 8.2 xxx_simple 入口
 
-在现有工具文件中新增轻量入口，不改原有函数：
+| 文件 | 函数 | 说明 |
+| ---- | ---- | ---- |
+| `agent1_tools.py` | `analyze_image_simple(image_url, buyer_claim)` | `guidance` 锚定买家诉求 |
+| `rule_matcher.py` | `match_rules_simple(description, service_tags, category_slug)` | 内部最小 FactOutput |
+| `agent2_tools.py` | `evaluate_customer_value_simple(...)` | 客户价值 |
+| `agent2_tools.py` | `detect_malicious_simple(..., facts=...)` | 恶意检测，可带轮内累积事实 |
+| `agent2_tools.py` | `search_similar_cases_simple(description, top_k)` | 透传判例检索 |
 
-
-| 文件                | 新增函数                                                                  | 说明                           |
-| ----------------- | --------------------------------------------------------------------- | ---------------------------- |
-| `rule_matcher.py` | `match_rules_simple(description, service_tags, category_slug)`        | 内部构建最小 FactOutput            |
-| `agent2_tools.py` | `evaluate_customer_value_simple(buyer_id, merchant_id, order_amount)` | 内部构建 CustomerValueInput      |
-| `agent2_tools.py` | `detect_malicious_simple(chat_history, buyer_id)`                     | 内部构建 MaliciousDetectionInput |
-| `agent2_tools.py` | `search_similar_cases_simple(description, top_k)`                     | 透传                           |
-| `agent1_tools.py` | `analyze_image_simple(image_url, buyer_claim)`                        | guidance 用 buyer_claim       |
-
-
-不需要 simple 的（原接口已够简单）：`query_buyer_profile`、`analyze_sentiment`、`query_logistics`。
+原接口已够简单、直接复用：`query_buyer_profile`、`query_logistics`。
 
 ---
 
-## 九、人工接管阈值
+## 九、转人工
 
-### 9.1 自动转人工
+### 9.1 检查时机
 
-- 订单总金额超过商家配置阈值
-- 高价值老客 VIP 通道触发
-- 买家明确要求转人工
-- 买家投诉/举报
-- 人身安全类问题
+每轮 `chat()` 开头调用 `check_handoff_threshold`（在 LLM 之前）。
 
-### 9.2 建议转人工
+### 9.2 强制转人工（`handoff=true`）
 
-- 对话多轮无进展（Agent 无法推进）
-- 恶意行为风险高且证据不足
-- 买家情绪持续恶化
+| 条件 | 默认阈值 |
+| ---- | -------- |
+| 买家消息含转人工/投诉/法律途径关键词 | `HANDOFF_KEYWORDS` |
+| 订单金额 | `≥ DEFAULT_AMOUNT_THRESHOLD`（500 元） |
+| 高风险且买家类型为 suspicious/malicious | `risk_level=high` |
 
-### 9.3 接管交接
+强制转人工时：`reply_text` 为空，写入 `handoff_summary`，`phase` 置为 `handoff`。
 
-转人工时生成**交接摘要**，从 IntelligentState 直接读取：
+### 9.3 建议转人工（`handoff_suggested=true`）
 
-- 当前阶段、策略方向、责任归属判断
-- 已收集证据、缺失证据
-- 关键决策历史
-- 风险信号
+| 条件 | 行为 |
+| ---- | ---- |
+| `round_count ≥ DEFAULT_HANDOFF_ROUNDS`（6）且未 `dismiss_round_handoff` | 仍返回正常 `reply_text`，前端展示「建议接管」 |
 
----
+用户选择继续：`dismiss_round_handoff=true` 下次请求，跳过轮次建议。
 
-## 十、通信方式
+### 9.4 商家主动接管
 
-- **MVP**：`POST /intelligent/message` — HTTP REST，后端开放接口，不限消息来源
-- **后续**：WebSocket 双向通信（实时推送、人工接管通知）
+`POST /intelligent/takeover`：加载状态 → `phase=handoff` → 返回 `build_handoff_summary` 文本。
+
+交接摘要含：阶段、责任、策略、证据、关键决策、最近工具事实、最近更新原因。
 
 ---
 
-## 十一、文件清单
+## 十、API
 
+基路径：`/api`（经前端代理）。
 
-| 文件                                                           | 操作  | 说明                                 |
-| ------------------------------------------------------------ | --- | ---------------------------------- |
-| `docs/modules/intelligent-mode.md`                           | 新建  | 本文档                                |
-| `backend/agents/conversation_agent/__init__.py`              | 新建  | 对话 Agent 入口                        |
-| `backend/agents/conversation_agent/context.py`               | 新建  | IntelligentContext                 |
-| `backend/agents/conversation_agent/prompts/system_prompt.md` | 新建  | System Prompt                      |
-| `backend/controllers/intelligent_controller.py`              | 新建  | 智能模式控制器                            |
-| `backend/routers/intelligent.py`                             | 新建  | API 路由                             |
-| `backend/tools/rule_matcher.py`                              | 修改  | 新增 match_rules_simple              |
-| `backend/tools/agent2_tools.py`                              | 修改  | 新增 xxx_simple                      |
-| `backend/tools/agent1_tools.py`                              | 修改  | 新增 analyze_image_simple            |
-| `backend/db/models.py`                                       | 修改  | MerchantConfig 新增 max_compensation |
-| `backend/routers/__init__.py`                                | 修改  | 追加 intelligent_router              |
-| `backend/main.py`                                            | 修改  | 追加路由注册                             |
-| `schemas.py`                                                 | 修改  | 新增智能模式数据结构                         |
-| `frontend/src/views/IntelligentView.vue`                     | 新建  | 前端页面                               |
-| `tests/test_intelligent_mode.py`                             | 新建  | 端到端测试                              |
-| `data/case_studies/`                                         | 新建  | 案例库目录                              |
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| POST | `/intelligent/message` | 主对话入口，返回 `AgentReply` |
+| POST | `/intelligent/takeover` | 商家接管 + 交接摘要 |
+| GET | `/intelligent/status/{dispute_id}` | 查询 Redis 中的 `IntelligentState` |
+| GET | `/intelligent/simulation` | 读取模拟配置 |
+| PUT | `/intelligent/simulation` | 保存模拟配置 |
 
+### AgentReply 字段
 
+| 字段 | 说明 |
+| ---- | ---- |
+| `reply_text` | 面向买家的回复（强制转人工时为空） |
+| `state` | 最新 `IntelligentState` |
+| `state_updated` | 本轮是否发生状态变更 |
+| `handoff` | 是否强制转人工 |
+| `handoff_suggested` | 是否建议转人工（可继续对话） |
+| `handoff_reason` | 原因文案 |
+| `handoff_summary` | 强制转人工时的交接摘要 |
+| `tools_called` | 本轮工具名列表 |
+
+### IntelligentMessageRequest 主要字段
+
+`dispute_id`、`buyer_message`、`order_id`、`order_amount`、`buyer_id`、`merchant_id`、`product_category_slug`、`platform_service_tags`、`max_compensation`、`chat_history`、`round_count`、`image_urls`、`dismiss_round_handoff`。
+
+---
+
+## 十一、前端
+
+- **页面**：`IntelligentView.vue` — 左栏对话，右栏纠纷参数、案件状态、模拟配置
+- **状态**：`useIntelligent.js` 模块级 ref，切路由保留会话
+- **发送**：买家消息 + 可选附图（data URL）；`build_chat_history()` 排除当前条
+- **回复展示**：`split_reply_to_chunks` 按句号/问号拆多气泡
+- **接管**：转人工后 `is_input_locked`，仅可重置或查看摘要
+- **轮次**：本地 `round_count`，每收到非 handoff 回复 +1
+
+---
+
+## 十二、话术与人格
+
+人格、基调、禁止清单、阶段导航、工具指南以 **`backend/agents/conversation_agent/prompts/system_prompt.md`** 为运行时真源；本文档不重复全文。
+
+设计要点：
+
+- 身份：有经验的年轻店主（或助理）；温和、耐心、有担当
+- 基调：耐心、积极、温和
+- 禁止人机套话（「非常抱歉给您带来不便」「这边建议您」等）
+- 复杂话分多句；商责主动担责；恶意时冷静留痕
+
+---
+
+## 十三、测试
+
+- **单测/契约**：`tests/test_intelligent_mode.py` — 转人工阈值、`update_state`、`record_tool_finding`、工具执行、附图预分析、控制器入口
+- **本地联调**：编辑 `data/intelligent_simulation.json` 或前端「模拟配置」面板；`enabled=true` 时按订单号/买家 ID 注入数据
+- **Redis**：测试环境可设 `ENABLE_REDIS_CACHE=0`，状态不落库
+
+---
+
+## 十四、与辅助模式对比
+
+| 维度 | 辅助模式 | 智能模式 |
+| ---- | -------- | -------- |
+| 触发 | 商家点击「AI 分析」 | 买家每发一条消息自动处理 |
+| 链路 | Agent1→2→3 一次出报告 | conversation_agent 多轮对话 |
+| 状态 | Redis 材料/事实/报告三层缓存 | `intel_state` 案件状态 |
+| 输出 | `AnalysisReport`（事实+策略+话术选项） | `AgentReply`（回复正文+状态） |
+| 通信 | HTTP `/analyze`（可选 SSE 流式） | HTTP `/intelligent/message` |
+| 商家角色 | 选手话术、自行发送 | 旁观或「接管」 |
+
+---
+
+## 十五、后续规划
+
+- **WebSocket**：`Architecture.md` / `Backend_api.md` 中预留；当前 MVP 为 HTTP 拉取式，每轮由前端 POST
+- **商家配置接入**：转人工金额阈值、轮次上限等现为 `intelligent_tools.py` 常量，可迁至商家配置表
+- **情绪 Agent**：Agent4 未接入智能模式主链路

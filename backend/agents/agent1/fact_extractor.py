@@ -48,9 +48,11 @@ def _merge_credential_trust_from_visions(vision_results: list[dict[str, Any]]) -
     多图合并举证可信度：任一 suspect 则 suspect；全部 trusted 则 trusted；否则 unknown。
 
     仅依据视觉模型结构化字段，不再由下游关键词复判。
+    说明：suspect 时优先汇总可疑图的说明，避免首张正常图说明覆盖后续网图线索。
     """
     trusts: list[str] = []
-    notes: list[str] = []
+    trusted_notes: list[str] = []
+    suspect_notes: list[str] = []
     for item in vision_results:
         if item.get("error"):
             continue
@@ -58,13 +60,64 @@ def _merge_credential_trust_from_visions(vision_results: list[dict[str, Any]]) -
         if isinstance(trust, str) and trust in VALID_CREDENTIAL_TRUST:
             trusts.append(trust)
         note = str(item.get("credential_trust_note") or "").strip()
-        if note:
-            notes.append(note)
+        if not note:
+            continue
+        if trust == CREDENTIAL_TRUST_SUSPECT:
+            suspect_notes.append(note)
+        else:
+            trusted_notes.append(note)
     if any(t == CREDENTIAL_TRUST_SUSPECT for t in trusts):
-        return CREDENTIAL_TRUST_SUSPECT, notes[0] if notes else None
+        merged_note = "；".join(dict.fromkeys(suspect_notes)) if suspect_notes else None
+        return CREDENTIAL_TRUST_SUSPECT, merged_note
     if trusts and all(t == CREDENTIAL_TRUST_TRUSTED for t in trusts):
-        return CREDENTIAL_TRUST_TRUSTED, notes[0] if notes else None
+        merged_note = "；".join(dict.fromkeys(trusted_notes)) if trusted_notes else None
+        return CREDENTIAL_TRUST_TRUSTED, merged_note
     return CREDENTIAL_TRUST_UNKNOWN, None
+
+
+def _is_meaningful_defect_type(defect_type: Any) -> bool:
+    """判断瑕疵类型是否为可采纳的有效值（排除「无瑕疵」等占位）。"""
+    text = str(defect_type or "").strip()
+    return bool(text) and text not in {"无", "暂无", "无瑕疵", "无质量问题", "无明显瑕疵", "没有瑕疵"}
+
+
+def _build_per_image_vision_summary(image_index: int, image_result: dict[str, Any]) -> dict[str, Any]:
+    """
+    单图视觉结论摘要，写入 attributes.image_vision_summaries 供下游按图取样。
+
+    参数:
+        image_index: 从 1 开始的图序号。
+        image_result: analyze_image 返回结构。
+
+    返回:
+        含 index、visual_description、defect_type、credential_trust 等键的字典。
+    """
+    summary: dict[str, Any] = {"index": image_index}
+    if image_result.get("error"):
+        summary["error"] = str(image_result["error"])
+        return summary
+    for key in (
+        "visual_description",
+        "defect_type",
+        "defect_location",
+        "credential_trust",
+        "credential_trust_note",
+        "visual_defect_severity",
+    ):
+        value = image_result.get(key)
+        if value is not None and str(value).strip():
+            summary[key] = value
+    findings = image_result.get("findings")
+    if isinstance(findings, list):
+        cleaned = [str(item).strip() for item in findings if str(item).strip()]
+        if cleaned:
+            summary["findings"] = cleaned
+    red_flags = image_result.get("visual_red_flags")
+    if isinstance(red_flags, list):
+        cleaned = [str(item).strip() for item in red_flags if str(item).strip()]
+        if cleaned:
+            summary["visual_red_flags"] = cleaned
+    return summary
 
 
 def _merge_visual_defect_severity(current: str | None, new: str | None) -> str | None:
@@ -575,6 +628,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
 
     visual_observations: list[str] = []
     attributes: dict[str, Any] = {}
+    image_vision_summaries: list[dict[str, Any]] = []
     defect_type = None
     defect_location = None
     defect_edge = None
@@ -599,8 +653,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
             }
         )
 
-    for image_url, image_result in zip(image_cap, vision_results):
+    for image_index, (image_url, image_result) in enumerate(zip(image_cap, vision_results), start=1):
         evidence_items.append({"type": "image", "url": image_url})
+        image_vision_summaries.append(_build_per_image_vision_summary(image_index, image_result))
         if image_result.get("error"):
             error_text = str(image_result["error"])
             uncertainty_reasons.append(error_text)
@@ -620,8 +675,15 @@ def extract(materials: dict[str, Any]) -> FactOutput:
                 if key_text and value is not None and key_text not in attributes:
                     attributes[key_text] = value
 
-        if defect_type is None:
-            defect_type = image_result.get("defect_type")
+        candidate_defect = image_result.get("defect_type")
+        if _is_meaningful_defect_type(candidate_defect):
+            if defect_type is None:
+                defect_type = candidate_defect
+            elif str(candidate_defect).strip() != str(defect_type).strip():
+                _extend_unique(
+                    visual_observations,
+                    [f"图{image_index}另见瑕疵：{str(candidate_defect).strip()}"],
+                )
         if defect_location is None:
             defect_location = image_result.get("defect_location")
         if defect_edge is None:
@@ -646,6 +708,9 @@ def extract(materials: dict[str, Any]) -> FactOutput:
             candidate_slug = image_result.get("category_slug")
             if isinstance(candidate_slug, str) and candidate_slug.strip():
                 visual_category_slug = validate_category_slug(candidate_slug)
+
+    if image_vision_summaries:
+        attributes["image_vision_summaries"] = image_vision_summaries
 
     if logistics_info and goods_received is False and logistics_info.is_signed:
         red_flags.append("买家称未收到货，但物流显示已签收")

@@ -18,8 +18,8 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         // ---------- 与前端 analyze 长超时一致，避免 dev 代理先于后端返回断开 ----------
-        timeout: 180000,
-        proxyTimeout: 180000
+        timeout: 600000,
+        proxyTimeout: 600000
       }
     }
   }

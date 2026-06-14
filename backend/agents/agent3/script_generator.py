@@ -35,6 +35,7 @@ from schemas import (
 )
 
 from backend.tools.agent3_tools import generate_buyer_script
+from backend.tools.text_signals import pick_balanced_visual_observations
 
 
 logger = logging.getLogger(__name__)
@@ -241,12 +242,10 @@ def _build_script_payload(
     }
     if facts.evidence_quality:
         payload["evidence_quality"] = facts.evidence_quality
-    # 视觉观察供话术与 Agent1 结论对齐，避免对外复述或矛盾描述
-    visual_observations = [
-        str(item).strip() for item in (facts.visual_observations or []) if str(item).strip()
-    ]
+    # 视觉观察供话术与 Agent1 结论对齐；多图时轮询每图至少一条，避免只剩首图
+    visual_observations = pick_balanced_visual_observations(facts, max_items=5)
     if visual_observations:
-        payload["visual_observations"] = visual_observations[:5]
+        payload["visual_observations"] = visual_observations
     missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
     if missing:
         payload["missing_evidence"] = missing[:3]
