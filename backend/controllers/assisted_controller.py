@@ -10,9 +10,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from backend.agents.agent1 import extract
 from backend.agents.agent2 import recommend
 from backend.agents.agent3 import generate
+from backend.pipeline.dispute_batch import (
+    extract_chat_bundle,
+    fetch_buyer_profile_and_cases,
+    run_agent1_extract,
+    run_agent2_tool_batch,
+)
 from backend.cache import (
     clear_all_cache,
     clear_dispute_cache,
@@ -22,19 +27,9 @@ from backend.cache import (
     save_facts,
     save_report,
 )
-from backend.cache.helpers import as_list
-from backend.tools.agent2_tools import (
-    detect_malicious_behavior,
-    needs_rule_match,
-    query_buyer_profile,
-    run_customer_value_analysis,
-    search_similar_cases,
-)
-from backend.tools.rule_matcher import match_rules_from_facts
 from schemas import (
     AnalysisReport,
     ChatTurn,
-    MaliciousDetectionInput,
     MatchedRule,
     RuleBrief,
     RuleMatchResult,
@@ -46,45 +41,6 @@ from schemas import (
 ASSISTED_LOG_PREFIX = "[AssistedController]"
 logger = logging.getLogger(__name__)
 EventEmitter = Callable[[str, dict[str, Any]], None]
-
-
-# ---------- 聊天材料：一次遍历产出判例描述、纯文本列表与 ChatTurn ----------
-def _extract_chat_bundle(
-    merged_materials: dict[str, Any],
-) -> tuple[str, list[str], list[ChatTurn]]:
-    """
-    从合并材料抽取 chat 相关三份输出，避免对 chat_history 重复遍历。
-
-    返回:
-        dispute_desc: buyer_text + 各轮 content，空格拼接
-        chat_history_texts: 仅 content，供 Agent2
-        chat_turns: 带 role 的轮次，供 Agent3
-    """
-    desc_parts: list[str] = []
-    buyer_text = merged_materials.get("buyer_text")
-    if isinstance(buyer_text, str) and buyer_text.strip():
-        desc_parts.append(buyer_text.strip())
-
-    chat_history_texts: list[str] = []
-    chat_turns: list[ChatTurn] = []
-    for message in as_list(merged_materials.get("chat_history")):
-        if isinstance(message, dict):
-            role = str(message.get("role") or "buyer").strip().lower()
-            if role not in {"buyer", "merchant"}:
-                role = "buyer"
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
-                text = content.strip()
-                desc_parts.append(text)
-                chat_history_texts.append(text)
-                chat_turns.append(ChatTurn(role=role, content=text))
-        elif isinstance(message, str) and message.strip():
-            text = message.strip()
-            desc_parts.append(text)
-            chat_history_texts.append(text)
-            chat_turns.append(ChatTurn(role="buyer", content=text))
-
-    return " ".join(desc_parts), chat_history_texts, chat_turns
 
 
 # ---------- 金额等标量：容错转换，避免策略/话术链路因脏数据中断 ----------
@@ -281,7 +237,7 @@ def run_with_events(
         )
         return cached_report
 
-    dispute_desc, chat_history_texts, chat_turns = _extract_chat_bundle(merged_materials)
+    dispute_desc, chat_history_texts, chat_turns = extract_chat_bundle(merged_materials)
     buyer_id, merchant_id, dispute_desc = _collect_agent2_tool_inputs(
         merged_materials,
         dispute_desc=dispute_desc,
@@ -303,27 +259,22 @@ def run_with_events(
         if facts_from_cache is not None:
             facts = facts_from_cache
             logger.info("%s Agent1 跳过（B 层命中）：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_profile = executor.submit(
-                    query_buyer_profile,
-                    buyer_id=buyer_id,
-                    merchant_id=merchant_id,
-                )
-                future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
-                buyer_profile = future_profile.result()
-                similar_cases = future_cases.result()
+            buyer_profile, similar_cases = fetch_buyer_profile_and_cases(
+                buyer_id=buyer_id,
+                merchant_id=merchant_id,
+                dispute_desc=dispute_desc,
+            )
         else:
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_facts = executor.submit(extract, materials=merged_materials)
-                future_profile = executor.submit(
-                    query_buyer_profile,
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_facts = executor.submit(run_agent1_extract, merged_materials)
+                future_side = executor.submit(
+                    fetch_buyer_profile_and_cases,
                     buyer_id=buyer_id,
                     merchant_id=merchant_id,
+                    dispute_desc=dispute_desc,
                 )
-                future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=3)
                 facts = future_facts.result()
-                buyer_profile = future_profile.result()
-                similar_cases = future_cases.result()
+                buyer_profile, similar_cases = future_side.result()
             save_facts(normalized_dispute_id, merged_materials, facts)
 
         agent1_elapsed = _elapsed_ms(agent1_start)
@@ -366,42 +317,21 @@ def run_with_events(
     )
     tools_start = time.perf_counter()
     try:
-        partial_strategy_input = StrategyInput(
+        customer_value, malicious_detection, rule_result, rule_match_skipped = run_agent2_tool_batch(
             facts=facts,
             buyer_profile=buyer_profile,
-            matched_rules=[],
-            rule_briefs=[],
             similar_cases=similar_cases,
             order_amount=order_amount,
-            chat_history=chat_history_texts,
+            chat_history_texts=chat_history_texts,
             chat_turns=chat_turns,
-            emotion_note=emotion_note,
+            emotion_note=emotion_note if isinstance(emotion_note, str) else None,
         )
-        malicious_input = MaliciousDetectionInput(
-            buyer_profile=buyer_profile,
-            facts=facts,
-            order_amount=order_amount,
-            chat_history=chat_history_texts,
-            emotion_note=emotion_note,
-        )
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_value = executor.submit(run_customer_value_analysis, partial_strategy_input)
-            future_malicious = executor.submit(detect_malicious_behavior, malicious_input)
-            customer_value = future_value.result()
-            malicious_detection = future_malicious.result()
-
-        if needs_rule_match(facts, malicious_detection, customer_value):
-            rule_result = match_rules_from_facts(facts)
-            rule_match_skipped = False
-        else:
+        if rule_match_skipped:
             logger.info(
                 "%s 简单案跳过规则匹配 dispute_id=%s",
                 ASSISTED_LOG_PREFIX,
                 normalized_dispute_id,
             )
-            rule_result = RuleMatchResult()
-            rule_match_skipped = True
 
         matched_rules = rule_result.display_rules
         rule_briefs = rule_result.rule_briefs

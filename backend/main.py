@@ -35,7 +35,7 @@ def _configure_backend_logging() -> None:
 _configure_backend_logging()
 
 from backend.db import init_db
-from backend.routers import analyze_router, buyers_router, intelligent_router, merchants_router
+from backend.routers import analyze_router, buyers_router, merchants_router
 
 # 将项目根目录加入模块搜索路径，保证 schemas.py 可直接导入
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,7 +83,6 @@ async def exception_middleware(request: Request, call_next):
 
 # ---------- 路由注册：阶段四 API 端点 ----------
 app.include_router(analyze_router)
-app.include_router(intelligent_router)
 app.include_router(merchants_router)
 app.include_router(buyers_router)
 

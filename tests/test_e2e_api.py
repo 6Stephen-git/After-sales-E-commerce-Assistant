@@ -161,15 +161,15 @@ def test_e2e_merchant_config_should_support_switch_and_validate_mode(backend_ser
 
         update_response = client.put(
             f"/merchants/{merchant_id}/config",
-            json={"mode": "intelligent", "auto_threshold": 0.66},
+            json={"mode": "assisted", "auto_threshold": 0.66},
         )
         assert update_response.status_code == 200
-        assert update_response.json()["mode"] == "intelligent"
+        assert update_response.json()["mode"] == "assisted"
 
         verify_response = client.get(f"/merchants/{merchant_id}/config")
         assert verify_response.status_code == 200
         verify_payload = verify_response.json()
-        assert verify_payload["mode"] == "intelligent"
+        assert verify_payload["mode"] == "assisted"
         assert verify_payload["auto_threshold"] == 0.66
 
         invalid_response = client.put(

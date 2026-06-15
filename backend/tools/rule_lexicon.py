@@ -494,8 +494,65 @@ def resolve_category_slug(
     )
     slug, confidence = infer_category_slug_llm(blob, materials)
     if slug:
-        return slug, confidence, "llm"
+        slug, confidence = disambiguate_inferred_category_slug(
+            slug,
+            confidence,
+            materials,
+            text_context,
+            issue_summary=issue_summary,
+        )
+        if slug:
+            return slug, confidence, "llm"
     return None, 0.0, "none"
+
+
+def disambiguate_inferred_category_slug(
+    slug: str | None,
+    confidence: float,
+    materials: dict[str, Any],
+    text_context: str,
+    *,
+    issue_summary: str | None = None,
+) -> tuple[str | None, float]:
+    """
+    校验 LLM 推断的品类 slug 是否与买家实际主张一致，避免成色争议误绑类目规范。
+
+    典型纠偏：买家质疑「有人使用过/有痕迹」但并未购买二手 listing 时，不得选 secondhand。
+    """
+    normalized = str(slug or "").strip()
+    if not normalized:
+        return None, 0.0
+
+    if normalized != "secondhand":
+        return normalized, confidence
+
+    api_slug = infer_category_slug_from_materials(materials)
+    if api_slug == "secondhand":
+        return normalized, confidence
+
+    blob = " ".join(
+        part
+        for part in (
+            str(text_context or "").strip(),
+            str(issue_summary or "").strip(),
+            str(materials.get("product_name") or "").strip(),
+            str(materials.get("category") or "").strip(),
+        )
+        if part
+    )
+    listing_signals = ("二手", "闲鱼", "翻新", "官翻", "中古", "成色", "99新", "95新", "9成新")
+    if any(signal in blob for signal in listing_signals):
+        return normalized, confidence
+
+    condition_signals = ("有人使用", "使用过", "像二手", "二手感", "不是全新", "使用痕迹", "用过")
+    if any(signal in blob for signal in condition_signals):
+        logger.info(
+            "%s 品类 slug=secondhand 与买家主张不一致（成色争议非二手类目），已剔除",
+            LOG_PREFIX,
+        )
+        return None, 0.0
+
+    return normalized, confidence
 
 
 def format_category_slug_catalog_lines() -> str:

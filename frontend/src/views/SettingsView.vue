@@ -17,7 +17,6 @@
       <el-form-item label="运行模式">
         <el-select v-model="mode" placeholder="请选择模式">
           <el-option label="辅助模式（assisted）" value="assisted" />
-          <el-option label="智能模式（intelligent）" value="intelligent" />
         </el-select>
       </el-form-item>
 

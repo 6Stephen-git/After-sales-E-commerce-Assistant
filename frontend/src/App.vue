@@ -5,7 +5,6 @@
         <span class="app-title">商家应诉助手</span>
         <el-menu :default-active="active_menu" mode="horizontal" class="app-menu" @select="handle_menu_select">
           <el-menu-item index="/dispute">辅助模式</el-menu-item>
-          <el-menu-item index="/intelligent">智能模式</el-menu-item>
           <el-menu-item index="/settings">设置页</el-menu-item>
         </el-menu>
       </el-header>
@@ -27,7 +26,6 @@ const router = useRouter()
 // ---------- 菜单状态：根据当前路径高亮顶部导航 ----------
 const active_menu = computed(() => {
   if (route.path === '/settings') return '/settings'
-  if (route.path === '/intelligent') return '/intelligent'
   return '/dispute'
 })
 

@@ -117,58 +117,6 @@ export async function analyzeDisputeStream(payload, handlers = {}) {
   }
 }
 
-// ---------- 智能模式：发送买家消息，返回 Agent 回复 ----------
-export async function sendIntelligentMessage(payload) {
-  try {
-    const response = await httpClient.post('/intelligent/message', payload, {
-      timeout: ANALYZE_HTTP_TIMEOUT_MS
-    })
-    return response.data
-  } catch (error) {
-    throw new Error(`智能模式请求失败：${error.message}`)
-  }
-}
-
-// ---------- 智能模式：商家接管 ----------
-export async function intelligentTakeover(dispute_id) {
-  try {
-    const response = await httpClient.post('/intelligent/takeover', { dispute_id })
-    return response.data
-  } catch (error) {
-    throw new Error(`接管请求失败：${error.message}`)
-  }
-}
-
-// ---------- 智能模式：查询案件状态 ----------
-export async function fetchIntelligentStatus(dispute_id) {
-  try {
-    const response = httpClient.get(`/intelligent/status/${dispute_id}`)
-    return (await response).data
-  } catch (error) {
-    throw new Error(`查询状态失败：${error.message}`)
-  }
-}
-
-// ---------- 智能模式：读取测试模拟配置 ----------
-export async function fetchIntelligentSimulation() {
-  try {
-    const response = await httpClient.get('/intelligent/simulation')
-    return response.data
-  } catch (error) {
-    throw new Error(`读取模拟配置失败：${error.message}`)
-  }
-}
-
-// ---------- 智能模式：保存测试模拟配置 ----------
-export async function saveIntelligentSimulation(payload) {
-  try {
-    const response = await httpClient.put('/intelligent/simulation', payload)
-    return response.data
-  } catch (error) {
-    throw new Error(`保存模拟配置失败：${error.message}`)
-  }
-}
-
 // ---------- 配置查询：获取默认商家模式和自动化阈值 ----------
 export async function fetchMerchantConfig() {
   try {

@@ -80,17 +80,17 @@ def test_merchant_config_should_support_get_and_put(api_client):
 
     update_response = api_client.put(
         f"/merchants/{merchant_id}/config",
-        json={"mode": "intelligent", "auto_threshold": 0.65},
+        json={"mode": "assisted", "auto_threshold": 0.65},
     )
     assert update_response.status_code == 200
     update_payload = update_response.json()
-    assert update_payload["mode"] == "intelligent"
+    assert update_payload["mode"] == "assisted"
     assert update_payload["auto_threshold"] == 0.65
 
     verify_response = api_client.get(f"/merchants/{merchant_id}/config")
     assert verify_response.status_code == 200
     verify_payload = verify_response.json()
-    assert verify_payload["mode"] == "intelligent"
+    assert verify_payload["mode"] == "assisted"
     assert verify_payload["auto_threshold"] == 0.65
 
 

@@ -20,7 +20,7 @@ from backend.defaults import default_merchant_id
 API_LOG_PREFIX = "[API]"
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/merchants", tags=["merchants"])
-VALID_MODES = {"assisted", "intelligent"}
+VALID_MODES = {"assisted"}
 
 
 # ---------- 响应体模型：统一商家配置返回 ----------
@@ -40,7 +40,7 @@ class MerchantConfigUpdateRequest(BaseModel):
     商家配置更新请求结构。
     """
 
-    mode: str = Field(..., description="模式：assisted/intelligent")
+    mode: str = Field(..., description="模式：assisted")
     auto_threshold: float = Field(0.8, ge=0.0, le=1.0, description="自动化阈值 0~1")
 
 
@@ -111,7 +111,7 @@ def update_merchant_config(
     if not normalized_merchant_id:
         raise HTTPException(status_code=400, detail="merchant_id 不能为空")
     if request.mode not in VALID_MODES:
-        raise HTTPException(status_code=400, detail="mode 非法，必须为 assisted 或 intelligent")
+        raise HTTPException(status_code=400, detail="mode 非法，必须为 assisted")
 
     logger.info("%s 开始更新商家配置，merchant_id=%s", API_LOG_PREFIX, normalized_merchant_id)
     try:
