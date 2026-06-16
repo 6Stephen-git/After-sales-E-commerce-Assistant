@@ -1,0 +1,31 @@
+# 功能验证一期：恶意抗辩轴（MA）
+version: 1
+leaf_count: 2
+axis_counts:
+  malicious: 2
+
+axes:
+  - id: malicious
+    label: 恶意抗辩
+    prefix: MA
+    dir: functional/phase1/malicious
+    leaves:
+      - case_id: MA-01_review_blackmail
+        status: existing
+        path: eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md
+        leaf: 差评+12315要挟 + 举证已齐 + 坚持仅退款
+        target_ability: 识别语义勒索并在证据闭环后抗辩/协商，守住全额仅退边界
+        factors: 差评要挟, 12315施压, 举证已齐, 仅退款诉求
+        category_hint: 服饰-T恤
+        service_tag_hint: 破损包退
+        notes: 一期 MA 单轴；无判例、老客价值中性
+
+      - case_id: MA-02_abuse_refund_only
+        status: existing
+        path: eval/content/scenarios/functional/phase1/malicious/MA-02_abuse_refund_only.md
+        leaf: 高仅退画像 + 硬规则滥用仅退款信号
+        target_ability: 硬规则命中 abuse_refund_only 且举证已齐时守住仅退边界
+        factors: 高仅退率, 硬规则, 举证已齐, 仅退款诉求
+        category_hint: 家装灯饰光源
+        service_tag_hint: 破损包赔
+        notes: malicious_context 注入 recent_refund_only_count；无判例

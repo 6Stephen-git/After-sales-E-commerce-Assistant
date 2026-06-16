@@ -1,4 +1,5 @@
-# 评测树：20 叶，MA:MF:NG = 1:1:2（5/5/10）
+# 评测树（legacy）：20 叶，MA:MF:NG = 1:1:2（5/5/10）
+# 已归档至 pilot/legacy/；默认功能验证请用 eval_tree_ma/val/prec/rule_evidence.yaml
 # 服务标须为 rule_match_lexicon E 通道已有键（短名），见 eval/pipeline/eval_tree.list_lexicon_service_tags()
 version: 1
 
@@ -6,7 +7,7 @@ axes:
   - id: negotiation
     label: 妥善协商
     prefix: NG
-    dir: pilot/negotiation
+    dir: pilot/legacy/negotiation
     leaves:
       - case_id: NG-01_rule_boundary_negotiate
         status: new
@@ -20,7 +21,7 @@ axes:
 
       - case_id: NG-02_evidence_compensation
         status: existing
-        path: eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md
+        path: eval/content/scenarios/pilot/legacy/negotiation/NG-02_evidence_compensation.md
         leaf: 证据不足 + 口述与图片矛盾
         target_ability: 在证据链不完整时控制全额退款承诺边界
         factors: 证据不足, 口述矛盾, 赔偿上限
@@ -29,7 +30,7 @@ axes:
 
       - case_id: NG-03_seven_day_return_fit
         status: existing
-        path: eval/content/scenarios/pilot/negotiation/NG-03_seven_day_return_fit.md
+        path: eval/content/scenarios/pilot/legacy/negotiation/NG-03_seven_day_return_fit.md
         leaf: 七天无理由 + 商品完好争议
         target_ability: 判断商品完好状态并控制退货边界
         factors: 七天无理由, 吊牌剪断, 二次销售
@@ -38,7 +39,7 @@ axes:
 
       - case_id: NG-04_timeout_customer_value
         status: existing
-        path: eval/content/scenarios/pilot/negotiation/NG-04_timeout_customer_value.md
+        path: eval/content/scenarios/pilot/legacy/negotiation/NG-04_timeout_customer_value.md
         leaf: 超时效 + 老客价值权衡
         target_ability: 在超时效与弱证据下结合客户价值协商补偿边界
         factors: 签收时效, 老客价值, 证据偏弱
@@ -92,13 +93,13 @@ axes:
 
       - case_id: NG-20_evidence_arc_partial
         status: existing
-        path: eval/content/scenarios/pilot/negotiation/NG-20_evidence_arc_partial.md
+        path: eval/content/scenarios/pilot/legacy/negotiation/NG-20_evidence_arc_partial.md
         leaf: 多步快照·补证后部分补偿协商
         target_ability: 证据闭环后在赔偿上限与老客价值内给出部分补偿而非继续补证
         factors: 多步快照, 证据闭环, 赔偿上限, 老客价值
         category_hint: 水产肉类
         service_tag_hint: 坏单包退
-        notes: 跑批 fixture 见 pilot/fixtures/ng-20_evidence_arc_partial.fixture.json
+        notes: 多步快照案；三期 MS 实施时再定格式
 
       - case_id: NG-10_channel_threshold_edge
         status: new
@@ -112,11 +113,11 @@ axes:
   - id: merchant_fault
     label: 商责善后
     prefix: MF
-    dir: pilot/merchant_fault
+    dir: pilot/legacy/merchant_fault
     leaves:
       - case_id: MF-01_logistics_damage_cap
         status: existing
-        path: eval/content/scenarios/pilot/merchant_fault/MF-01_logistics_damage_cap.md
+        path: eval/content/scenarios/pilot/legacy/merchant_fault/MF-01_logistics_damage_cap.md
         leaf: 物流破损 + 老客 + 赔偿 30% 上限
         target_ability: 识别物流责任并在赔偿上限内善后
         factors: 物流破损, 老客价值, 赔偿上限
@@ -125,7 +126,7 @@ axes:
 
       - case_id: MF-02_evidence_gap_cap
         status: existing
-        path: eval/content/scenarios/pilot/merchant_fault/MF-02_evidence_gap_cap.md
+        path: eval/content/scenarios/pilot/legacy/merchant_fault/MF-02_evidence_gap_cap.md
         leaf: 商责明确但举证缺口 + 赔偿边界
         target_ability: 确认商责同时因举证不全控制赔偿承诺
         factors: 破损包退, 举证缺口, 赔偿边界
@@ -161,22 +162,22 @@ axes:
 
       - case_id: MF-20_evidence_arc_remedy
         status: existing
-        path: eval/content/scenarios/pilot/merchant_fault/MF-20_evidence_arc_remedy.md
+        path: eval/content/scenarios/pilot/legacy/merchant_fault/MF-20_evidence_arc_remedy.md
         leaf: 多步快照·商责善后与退货流程
         target_ability: 证据齐后主动善后并推进退货验收，不因缺箱停在选择方案
         factors: 多步快照, 商责明确, 退货流程, 老客价值
         category_hint: 大家电
         service_tag_hint: 送货入户并安装
-        notes: 跑批 fixture 见 pilot/fixtures/mf-20_evidence_arc_remedy.fixture.json
+        notes: 多步快照案；三期 MS 实施时再定格式
 
   - id: malicious
     label: 恶意抗辩
     prefix: MA
-    dir: pilot/malicious
+    dir: pilot/legacy/malicious
     leaves:
       - case_id: MA-01_fake_evidence_refund_only
         status: existing
-        path: eval/content/scenarios/pilot/malicious/MA-01_fake_evidence_refund_only.md
+        path: eval/content/scenarios/pilot/legacy/malicious/MA-01_fake_evidence_refund_only.md
         leaf: 举证矛盾 + 高仅退款率
         target_ability: 识别证据矛盾与高仅退款风险
         factors: 证据矛盾, 高仅退款率, 举证缺口
@@ -185,7 +186,7 @@ axes:
 
       - case_id: MA-02_exaggerated_spoilage
         status: existing
-        path: eval/content/scenarios/pilot/malicious/MA-02_exaggerated_spoilage.md
+        path: eval/content/scenarios/pilot/legacy/malicious/MA-02_exaggerated_spoilage.md
         leaf: 夸大货损 + 视频/口述矛盾
         target_ability: 识别夸大索赔与证据不符
         factors: 夸大货损, 视频矛盾, 高频仅退

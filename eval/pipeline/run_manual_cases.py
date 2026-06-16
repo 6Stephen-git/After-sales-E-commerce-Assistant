@@ -45,6 +45,7 @@ from schemas import (
 import backend.agents.agent1 as agent1_module
 import backend.agents.agent1.fact_extractor as fact_extractor_module
 import backend.controllers.assisted_controller as assisted_controller_module
+import backend.pipeline.dispute_batch as dispute_batch_module
 import backend.tools.agent2_tools as agent2_tools_module
 from backend.controllers.assisted_controller import clear_cache, run
 
@@ -242,7 +243,7 @@ def _patch_case_tools(
     buyer_profile: BuyerProfile,
     similar_cases: list[SimilarCase],
 ) -> Iterator[None]:
-    """同步 patch agent2_tools 与 assisted_controller 已导入的工具引用。"""
+    """同步 patch agent2_tools 与 dispute_batch 已导入的工具引用。"""
 
     def _mock_query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
         _ = merchant_id
@@ -258,8 +259,8 @@ def _patch_case_tools(
     with (
         patch.object(agent2_tools_module, "query_buyer_profile", side_effect=_mock_query_buyer_profile),
         patch.object(agent2_tools_module, "search_similar_cases", side_effect=_mock_search_similar_cases),
-        patch.object(assisted_controller_module, "query_buyer_profile", side_effect=_mock_query_buyer_profile),
-        patch.object(assisted_controller_module, "search_similar_cases", side_effect=_mock_search_similar_cases),
+        patch.object(dispute_batch_module, "query_buyer_profile", side_effect=_mock_query_buyer_profile),
+        patch.object(dispute_batch_module, "search_similar_cases", side_effect=_mock_search_similar_cases),
     ):
         yield
 
@@ -353,6 +354,22 @@ def _finalize_fact_output(facts: FactOutput, materials: dict[str, Any]) -> FactO
     return attach_primary_dispute_frame(facts, materials)
 
 
+def _apply_decision_readiness(facts: FactOutput) -> FactOutput:
+    """覆盖/合并事实后，按 Agent1 同一规则重算可决策度。"""
+    from backend.agents.agent1.fact_extractor import _derive_decision_readiness
+
+    level, note = _derive_decision_readiness(
+        evidence_quality=facts.evidence_quality,
+        credential_trust=facts.credential_trust or "unknown",
+        missing_evidence=list(facts.missing_evidence or []),
+        visual_observations=list(facts.visual_observations or []),
+        red_flags=list(facts.red_flags or []),
+        defect_type=facts.defect_type,
+        visual_defect_severity=facts.visual_defect_severity,
+    )
+    return facts.model_copy(update={"decision_readiness": level, "decision_readiness_note": note})
+
+
 def _build_fact_output_with_overlay(
     materials: dict[str, Any],
     *,
@@ -382,7 +399,9 @@ def _build_fact_output_with_overlay(
                 overlay["rule_match_plan"] = base_facts.rule_match_plan.model_dump()
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s 无图 Agent1 规则导航提取失败，将仅使用覆盖字段：%s", RUNNER_LOG_PREFIX, exc)
-        return _finalize_fact_output(FactOutput.model_validate(overlay), materials)
+        return _apply_decision_readiness(
+            _finalize_fact_output(FactOutput.model_validate(overlay), materials)
+        )
 
     try:
         base_facts = original_extract(_strip_images_from_materials(materials))
@@ -391,7 +410,9 @@ def _build_fact_output_with_overlay(
         logger.warning("%s 无图 Agent1 文本提取失败，将仅使用覆盖字段：%s", RUNNER_LOG_PREFIX, exc)
         merged = {}
     merged.update(overlay)
-    return _finalize_fact_output(FactOutput.model_validate(merged), materials)
+    return _apply_decision_readiness(
+        _finalize_fact_output(FactOutput.model_validate(merged), materials)
+    )
 
 
 @contextmanager
@@ -435,14 +456,14 @@ def _patch_facts_override(
 
     fact_extractor_module.extract = _extract_stub
     agent1_module.extract = _extract_stub
-    assisted_controller_module.extract = _extract_stub
+    dispute_batch_module.extract = _extract_stub
 
     try:
         yield
     finally:
         fact_extractor_module.extract = original_extractor
         agent1_module.extract = original_extractor
-        assisted_controller_module.extract = original_extractor
+        dispute_batch_module.extract = original_extractor
 
 
 def _merge_malicious_detection_input(
@@ -547,7 +568,7 @@ def _patch_test_overrides(
         )
 
     original_detect_tools = agent2_tools_module.detect_malicious_behavior
-    original_detect_ctrl = assisted_controller_module.detect_malicious_behavior
+    original_detect_batch = dispute_batch_module.detect_malicious_behavior
 
     def _detect_wrapper(input_data: MaliciousDetectionInput) -> MaliciousDetectionOutput:
         return _detect_malicious_with_test_overrides(
@@ -557,13 +578,13 @@ def _patch_test_overrides(
         )
 
     agent2_tools_module.detect_malicious_behavior = _detect_wrapper
-    assisted_controller_module.detect_malicious_behavior = _detect_wrapper
+    dispute_batch_module.detect_malicious_behavior = _detect_wrapper
 
     try:
         yield
     finally:
         agent2_tools_module.detect_malicious_behavior = original_detect_tools
-        assisted_controller_module.detect_malicious_behavior = original_detect_ctrl
+        dispute_batch_module.detect_malicious_behavior = original_detect_batch
         for module_attr, previous in saved_module_attrs.items():
             setattr(agent2_tools_module, module_attr, previous)
 

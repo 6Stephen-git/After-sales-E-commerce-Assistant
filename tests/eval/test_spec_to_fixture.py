@@ -43,6 +43,22 @@ def test_fact_override_defaults_to_replace_mode() -> None:
     assert fo["compensation_ratio_cap"] == 0.15
 
 
+def test_evidence_facts_only_uses_replace_mode() -> None:
+    """仅有 evidence_facts、无 facts_override 时也应 replace，避免 Agent1 文本覆盖注入事实。"""
+    spec = _base_spec()
+    spec["facts_override"] = {}
+    case = fixture_from_spec_dict(spec)["cases"][0]
+    assert case["test_overrides"]["agent1_mode"] == "replace"
+
+
+def test_evidence_facts_empty_missing_evidence_list() -> None:
+    """举证已齐时 missing_evidence 应显式为空列表。"""
+    spec = _base_spec()
+    spec["evidence_facts"]["missing_evidence"] = []
+    fo = fixture_from_spec_dict(spec)["cases"][0]["facts_override"]
+    assert fo["missing_evidence"] == []
+
+
 def test_evidence_facts_maps_logistics_and_media() -> None:
     """事实证据栏应写入 facts_override 与 materials 物流字段。"""
     spec = _base_spec()

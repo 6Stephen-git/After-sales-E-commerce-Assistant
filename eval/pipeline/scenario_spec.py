@@ -9,12 +9,43 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class ExpectedReportBlock(BaseModel):
+    """
+    跑批后结构化硬断言期望（仅存在于 spec.json，不进 fixture）。
+
+    与 report.json 字段对照，由 assert_report 执行。
+    """
+
+    malicious_risk_level_in: list[str] = Field(default_factory=list)
+    malicious_risk_level_min: str = Field(default="", description="low/medium/high 下限")
+    triggered_signal_types_contains: list[str] = Field(default_factory=list)
+    triggered_signal_types_not_contains: list[str] = Field(default_factory=list)
+    customer_value_channel: str = Field(default="")
+    customer_value_channel_in: list[str] = Field(default_factory=list)
+    disposition_in: list[str] = Field(default_factory=list)
+    disposition_not: list[str] = Field(default_factory=list)
+    action_type: str = Field(default="")
+    action_type_in: list[str] = Field(default_factory=list)
+    action_type_not: list[str] = Field(default_factory=list)
+    strategy_stage_not: list[str] = Field(default_factory=list)
+    matched_rules_min: int | None = Field(default=None, ge=0)
+    similar_cases_min: int | None = Field(default=None, ge=0)
+    actionable_evidence_requests_contains: list[str] = Field(default_factory=list)
+    actionable_evidence_requests_max: int | None = Field(
+        default=None,
+        ge=0,
+        description="举证已齐案：0 表示禁止向买家索要泛化补证",
+    )
+    reasoning_contains_any: list[str] = Field(default_factory=list)
+
+
 class ExpectationBlock(BaseModel):
     """商家期望策略倾向与禁忌。"""
 
     intent_summary: str = Field(default="")
     acceptable_dispositions: list[str] = Field(default_factory=list)
     forbidden_outputs: list[str] = Field(default_factory=list)
+    expected_report: ExpectedReportBlock = Field(default_factory=ExpectedReportBlock)
 
 
 class HumanReviewBlock(BaseModel):
@@ -154,6 +185,11 @@ def normalize_spec_dict(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
 
     normalized = dict(payload)
+    expectation = normalized.get("expectation")
+    if isinstance(expectation, dict) and expectation.get("expected_report") is None:
+        exp = dict(expectation)
+        exp["expected_report"] = {}
+        normalized["expectation"] = exp
     taxonomy = normalized.get("taxonomy")
     if isinstance(taxonomy, dict):
         tax = dict(taxonomy)

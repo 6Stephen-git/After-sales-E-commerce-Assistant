@@ -13,6 +13,7 @@ from typing import Any
 
 from eval.pipeline.scenario_evidence import (
     enrich_materials_logistics,
+    evidence_facts_is_empty,
     evidence_facts_to_facts_override,
     normalize_evidence_quality,
 )
@@ -382,7 +383,12 @@ def _merge_test_overrides(spec: ScenarioSpec) -> dict[str, Any]:
         )
     elif preset not in VALID_VISUAL_PRESETS:
         overrides["visual_preset"] = "medium_evidence"
-    overrides.setdefault("agent1_mode", "replace" if spec.facts_override else "merge_text")
+    overrides.setdefault(
+        "agent1_mode",
+        "replace"
+        if not evidence_facts_is_empty(spec.evidence_facts) or bool(spec.facts_override)
+        else "merge_text",
+    )
     return overrides
 
 

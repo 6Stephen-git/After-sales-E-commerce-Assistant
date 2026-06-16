@@ -1,4 +1,4 @@
-# 第二批评测树：20 叶，NG/MF/MA = 8/7/5（与首批 pilot 并存，不覆盖）
+# 第二批评测树（legacy）：20 叶；情景已归档至 pilot/legacy/batch2/
 batch_id: batch2
 leaf_count: 20
 axis_counts:
@@ -11,7 +11,7 @@ axes:
   - id: negotiation
     label: 妥善协商
     prefix: NG
-    dir: pilot/batch2/negotiation
+    dir: pilot/legacy/batch2/negotiation
     leaves:
       - case_id: NG-11_thaw_scope_negotiate
         status: new
@@ -88,7 +88,7 @@ axes:
   - id: merchant_fault
     label: 商责善后
     prefix: MF
-    dir: pilot/batch2/merchant_fault
+    dir: pilot/legacy/batch2/merchant_fault
     leaves:
       - case_id: MF-06_sf_express_damage
         status: new
@@ -156,7 +156,7 @@ axes:
   - id: malicious
     label: 恶意抗辩
     prefix: MA
-    dir: pilot/batch2/malicious
+    dir: pilot/legacy/batch2/malicious
     leaves:
       - case_id: MA-06_intentional_thaw_claim
         status: new

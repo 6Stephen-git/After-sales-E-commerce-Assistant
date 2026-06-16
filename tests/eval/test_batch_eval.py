@@ -180,9 +180,11 @@ def test_write_batch_summary_includes_axis_and_errors(tmp_path: Path):
     path = write_batch_summary(
         run_dir=tmp_path,
         records=[record],
+        assert_records=[],
         leaves=subset,
         errors=[{"case_id": "NG-01", "error": "生成失败"}],
     )
     body = path.read_text(encoding="utf-8")
-    assert "硬失败清单" in body
+    assert "硬断言失败清单" in body
+    assert "Judge 硬失败清单" in body
     assert "NG-01" in body

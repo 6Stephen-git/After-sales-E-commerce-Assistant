@@ -8,7 +8,7 @@
 | **买家** | `buyer_profile` 表格字段 + 表下「特殊说明」写入 `scenario_narrative` 或 `human_review.fixture_focus` |
 | **对话记录** | `materials.chat_history`；买家诉求影响 `intent_tags` |
 | **事实证据** | **`evidence_facts`（必填）**，按下列 bullet 标签填写（见下） |
-| **参考** | `similar_cases`，「无」→ `[]` |
+| **参考** | `similar_cases`：「无」→ `[]`；`- CASE-XXX` → 工具直读 `eval/content/cases/CASE-XXX.json` |
 | **期望与禁忌** | `expectation` |
 | **其他说明** | `test_overrides`（阈值须为数字键，见下） |
 
@@ -56,13 +56,21 @@
 | 本单金额通道门槛100 | `order_value_amount_only_threshold`: 100 |
 | 不超过订单 30% | `facts_override.compensation_ratio_cap`: 0.3 |
 | 仅退次数阈值 2 | `malicious_hard_rules.refund_only_count_threshold`: 2 |
+| 近90天仅退款 4 次 | `malicious_context.recent_refund_only_count`: 4 |
 
 - 只抽取客观数值配置；忽略“应如何处理”“测试重点”“建议协商”“可给优惠券”等策略性描述，避免进入被测链路。
+
+## 参考 → similar_cases
+
+- `## 参考` 为「无」：`similar_cases` 写 `[]`。
+- 含 `- CASE-MAL-01` 等引用：`similar_cases` 写 `[]` 即可，工具会直读同名 JSON 注入。
+- 禁止 LLM 自拟判例字段。
 
 ## human_review / expectation
 
 - `human_review` 三段必填；`checks_before_run` 含「事实证据·图/视频解析与 evidence_facts 一致」。
 - `expectation` 完整提取期望与禁止项。
+- 若 Markdown「期望与禁忌」含 **expected_report** 或结构化断言要点，写入 `expectation.expected_report`（Judge/断言专用，不进 fixture）。常用键：`malicious_risk_level_in`、`malicious_risk_level_min`、`customer_value_channel`、`disposition_in`、`action_type_not`、`matched_rules_min`、`similar_cases_min`、`actionable_evidence_requests_contains`、`reasoning_contains_any`。
 
 ## 其它
 

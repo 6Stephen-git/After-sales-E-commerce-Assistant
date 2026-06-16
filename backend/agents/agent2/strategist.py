@@ -739,6 +739,8 @@ def _build_strategy_json_system_prompt() -> str:
         "若 strategy_stage=evidence_first：strategy_direction_summary 只能要求补证、固定己方证据，禁止先给退款/补偿方案。"
         "若 compensation_policy=none/forbid/soft_no_amount：不得建议报具体补偿金额。"
         "若 dialogue_context.blocked_evidence_requests 非空：不得再要求其中任何一项。"
+        "若 facts.missing_evidence 为空且 action_type 非 evidence_request：actionable_evidence_requests 必须为 []，"
+        "不得向买家索要快递单、开箱视频、使用环境等泛化举证（商家备档不等于买家补证）。"
         "若 recent_turns 非空：须承接对话，禁止重复商家已提且买家已拒的举证要求。"
         "平台规则依据由系统从 rule_briefs 另行注入，勿在 JSON 中输出 platform_rule_basis。"
         "若 rule_briefs 为空：禁止引用或编造具体平台条款，策略仅基于 facts、对话与画像。"
@@ -759,9 +761,16 @@ def _parse_strategy_json(raw_text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _normalize_dialogue_context(raw: Any, input_data: StrategyInput) -> DialogueContext:
+def _normalize_dialogue_context(
+    raw: Any,
+    input_data: StrategyInput,
+    *,
+    action_type: str = "",
+) -> DialogueContext:
     """
     校验并规范化 dialogue_context；缺字段时用事实字段兜底。
+
+    举证已齐（missing_evidence 为空）且非 evidence_request 动作时，清空 LLM 自拟的泛化补证项。
     """
     data = raw if isinstance(raw, dict) else {}
     mode = str(data.get("dialogue_mode") or "").strip()
@@ -774,9 +783,21 @@ def _normalize_dialogue_context(raw: Any, input_data: StrategyInput) -> Dialogue
         return [str(item).strip() for item in value if str(item).strip()]
 
     blocked = _as_list(data.get("blocked_evidence_requests"))
+    missing = [str(item).strip() for item in (input_data.facts.missing_evidence or []) if str(item).strip()]
     actionable = _as_list(data.get("actionable_evidence_requests"))
     if not actionable:
-        actionable = list(input_data.facts.missing_evidence or [])
+        actionable = list(missing)
+
+    normalized_action = str(action_type or "").strip().lower()
+    if not missing and normalized_action != ACTION_EVIDENCE_REQUEST:
+        if actionable:
+            logger.info(
+                "%s 举证已齐且动作为 %s，清空泛化补证请求：%s",
+                AGENT2_LOG_PREFIX,
+                normalized_action or "—",
+                actionable,
+            )
+        actionable = []
 
     fallback = str(data.get("fallback_script") or "").strip()
     if not fallback:
@@ -1168,12 +1189,20 @@ def recommend(
         strategy_direction_rationale = _polish_merchant_facing_text(
             str(strategy_json.get("strategy_direction_rationale") or "").strip()
         ) or rationale_fallback
-        dialogue_context = _normalize_dialogue_context(strategy_json.get("dialogue_context"), input_data)
+        dialogue_context = _normalize_dialogue_context(
+            strategy_json.get("dialogue_context"),
+            input_data,
+            action_type=str(action_contract.get("action_type") or ""),
+        )
     else:
         customer_intent_analysis = intent_fallback
         strategy_direction_summary = _compose_action_direction_summary(action_contract, contract_next_step)
         strategy_direction_rationale = rationale_fallback
-        dialogue_context = _normalize_dialogue_context({}, input_data)
+        dialogue_context = _normalize_dialogue_context(
+            {},
+            input_data,
+            action_type=str(action_contract.get("action_type") or ""),
+        )
 
     platform_rule_basis = _build_platform_rule_basis(input_data)
     reasoning = _compose_reasoning_from_fields(

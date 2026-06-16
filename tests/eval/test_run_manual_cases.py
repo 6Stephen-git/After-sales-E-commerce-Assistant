@@ -3,10 +3,43 @@
 from eval.pipeline.run_manual_cases import (
     _build_fact_output_with_overlay,
     _parse_buyer_profile,
+    _patch_facts_override,
     _patch_test_overrides,
 )
+import backend.agents.agent1 as agent1_module
 import backend.tools.agent2_tools as agent2_tools_module
 from schemas import FactOutput, RuleMatchPlan
+
+
+def test_replace_mode_recomputes_decision_readiness() -> None:
+    """replace 模式注入高证据事实后，可决策度应重算而非默认 low。"""
+    facts = _build_fact_output_with_overlay(
+        {"buyer_text": "仅退款"},
+        visual_preset="high_evidence",
+        facts_overlay={
+            "visual_observations": ["外包装完好", "轻微线头"],
+            "visual_defect_severity": "minor",
+            "defect_type": "开线",
+            "missing_evidence": [],
+            "evidence_quality": "high",
+        },
+        agent1_mode="replace",
+        original_extract=lambda _m: FactOutput(issue_summary="x"),
+    )
+    assert facts.evidence_quality == "high"
+    assert facts.decision_readiness in {"medium", "high"}
+
+
+def test_patch_facts_override_patches_dispute_batch() -> None:
+    """dispute_batch 须与 agent1 同步 patch，否则评测注入不生效。"""
+    import backend.pipeline.dispute_batch as dispute_batch_module
+
+    case = {
+        "test_overrides": {"visual_preset": "high_evidence", "agent1_mode": "replace"},
+        "facts_override": {"evidence_quality": "high", "missing_evidence": []},
+    }
+    with _patch_facts_override(case_id="T-PATCH", case=case):
+        assert dispute_batch_module.extract is agent1_module.extract
 
 
 def test_replace_mode_preserves_rule_match_plan() -> None:
@@ -43,6 +76,20 @@ def test_customer_lifetime_value_overrides_avg_order_value() -> None:
     )
 
     assert profile.avg_order_value == 30
+
+
+def test_patch_test_overrides_patches_dispute_batch_detect() -> None:
+    """恶意检测 patch 须同步 dispute_batch，否则 test_overrides 不生效。"""
+    import backend.pipeline.dispute_batch as dispute_batch_module
+
+    original = agent2_tools_module.detect_malicious_behavior
+    with _patch_test_overrides(
+        case_id="T-DETECT",
+        test_overrides={"malicious_hard_rules": {"refund_only_count_threshold": 2}},
+        malicious_context={"recent_refund_only_count": 4},
+    ):
+        assert agent2_tools_module.detect_malicious_behavior is not original
+        assert dispute_batch_module.detect_malicious_behavior is agent2_tools_module.detect_malicious_behavior
 
 
 def test_channel_threshold_overrides_order_value_score_threshold() -> None:

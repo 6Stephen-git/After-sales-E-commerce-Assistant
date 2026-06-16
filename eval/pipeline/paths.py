@@ -12,6 +12,7 @@ EVAL_DIR = Path(__file__).resolve().parents[1]
 ROOT_DIR = EVAL_DIR.parent
 CONTENT_DIR = EVAL_DIR / "content"
 SCENARIOS_DIR = CONTENT_DIR / "scenarios"
+CASES_DIR = CONTENT_DIR / "cases"
 PROMPTS_DIR = CONTENT_DIR / "prompts"
 OUTPUT_DIR = EVAL_DIR / "output"
 SCENARIO_OUTPUT_DIR = OUTPUT_DIR / "scenarios"

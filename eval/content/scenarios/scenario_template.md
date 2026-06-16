@@ -1,5 +1,7 @@
 # 情景标题（自拟）
 
+> **功能验证情景**：普通举证（物流、签收、开箱视频、外包装照等）默认已齐；仅 RULE 专责补证树在「缺失材料」写明规则要求的专责缺口。单轴隔离时 MA/VAL/RULE 的 `## 参考` 写 `无`；PREC 轴引用 `eval/content/cases/` 下 `CASE-*`。
+
 ## 背景
 
 - 品类：（如 水产肉类、服饰-连衣裙、咖啡/麦片/冲饮；只写订单基础字段，不写争议说明）
@@ -37,11 +39,13 @@
 - 图/视频解析：（仅写视觉模型可观察到的客观现象）
 - 物流：是否签收；物流是否正常；签收后约 N 小时申请；其它物流说明
 - 视觉严重度：minor / moderate / severe；可挽回性：resalable / repairable / unrecoverable（可附简短中文说明）
-- 缺失材料：（开箱视频、全貌照、序列号等未提供的项）
+- 缺失材料：决策类写「无（普通举证已齐）」；RULE 专责案写规则要求的专责缺口（如多角度穿着照、鉴定证书、验货说明）
 
 ## 参考
 
 无
+
+（PREC 轴示例：`- CASE-MAL-01`；文件见 `eval/content/cases/CASE-MAL-01.json`）
 
 ## 期望与禁忌
 
@@ -50,6 +54,17 @@
 - 禁忌：……
 
 （该段只服务 Judge 与人工审阅，不得写进聊天；不写完整标准话术、唯一处置比例或金额）
+
+**expected_report**（硬断言专用，不进 fixture；按测试轴填写，无则省略）：
+
+```yaml
+malicious_risk_level_in: [medium, high]   # MA 语义案
+customer_value_channel: long_term         # VAL 案
+disposition_in: [defend, negotiate]       # 可接受处置
+action_type: evidence_request             # RULE 专责补证案
+similar_cases_min: 1                      # PREC 有判例案
+reasoning_contains_any: [判例, 经验]       # PREC 辅助
+```
 
 ## 其他说明
 

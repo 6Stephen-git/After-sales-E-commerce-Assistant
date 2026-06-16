@@ -29,7 +29,29 @@
           "type": "array",
           "items": { "type": "string", "enum": ["defend", "negotiate", "compensate"] }
         },
-        "forbidden_outputs": { "type": "array", "items": { "type": "string" } }
+        "forbidden_outputs": { "type": "array", "items": { "type": "string" } },
+        "expected_report": {
+          "type": "object",
+          "properties": {
+            "malicious_risk_level_in": { "type": "array", "items": { "type": "string" } },
+            "malicious_risk_level_min": { "type": "string" },
+            "triggered_signal_types_contains": { "type": "array", "items": { "type": "string" } },
+            "triggered_signal_types_not_contains": { "type": "array", "items": { "type": "string" } },
+            "customer_value_channel": { "type": "string" },
+            "customer_value_channel_in": { "type": "array", "items": { "type": "string" } },
+            "disposition_in": { "type": "array", "items": { "type": "string" } },
+            "disposition_not": { "type": "array", "items": { "type": "string" } },
+            "action_type": { "type": "string" },
+            "action_type_in": { "type": "array", "items": { "type": "string" } },
+            "action_type_not": { "type": "array", "items": { "type": "string" } },
+            "strategy_stage_not": { "type": "array", "items": { "type": "string" } },
+            "matched_rules_min": { "type": "integer", "minimum": 0 },
+            "similar_cases_min": { "type": "integer", "minimum": 0 },
+            "actionable_evidence_requests_contains": { "type": "array", "items": { "type": "string" } },
+            "actionable_evidence_requests_max": { "type": "integer", "minimum": 0 },
+            "reasoning_contains_any": { "type": "array", "items": { "type": "string" } }
+          }
+        }
       }
     },
     "taxonomy": {

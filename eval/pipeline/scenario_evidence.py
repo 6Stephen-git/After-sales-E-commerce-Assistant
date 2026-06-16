@@ -133,6 +133,10 @@ def evidence_facts_to_facts_override(spec: ScenarioSpec) -> dict[str, Any]:
 
         merged["missing_evidence"] = list(ef.missing_evidence)
 
+    else:
+
+        merged["missing_evidence"] = []
+
     if ef.red_flags:
 
         merged["red_flags"] = list(ef.red_flags)

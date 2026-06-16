@@ -523,7 +523,11 @@ class TestAgent2Recommend:
                 },
             },
         )
-        facts = FactOutput(evidence_quality="high", defect_type="破洞")
+        facts = FactOutput(
+            evidence_quality="high",
+            defect_type="破洞",
+            missing_evidence=["开箱视频"],
+        )
         profile = BuyerProfile(buyer_id="buyer_llm")
         input_data = StrategyInput(
             facts=facts,
@@ -538,6 +542,22 @@ class TestAgent2Recommend:
         assert "开箱视频" in output.strategy_direction_summary
         assert output.dialogue_context is not None
         assert "开箱视频" in output.dialogue_context.actionable_evidence_requests
+
+    def test_normalize_dialogue_context_clears_generic_requests_when_evidence_complete(self):
+        """举证已齐且非补证动作时，不得保留快递单等泛化补证请求。"""
+        from backend.agents.agent2.strategist import _normalize_dialogue_context
+
+        input_data = StrategyInput(
+            facts=FactOutput(evidence_quality="high", missing_evidence=[]),
+            buyer_profile=BuyerProfile(buyer_id="buyer_complete"),
+            order_amount=268.0,
+        )
+        ctx = _normalize_dialogue_context(
+            {"actionable_evidence_requests": ["快递单照片", "商品使用环境说明"]},
+            input_data,
+            action_type="defend_prepare",
+        )
+        assert ctx.actionable_evidence_requests == []
 
     def test_platform_rule_basis_should_come_from_matched_rules_not_llm(self, monkeypatch):
         """平台规则依据固定来自条文匹配，忽略策略 LLM 自造要点。"""

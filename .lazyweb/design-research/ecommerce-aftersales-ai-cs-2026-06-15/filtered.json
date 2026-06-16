@@ -1,0 +1,134 @@
+[
+  {
+    "company": "richpanel",
+    "platform": "desktop",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/sites/richpanel/richpanel_41085f91b3d66e0a862a.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNpdGVzL3JpY2hwYW5lbC9yaWNocGFuZWxfNDEwODVmOTFiM2Q2NmUwYTg2MmEucG5nIiwic2NvcGUiOiJkb3dubG9hZCIsImlhdCI6MTc4MTUzMDcyNiwiZXhwIjoxODEzMDY2NzI2fQ.A-I84-FbK86D0pSYDuAvJ3tvh5Te7mQxCwo5uZA5up0",
+    "visionDescription": "Unified customer support dashboard aggregating multiple channels including email, live chat, Facebook Messenger, and Instagram DMs into tabbed inboxes with conversation previews, customer profiles, message threads, and action buttons for managing support tickets from one interface.",
+    "similarity": 0.452659,
+    "matchCount": 1,
+    "pageUrl": "https://www.richpanel.com/help-desk",
+    "query": "help desk ticket inbox||desktop",
+    "score": 11
+  },
+  {
+    "company": "doordash",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/food2_doordash/compare/2025-01-02(20-31-45).png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzL2Zvb2QyX2Rvb3JkYXNoL2NvbXBhcmUvMjAyNS0wMS0wMigyMC0zMS00NSkucG5nIiwic2NvcGUiOiJkb3dubG9hZCIsImlhdCI6MTc4MTUzMDczNiwiZXhwIjoxODEzMDY2NzM2fQ.yP8ul1JqM0xM7xVG8ijQGP3EjvvRxCKeGCmbL8YNBHI",
+    "visionDescription": "Customer support chat screen with a virtual assistant greeting and prompting the user to choose a quick response or describe their issue. Includes preset help options for delivery problems such as receiving someone else’s order, nothing delivered, item quality issues, or missing/incorrect items, with a message input field and an “End” chat button.",
+    "similarity": 0.530434,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 10
+  },
+  {
+    "company": "spring-health",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/uploaded_spring_health/compare/2025-12-16/1771169315369_t__-_12357.PNG?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzL3VwbG9hZGVkX3NwcmluZ19oZWFsdGgvY29tcGFyZS8yMDI1LTEyLTE2LzE3NzExNjkzMTUzNjlfdF9fLV8xMjM1Ny5QTkciLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzgxNTMwNzM2LCJleHAiOjE4MTMwNjY3MzZ9.RCY750UvlhfXgJWz8WtxJjgGEzAMA2SRNXLDMjE1Fwk",
+    "visionDescription": "Help & Support screen offering assistance in English and Spanish, with an immediate crisis support hotline available 24/7. Provides support options for care and technical issues including searching the support center, contacting support via chat/message, and calling customer service with listed availability hours.",
+    "similarity": 0.475698,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 10
+  },
+  {
+    "company": "camlist",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/business111_camlist/compare/2025-04-25-14-57-19-.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzL2J1c2luZXNzMTExX2NhbWxpc3QvY29tcGFyZS8yMDI1LTA0LTI1LTE0LTU3LTE5LS5wbmciLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzgxNTMwNzM2LCJleHAiOjE4MTMwNjY3MzZ9.a0U_DjOcRvj7vc4ZK2LMSPnWqz71BvkHBkX2D4zDya8",
+    "visionDescription": "Customer support help center landing screen with a greeting and primary actions to view Messages, browse Help/FAQ, or “Send us a message” with an expected reply time, plus a close button to exit the support widget.",
+    "similarity": 0.475524,
+    "matchCount": 2,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 10
+  },
+  {
+    "company": "dipsea",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/186z_dipsea/compare/!delete-account_confirm/2025_05_28_00-04-54_3A15469C.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzLzE4NnpfZGlwc2VhL2NvbXBhcmUvIWRlbGV0ZS1hY2NvdW50X2NvbmZpcm0vMjAyNV8wNV8yOF8wMC0wNC01NF8zQTE1NDY5Qy5wbmciLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzgxNTMwNzM2LCJleHAiOjE4MTMwNjY3MzZ9.Aw2W2Rw34bq3j0liT8H7BijRYsvwDM9D9hUhiREXvS0",
+    "visionDescription": "In-app customer support hub with options to view Messages, browse Help, and start a chat by asking a question via an AI agent and support team. Includes a searchable help center with suggested FAQs like canceling a subscription, refunds, managing a subscription, and canceling a free trial.",
+    "similarity": 0.475293,
+    "matchCount": 2,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 10
+  },
+  {
+    "company": "booking",
+    "platform": "desktop",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/sites/booking/booking_a9a093af047a6c164dfc.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNpdGVzL2Jvb2tpbmcvYm9va2luZ19hOWEwOTNhZjA0N2E2YzE2NGRmYy5wbmciLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzgxNTMwNzI2LCJleHAiOjE4MTMwNjY3MjZ9.B45BUv1MuiY0w5ae88obzYAUVHzfEd9ZIDGBZE5KfQU",
+    "visionDescription": "Customer service and help center landing page for a travel booking website, offering primary support actions to send a message, call support, or contact the property, plus a button to access the Help Center. Includes an FAQ accordion covering common booking issues like cancellations, fees, credit card charges, booking changes, confirmation emails, and pet policies.",
+    "similarity": 0.375751,
+    "matchCount": 2,
+    "pageUrl": "https://www.booking.com/customer-service.ca.html",
+    "query": "help desk ticket inbox||desktop",
+    "score": 10
+  },
+  {
+    "company": "chatwoot",
+    "platform": "desktop",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/sites/chatwoot/chatwoot_3369a55ef2629a883eb3.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNpdGVzL2NoYXR3b290L2NoYXR3b290XzMzNjlhNTVlZjI2MjlhODgzZWIzLnBuZyIsInNjb3BlIjoiZG93bmxvYWQiLCJpYXQiOjE3ODE1MzA3MTYsImV4cCI6MTgxMzA2NjcxNn0.FdMkJ8FiCxcLc-qBhrts-iw8teEgkivXktRWrGYI1sU",
+    "visionDescription": "Help Scout SMS support feature landing page enabling teams to send and receive customer SMS messages directly from their shared inbox, featuring a chat interface preview with conversation mockup, prominent \"Learn more\" and \"Get started\" buttons, and icons highlighting integrations for phone, mail, and other channels.",
+    "similarity": 0.481381,
+    "matchCount": 1,
+    "pageUrl": "https://www.chatwoot.com/features/sms-integration",
+    "query": "customer support chat||desktop",
+    "score": 10
+  },
+  {
+    "company": "microsoft-copilot",
+    "platform": "desktop",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/sites/microsoft-copilot/microsoft-copilot_881f6725d7eeed0dc003.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNpdGVzL21pY3Jvc29mdC1jb3BpbG90L21pY3Jvc29mdC1jb3BpbG90Xzg4MWY2NzI1ZDdlZWVkMGRjMDAzLnBuZyIsInNjb3BlIjoiZG93bmxvYWQiLCJpYXQiOjE3ODE1MzA3MzIsImV4cCI6MTgxMzA2NjczMn0.AjSabC8gTkv1R5iO-o5O3A14G_0S8g8M3MXrNtLI0sc",
+    "visionDescription": "AI assistant home screen with a central “Message Copilot” chat input for starting a new conversation, including attachment/plus action, a mode selector, and voice input. Below the prompt are quick-start suggestion chips for tasks like creating an image, recommending a product, improving writing, taking a quiz, writing a first draft, designing a logo, and organizing thoughts.",
+    "similarity": 0.570836,
+    "matchCount": 3,
+    "pageUrl": "https://copilot.microsoft.com/",
+    "query": "AI copilot sidebar||desktop",
+    "score": 9
+  },
+  {
+    "company": "goodnovel",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/books6_goodnovel/compare/2025-04-24-22-59-53-.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzL2Jvb2tzNl9nb29kbm92ZWwvY29tcGFyZS8yMDI1LTA0LTI0LTIyLTU5LTUzLS5wbmciLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzgxNTMwNzM2LCJleHAiOjE4MTMwNjY3MzZ9.zKlubrWaOBZqdINNLu3Uh3JCPvS8cAomUkn6O7VOzOQ",
+    "visionDescription": "Customer support chat screen for an “online service” with an automated greeting directing users to browse common FAQs for self-help or tap a plus button to submit a new question and receive a response within 72 hours. Includes a message composer with text input placeholder, emoji button, add/attachment button, and a “Manual” option to switch to human support.",
+    "similarity": 0.559724,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 9
+  },
+  {
+    "company": "mta",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/146z_mta/compare/!status_flow_step-2/2025_05_27_23-22-18_D50F0DDD.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzLzE0NnpfbXRhL2NvbXBhcmUvIXN0YXR1c19mbG93X3N0ZXAtMi8yMDI1XzA1XzI3XzIzLTIyLTE4X0Q1MEYwRERELnBuZyIsInNjb3BlIjoiZG93bmxvYWQiLCJpYXQiOjE3ODE1MzA3MzYsImV4cCI6MTgxMzA2NjczNn0.Y0L0qisdm8xEcyvoqwa9OWUV-RJIN4DhgSP3h66L8WY",
+    "visionDescription": "Customer support chat home screen that asks “How can we help? ” and provides access to messages/help, a primary action to send a message, and a searchable help center with suggested FAQ topics (e.",
+    "similarity": 0.524548,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 9
+  },
+  {
+    "company": "highmark",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/uploaded_highmark/compare/2025-12-15/1771135408233_t__-_11543.PNG?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzL3VwbG9hZGVkX2hpZ2htYXJrL2NvbXBhcmUvMjAyNS0xMi0xNS8xNzcxMTM1NDA4MjMzX3RfXy1fMTE1NDMuUE5HIiwic2NvcGUiOiJkb3dubG9hZCIsImlhdCI6MTc4MTUzMDczNiwiZXhwIjoxODEzMDY2NzM2fQ.hbTk-iSnN7OADBvlezswl7QjG8omWuVjfEuUTxllbqY",
+    "visionDescription": "Customer support help screen prompting users to “Chat now” with a chatbot for quick answers, with guidance on accessing live chat with the team, messaging a support agent for complex questions, and viewing health plan documents and forms. Includes close, back navigation, and a prominent next/continue arrow button.",
+    "similarity": 0.513581,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 9
+  },
+  {
+    "company": "mint-mobile",
+    "platform": "mobile",
+    "imageUrl": "https://zlfyzdmohcskkucuunmk.supabase.co/storage/v1/render/image/sign/screenshots/42z_mint-mobile/compare/!my-plan_step-2/2025_05_18_17-13-35_7D58CD7D.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV81NTU0MmU4OC1mNWRkLTQxMDEtOWZkYy0yODFiMzM3NmYyOTIiLCJhbGciOiJIUzI1NiJ9.eyJ0cmFuc2Zvcm1hdGlvbnMiOiJ3aWR0aDo3NjgscmVzaXplOmNvbnRhaW4scXVhbGl0eTo3MCIsInVybCI6InNjcmVlbnNob3RzLzQyel9taW50LW1vYmlsZS9jb21wYXJlLyFteS1wbGFuX3N0ZXAtMi8yMDI1XzA1XzE4XzE3LTEzLTM1XzdENThDRDdELnBuZyIsInNjb3BlIjoiZG93bmxvYWQiLCJpYXQiOjE3ODE1MzA3MzYsImV4cCI6MTgxMzA2NjczNn0.2zJOmPLkFcWK9MhWeDMZ2QCtswgE2iTyuXILEinQfIw",
+    "visionDescription": "Support/help screen offering assistance options, featuring a chatbot entry point and links to self-serve resources. Primary actions include starting a “Chat with FoxBot,” opening the Help Center, or calling customer support with listed hours, accessible from the bottom navigation’s Support tab.",
+    "similarity": 0.470669,
+    "matchCount": 3,
+    "pageUrl": "",
+    "query": "customer service mobile chat||mobile",
+    "score": 9
+  }
+]

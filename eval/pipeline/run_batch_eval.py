@@ -1,5 +1,5 @@
 """
-批量评测：评测树叶子 → scenario_gen + 全链路跑批 → Judge → BATCH_SUMMARY。
+批量评测：评测树叶子 → scenario_gen + 全链路跑批 → 硬断言 → Judge → BATCH_SUMMARY。
 
 用法:
   python -m eval.pipeline.run_batch_eval -v
@@ -22,6 +22,8 @@ try:
 except ImportError:
     load_dotenv = None  # type: ignore[misc, assignment]
 
+from eval.pipeline.assert_models import AssertRecord
+from eval.pipeline.assert_report import assert_case, write_assert_jsonl
 from eval.pipeline.eval_tree import (
     EVAL_TREE_PATH,
     EvalLeaf,
@@ -111,6 +113,19 @@ def rerun_leaf(leaf: EvalLeaf) -> tuple[Path, Path]:
     return scenario_dir, report_json
 
 
+def assert_leaf(leaf: EvalLeaf, *, run_id: str) -> AssertRecord:
+    """对单叶报告执行结构化硬断言。"""
+    scenario_dir = _scenario_output_dir(leaf)
+    report_json = _report_json_path(leaf)
+    if not report_json.is_file():
+        raise FileNotFoundError(f"缺少报告 JSON：{report_json}")
+    return assert_case(
+        scenario_output=scenario_dir,
+        report_json_path=report_json,
+        run_id=run_id,
+    )
+
+
 def judge_leaf(leaf: EvalLeaf, *, run_id: str) -> JudgeRecord:
     """对单叶报告执行 Judge。"""
     scenario_dir = _scenario_output_dir(leaf)
@@ -146,32 +161,41 @@ def write_batch_summary(
     *,
     run_dir: Path,
     records: list[JudgeRecord],
+    assert_records: list[AssertRecord],
     leaves: list[EvalLeaf],
     errors: list[dict[str, Any]],
 ) -> Path:
     """写入批次汇总 BATCH_SUMMARY.md。"""
     total = len(records)
-    passed = sum(1 for record in records if record.result.pass_)
-    failed = total - passed
+    judge_passed = sum(1 for record in records if record.result.pass_)
+    judge_failed = total - judge_passed
+    assert_total = len(assert_records)
+    assert_passed = sum(1 for record in assert_records if record.result.pass_)
+    assert_failed = assert_total - assert_passed
     average = (
         sum(record.result.overall_score for record in records) / total
         if total
         else 0.0
     )
-    pass_rate = (passed / total * 100) if total else 0.0
+    judge_pass_rate = (judge_passed / total * 100) if total else 0.0
+    assert_pass_rate = (assert_passed / assert_total * 100) if assert_total else 0.0
 
     lines = [
         f"# Batch Eval Summary：{run_dir.name}",
         "",
         f"- 生成时间：{datetime.now(timezone.utc).isoformat()}",
         f"- 评测树叶子数：{len(leaves)}",
+        f"- 完成硬断言数：{assert_total}",
+        f"- 硬断言通过：{assert_passed}（{assert_pass_rate:.1f}%）",
+        f"- 硬断言失败：{assert_failed}",
         f"- 完成 Judge 数：{total}",
-        f"- 通过数：{passed}",
-        f"- 失败数：{failed}",
-        f"- 总通过率：{pass_rate:.1f}%",
-        f"- 平均分：{average:.1f}",
+        f"- Judge 通过数：{judge_passed}（{judge_pass_rate:.1f}%）",
+        f"- Judge 失败数：{judge_failed}",
+        f"- Judge 平均分：{average:.1f}",
         "",
-        "## 分轴统计",
+        "> 功能验证以**硬断言**为准；Judge 不挡门，话术问题见 Judge 记录与 warnings。",
+        "",
+        "## 分轴统计（Judge）",
         "",
     ]
 
@@ -191,13 +215,23 @@ def write_batch_summary(
         )
 
     hard_fail_records = [record for record in records if record.result.hard_failures]
-    lines.extend(["", "## 硬失败清单", ""])
+    assert_fail_records = [record for record in assert_records if not record.result.pass_]
+
+    lines.extend(["", "## 硬断言失败清单", ""])
+    if assert_fail_records:
+        for record in assert_fail_records:
+            reasons = "; ".join(record.result.failures) or "未知"
+            lines.append(f"- `{record.case_id}`：{reasons}")
+    else:
+        lines.append("暂无硬断言失败")
+
+    lines.extend(["", "## Judge 硬失败清单", ""])
     if hard_fail_records:
         for record in hard_fail_records:
             reasons = "; ".join(record.result.hard_failures)
             lines.append(f"- `{record.case_id}`：{reasons}")
     else:
-        lines.append("暂无硬失败")
+        lines.append("暂无 Judge 硬失败")
 
     lines.extend(["", "## 跑批错误", ""])
     if errors:
@@ -211,7 +245,7 @@ def write_batch_summary(
             "",
             "## 单案详情",
             "",
-            "完整分项见本目录 `SUMMARY.md` 与各案 Judge 记录。",
+            "完整分项见本目录 `SUMMARY.md`、assert_records.jsonl 与各案 Judge 记录。",
             "",
         ]
     )
@@ -249,6 +283,11 @@ def run_batch_eval(
         errors_path.unlink()
 
     records: list[JudgeRecord] = []
+    assert_records: list[AssertRecord] = []
+    assert_jsonl = run_dir / "assert_records.jsonl"
+    if assert_jsonl.is_file():
+        assert_jsonl.unlink()
+
     for leaf in targets:
         logger.info("%s 开始 %s", BATCH_EVAL_LOG_PREFIX, leaf.case_id)
         try:
@@ -256,14 +295,37 @@ def run_batch_eval(
                 rerun_leaf(leaf)
             else:
                 generate_and_run_leaf(leaf)
+
+            assert_record = assert_leaf(leaf, run_id=resolved_run_id)
+            assert_record.timestamp = datetime.now(timezone.utc)
+            write_assert_jsonl(assert_record, run_dir=run_dir)
+            assert_records.append(assert_record)
+            assert_status = "PASS" if assert_record.result.pass_ else "FAIL"
+            if not assert_record.result.pass_:
+                logger.warning(
+                    "%s 硬断言 %s：%s；%s",
+                    BATCH_EVAL_LOG_PREFIX,
+                    leaf.case_id,
+                    assert_status,
+                    "; ".join(assert_record.result.failures),
+                )
+            else:
+                logger.info(
+                    "%s 硬断言 %s：%s（%d 项）",
+                    BATCH_EVAL_LOG_PREFIX,
+                    leaf.case_id,
+                    assert_status,
+                    assert_record.result.checked_count,
+                )
+
             record = judge_leaf(leaf, run_id=resolved_run_id)
             records.append(record)
-            status = "PASS" if record.result.pass_ else "FAIL"
+            judge_status = "PASS" if record.result.pass_ else "FAIL"
             logger.info(
-                "%s 完成 %s：%s %d 分",
+                "%s Judge %s：%s %d 分",
                 BATCH_EVAL_LOG_PREFIX,
                 leaf.case_id,
-                status,
+                judge_status,
                 record.result.overall_score,
             )
         except Exception as exc:  # noqa: BLE001
@@ -288,6 +350,7 @@ def run_batch_eval(
     write_batch_summary(
         run_dir=run_dir,
         records=records,
+        assert_records=assert_records,
         leaves=targets,
         errors=error_items,
     )

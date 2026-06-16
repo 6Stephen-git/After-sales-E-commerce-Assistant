@@ -24,6 +24,7 @@ try:
 except ImportError:
     load_dotenv = None  # type: ignore[misc, assignment]
 
+from eval.pipeline.auxiliary_cases import apply_auxiliary_cases
 from eval.pipeline.paths import ROOT_DIR, SCENARIO_OUTPUT_DIR, SCENARIO_TEMPLATE_PATH
 from eval.pipeline.scenario_llm_utils import (
     call_llm_json,
@@ -167,6 +168,7 @@ def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
     spec_dict = spec.model_dump(mode="json")
     if _has_dialogue_section(narrative) and _chat_history_is_empty(spec_dict):
         raise ValueError(f"{GEN_LOG_PREFIX} 生成结果未抽取 materials.chat_history，请检查对话记录格式或提示词")
+    spec_dict = apply_auxiliary_cases(spec_dict, narrative)
     logger.info("%s 已生成 spec case_id=%s", GEN_LOG_PREFIX, spec.meta.case_id)
     return spec_dict
 
