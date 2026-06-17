@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from backend.cache.vision_cache import get_cached_vision, save_vision
 from schemas import VALID_CREDENTIAL_TRUST
 
 LOG_PREFIX = "[Agent1工具]"
@@ -503,20 +504,32 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
         # 默认视觉模型与 .env.example 一致；覆盖时请设环境变量 VISION_API_MODEL
         model = os.getenv("VISION_API_MODEL", "").strip() or "qwen3-vl-flash"
         logger.info("%s 视觉走百炼多模态协议，endpoint=%s model=%s", LOG_PREFIX, endpoint, model)
-        return _analyze_image_dashscope(
+        cached = get_cached_vision(image_url, model, guidance)
+        if cached is not None:
+            return cached
+        result = _analyze_image_dashscope(
             endpoint=endpoint,
             api_key=api_key,
             image_ref=image_url,
             model=model,
             guidance=guidance,
         )
+        if not result.get("error"):
+            save_vision(image_url, model, guidance, result)
+        return result
 
     logger.warning(
         "%s 视觉走 legacy 协议（非百炼 endpoint），请确认 VISION_API_ENDPOINT 是否配置正确：%s",
         LOG_PREFIX,
         endpoint,
     )
+    legacy_model = "legacy"
+    cached = get_cached_vision(image_url, legacy_model, guidance)
+    if cached is not None:
+        return cached
     legacy_result = _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)
     if legacy_result.get("error"):
         return legacy_result
-    return _normalize_vision_dict(legacy_result)
+    result = _normalize_vision_dict(legacy_result)
+    save_vision(image_url, legacy_model, guidance, result)
+    return result

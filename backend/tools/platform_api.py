@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from backend.cache.tool_cache import get_cached_logistics, save_logistics
 from schemas import LogisticsInfo
 
 LOG_PREFIX = "[PlatformAPI]"
@@ -27,10 +28,22 @@ def query_logistics(order_id: str) -> LogisticsInfo:
     normalized = str(order_id or "").strip()
     if not normalized:
         logger.info("%s order_id 为空，返回默认物流状态", LOG_PREFIX)
+        return LogisticsInfo(
+            is_shipped=False,
+            is_signed=False,
+            stagnant_days=0,
+            is_abnormal=False,
+        )
 
-    return LogisticsInfo(
+    cached = get_cached_logistics(normalized)
+    if cached is not None:
+        return cached
+
+    logistics = LogisticsInfo(
         is_shipped=False,
         is_signed=False,
         stagnant_days=0,
         is_abnormal=False,
     )
+    save_logistics(normalized, logistics)
+    return logistics

@@ -23,6 +23,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.db.connection import get_engine  # noqa: E402
 from backend.db.models import BuyerProfileRecord  # noqa: E402
+from backend.cache.tool_cache import get_cached_cases, get_cached_profile, save_cases, save_profile
 from backend.tools.llm_client import chat_completion  # noqa: E402
 from backend.tools.text_signals import (  # noqa: E402
     contains_any,
@@ -152,6 +153,10 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
         normalized_buyer_id,
     )
 
+    cached_profile = get_cached_profile(normalized_merchant_id, normalized_buyer_id)
+    if cached_profile is not None:
+        return cached_profile
+
     try:
         default_profile = _build_default_buyer_profile(normalized_buyer_id)
         if not normalized_merchant_id or not normalized_buyer_id:
@@ -168,9 +173,11 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
             ).scalar_one_or_none()
             if record is None:
                 logger.info("%s 未命中数据库画像，返回默认画像", AGENT2_LOG_PREFIX)
+                save_profile(normalized_merchant_id, normalized_buyer_id, default_profile)
                 return default_profile
             profile = _profile_from_db_json(normalized_buyer_id, record.profile_json)
         logger.info("%s 买家画像查询完成，credit_level=%s", AGENT2_LOG_PREFIX, profile.credit_level)
+        save_profile(normalized_merchant_id, normalized_buyer_id, profile)
         return profile
     except Exception as exc:  # noqa: BLE001
         message = f"买家画像查询失败：{exc}"
@@ -193,13 +200,20 @@ def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]
     异常:
         ValueError: top_k <= 0。
     """
-    _ = dispute_desc
+    normalized_desc = str(dispute_desc or "").strip()
     logger.info("%s 开始检索相似判例，top_k=%s", AGENT2_LOG_PREFIX, top_k)
 
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
 
-    return []
+    cached_cases = get_cached_cases(normalized_desc, top_k)
+    if cached_cases is not None:
+        return cached_cases
+
+    cases: list[SimilarCase] = []
+    if normalized_desc:
+        save_cases(normalized_desc, top_k, cases)
+    return cases
 
 
 # ---------- 客户价值：视觉损失暴露 + 双维评分（无专用 LLM） ----------
