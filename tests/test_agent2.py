@@ -53,6 +53,9 @@ from schemas import (
     RuleConstraint,
     RuleBrief,
     StrategyInput,
+    ACTION_DEFEND_PREPARE,
+    ACTION_MONETARY_SETTLE,
+    ACTION_RULE_EXPLAIN,
     DISPOSITION_COMPENSATE,
     DISPOSITION_DEFEND,
     DISPOSITION_NEGOTIATE,
@@ -665,6 +668,76 @@ class TestAgent2Recommend:
         assert output.malicious_detection is not None
         assert output.malicious_detection.risk_level == "high"
         assert any(item.startswith("[恶意层]") for item in output.risk_factors)
+
+    def test_recommend_pressure_blackmail_should_de_escalate_to_rule_explain(self, monkeypatch):
+        """MA-01 类：识别 high 要挟但仅语义施压时，对外协商降格而非 defend_prepare。"""
+        self._mock_strategy_llm(monkeypatch)
+        high_pressure = MaliciousDetectionOutput(
+            risk_score=20,
+            risk_level="high",
+            triggered_signals=[
+                MaliciousSignal(
+                    signal_type="review_blackmail",
+                    description="差评+12315要挟仅退款",
+                    score=20,
+                    source="llm_semantic",
+                )
+            ],
+            disposition_advice="已识别谈判施压信号，建议对外协商降格沟通并守住赔偿边界，内部同步固定备档材料。",
+        )
+        facts = FactOutput(
+            issue_summary="袖口开线要求仅退款",
+            defect_type="无",
+            evidence_quality="high",
+            missing_evidence=[],
+            visual_observations=["袖口约2厘米线头松动，衣身整体完好"],
+            goods_received=True,
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_ma01", purchase_count=6, dispute_rate=0.17),
+            matched_rules=[],
+            order_amount=128.0,
+            chat_history=["要么差评要么投诉12315，今天必须仅退款"],
+        )
+        output = recommend(_with_precomputed(input_data, malicious_detection=high_pressure))
+        assert output.malicious_detection.risk_level == "high"
+        assert output.disposition == DISPOSITION_NEGOTIATE
+        assert output.action_type in {ACTION_RULE_EXPLAIN, ACTION_MONETARY_SETTLE}
+        assert output.action_type != ACTION_DEFEND_PREPARE
+        assert "平台介入" not in (output.next_step or "")
+        assert any("协商降格" in item for item in output.risk_factors)
+
+    def test_recommend_hard_fraud_high_should_still_defend_prepare(self, monkeypatch):
+        """硬欺诈 high 仍应抗辩备料，不因降格逻辑误伤。"""
+        self._mock_strategy_llm(monkeypatch)
+        high_fraud = MaliciousDetectionOutput(
+            risk_score=40,
+            risk_level="high",
+            triggered_signals=[
+                MaliciousSignal(
+                    signal_type="deceptive_credential",
+                    description="举证图带批发水印",
+                    score=20,
+                    source="hard_rule",
+                )
+            ],
+            disposition_advice="建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。",
+        )
+        facts = FactOutput(
+            evidence_quality="medium",
+            credential_trust="suspect",
+            red_flags=["图文来源可疑"],
+        )
+        input_data = StrategyInput(
+            facts=facts,
+            buyer_profile=BuyerProfile(buyer_id="buyer_fraud"),
+            matched_rules=[],
+            order_amount=199.0,
+        )
+        output = recommend(_with_precomputed(input_data, malicious_detection=high_fraud))
+        assert output.disposition == DISPOSITION_DEFEND
+        assert output.action_type == ACTION_DEFEND_PREPARE
 
 
 # ---------- 工具层：规则命中、画像默认、判例 top_k 截断 ----------

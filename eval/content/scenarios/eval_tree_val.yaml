@@ -1,0 +1,41 @@
+# 功能验证一期：客户价值轴（VAL）
+version: 1
+leaf_count: 3
+axis_counts:
+  value: 3
+
+axes:
+  - id: value
+    label: 客户价值
+    prefix: VAL
+    dir: functional/phase1/value
+    leaves:
+      - case_id: VAL-01_high_clv_long_term
+        status: existing
+        path: eval/content/scenarios/functional/phase1/value/VAL-01_high_clv_long_term.md
+        leaf: 高 CLV / 复购 → long_term 通道
+        target_ability: 识别长期价值老客并在边界内权衡
+        factors: 高复购, 低纠纷率, 举证已齐, 全额退诉求
+        category_hint: 咖啡/麦片/冲饮
+        service_tag_hint: 坏单包退
+        notes: 无恶意、无判例；画像中性除价值维
+
+      - case_id: VAL-02_high_order_value
+        status: existing
+        path: eval/content/scenarios/functional/phase1/value/VAL-02_high_order_value.md
+        leaf: 本单≥500 → order 通道
+        target_ability: 识别本单金额触发的处理优先级
+        factors: 高本单金额, 新客画像, 举证已齐
+        category_hint: 大家电
+        service_tag_hint: 破损包退
+        notes: 无恶意、无判例
+
+      - case_id: VAL-03_new_customer_baseline
+        status: existing
+        path: eval/content/scenarios/functional/phase1/value/VAL-03_new_customer_baseline.md
+        leaf: 新客低消费 → channel none 对照
+        target_ability: 低价值客单不触发优待通道
+        factors: 首单, 低客单, 举证已齐
+        category_hint: 服饰-T恤
+        service_tag_hint: 试饮可退
+        notes: 无恶意、无判例

@@ -3,8 +3,8 @@ LLM-as-Judge 跑批评测：读取情景 spec 与售后报告，输出 JSONL 记
 
 用法:
   python -m eval.pipeline.judge_cases \\
-    --scenario-output eval/output/scenarios/case3 \\
-    --report eval/output/manual_reports/NG-02_EVIDENCE_COMPENSATION.json -v
+    --scenario-output eval/output/scenarios/phase1/ma-01_review_blackmail \\
+    --report eval/output/manual_reports/phase1/MA-01_REVIEW_BLACKMAIL.json -v
 """
 
 from __future__ import annotations
@@ -253,6 +253,38 @@ def write_summary(run_dir: Path) -> Path:
     return summary_path
 
 
+def build_step_spec_for_judge(spec: dict[str, Any], step_index: int) -> dict[str, Any]:
+    """
+    为多步快照 Judge 构造单步 spec 视图：注入该步期望/禁忌，避免 Judge 误用终局标准评过程步。
+    """
+    import copy
+
+    view = copy.deepcopy(spec)
+    steps = view.get("steps")
+    if not isinstance(steps, list) or step_index < 0 or step_index >= len(steps):
+        return view
+
+    step = steps[step_index]
+    if not isinstance(step, dict):
+        return view
+
+    label = str(step.get("label") or f"步骤{step_index + 1}")
+    meta = dict(view.get("meta") or {})
+    base_title = str(meta.get("title") or meta.get("case_id") or "").strip()
+    meta["title"] = f"{base_title} / {label}" if base_title else label
+    view["meta"] = meta
+
+    step_exp = step.get("expectation") if isinstance(step.get("expectation"), dict) else {}
+    top_exp = dict(view.get("expectation") or {})
+    if step_exp.get("intent_summary"):
+        top_exp["intent_summary"] = step_exp["intent_summary"]
+    if isinstance(step_exp.get("forbidden_outputs"), list) and step_exp["forbidden_outputs"]:
+        top_exp["forbidden_outputs"] = list(step_exp["forbidden_outputs"])
+    view["expectation"] = top_exp
+    view["steps"] = []
+    return view
+
+
 def judge_case(
     *,
     scenario_output: Path,
@@ -260,6 +292,8 @@ def judge_case(
     eval_root: Path = OUTPUT_DIR,
     run_id: str = "",
     report_md_path: Path | None = None,
+    spec_override: dict[str, Any] | None = None,
+    case_id_override: str = "",
 ) -> JudgeRecord:
     """评审单个场景报告并写入当前 run。"""
     resolved_run_id = run_id.strip() or _now_run_id()
@@ -267,7 +301,7 @@ def judge_case(
     spec_path = _resolve_spec_path(scenario_output)
     resolved_report_md = _resolve_report_md_path(report_json_path, report_md_path)
 
-    spec = _load_json_file(spec_path)
+    spec = spec_override if spec_override is not None else _load_json_file(spec_path)
     report_json = _load_json_file(report_json_path)
     report_markdown_summary = ""
     if resolved_report_md is not None:
@@ -280,7 +314,7 @@ def judge_case(
         report_json=report_json,
         report_markdown_summary=report_markdown_summary,
     )
-    case_id = str((spec.get("meta") or {}).get("case_id") or result.case_id)
+    case_id = case_id_override.strip() or str((spec.get("meta") or {}).get("case_id") or result.case_id)
     record = JudgeRecord(
         run_id=resolved_run_id,
         case_id=case_id,
@@ -297,6 +331,48 @@ def judge_case(
     _append_record(record, run_dir / "records.jsonl")
     write_summary(run_dir)
     return record
+
+
+def judge_multistep_case(
+    *,
+    scenario_output: Path,
+    report_json_paths: list[Path],
+    eval_root: Path = OUTPUT_DIR,
+    run_id: str = "",
+) -> list[JudgeRecord]:
+    """多步情景：对每一步报告分别 Judge。"""
+    spec_path = _resolve_spec_path(scenario_output)
+    spec = _load_json_file(spec_path)
+    steps = spec.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError(f"{JUDGE_LOG_PREFIX} spec 不含 steps：{spec_path}")
+
+    meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
+    base_case_id = str(meta.get("case_id") or scenario_output.name).strip()
+    if len(report_json_paths) != len(steps):
+        raise RuntimeError(
+            f"{JUDGE_LOG_PREFIX} 报告步数与 spec 不一致："
+            f"reports={len(report_json_paths)} steps={len(steps)} case_id={base_case_id}"
+        )
+
+    records: list[JudgeRecord] = []
+    for index, report_path in enumerate(report_json_paths):
+        if not report_path.is_file():
+            raise FileNotFoundError(f"{JUDGE_LOG_PREFIX} 缺少步骤报告：{report_path}")
+        step_spec = build_step_spec_for_judge(spec, index)
+        case_id = f"{base_case_id}__step{index + 1:02d}"
+        records.append(
+            judge_case(
+                scenario_output=scenario_output,
+                report_json_path=report_path,
+                report_md_path=report_path.with_suffix(".md"),
+                eval_root=eval_root,
+                run_id=run_id,
+                spec_override=step_spec,
+                case_id_override=case_id,
+            )
+        )
+    return records
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

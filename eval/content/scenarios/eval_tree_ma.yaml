@@ -1,8 +1,8 @@
 # 功能验证一期：恶意抗辩轴（MA）
 version: 1
-leaf_count: 2
+leaf_count: 3
 axis_counts:
-  malicious: 2
+  malicious: 3
 
 axes:
   - id: malicious
@@ -29,3 +29,13 @@ axes:
         category_hint: 家装灯饰光源
         service_tag_hint: 破损包赔
         notes: malicious_context 注入 recent_refund_only_count；无判例
+
+      - case_id: MA-03_professional_claim_pattern
+        status: existing
+        path: eval/content/scenarios/functional/phase1/malicious/MA-03_professional_claim_pattern.md
+        leaf: 职业索赔话术 + 伤亡大病包退 + 举证已齐
+        target_ability: 识别服务标滥用与职业索赔模式，守住仅退边界
+        factors: 职业话术, 服务标边界, 高仅退画像, 举证已齐
+        category_hint: 宠物活体
+        service_tag_hint: 伤亡大病包退
+        notes: 语义恶意案；无判例、老客价值中性

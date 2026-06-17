@@ -2,8 +2,8 @@
 按评测树批量生成情景 Markdown：对 status=new 的叶子调用 Scenario Designer。
 
 用法:
-  python -m eval.pipeline.batch_from_tree
-  python -m eval.pipeline.batch_from_tree --only NG-01_rule_boundary_negotiate -v
+  python -m eval.pipeline.batch_from_tree --tree eval/content/scenarios/eval_tree_ma.yaml -v
+  python -m eval.pipeline.batch_from_tree --only MA-01_review_blackmail -v
 """
 
 from __future__ import annotations

@@ -1,0 +1,41 @@
+# 功能验证一期：规则专责补证轴（RULE）
+version: 1
+leaf_count: 3
+axis_counts:
+  rule_evidence: 3
+
+axes:
+  - id: rule_evidence
+    label: 规则专责补证
+    prefix: RULE
+    dir: functional/phase1/rule_evidence
+    leaves:
+      - case_id: RULE-01_seven_day_wear_photos
+        status: existing
+        path: eval/content/scenarios/functional/phase1/rule_evidence/RULE-01_seven_day_wear_photos.md
+        leaf: 七天无理由服饰缺多角度穿着照
+        target_ability: 专责补证请求含二次销售确认类材料
+        factors: 七天无理由, 商品完好, 专责缺口
+        category_hint: 服饰-连衣裙
+        service_tag_hint: 七天无理由
+        notes: 普通开箱/外包装已齐
+
+      - case_id: RULE-02_auth_cert_missing
+        status: existing
+        path: eval/content/scenarios/functional/phase1/rule_evidence/RULE-02_auth_cert_missing.md
+        leaf: 先鉴后发珠宝缺鉴定证书/标签照
+        target_ability: 请求鉴定或标签类专责材料
+        factors: 先鉴后发, 描述不符主张, 专责缺口
+        category_hint: 珠宝/翡翠
+        service_tag_hint: 先鉴后发
+        notes: 普通开箱/外观照已齐
+
+      - case_id: RULE-03_appliance_inspection_gap
+        status: existing
+        path: eval/content/scenarios/functional/phase1/rule_evidence/RULE-03_appliance_inspection_gap.md
+        leaf: 大家电退货缺验货/原包装说明
+        target_ability: 退货验货流程专责补证
+        factors: 大家电, 退货, 包装丢弃
+        category_hint: 大家电
+        service_tag_hint: 送货上门
+        notes: 普通开箱/运行视频已齐

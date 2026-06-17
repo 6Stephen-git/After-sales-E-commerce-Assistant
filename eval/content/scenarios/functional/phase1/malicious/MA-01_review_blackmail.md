@@ -48,7 +48,8 @@
 
 - 目标方向：识别以差评与12315投诉作为谈判筹码的语义施压；在举证已齐、瑕疵轻微情况下坚持处置边界，不无依据承诺全额仅退。
 - 关键动作：结合已收材料说明瑕疵程度与规则边界；抗辩或协商处置，保持专业冷静。
-- 禁忌：因要挟语气直接同意全额仅退；在恶意风险已显时仍主动金额和解；重复索要已齐的普通举证材料。
+- 施压降格（一期目标）：`malicious_risk_level` 可为 high（识别要挟），但 `disposition` 宜 negotiate、`action_type` 宜 rule_explain；话术先承接情绪、结合材料讲边界，不向买家首句提「平台介入」。
+- 禁忌：因要挟语气直接同意全额仅退；在恶意风险已显时仍主动金额和解；重复索要已齐的普通举证材料；对买家抢先亮平台对峙牌。
 
 **expected_report**：
 
@@ -56,6 +57,7 @@
 malicious_risk_level_min: medium
 disposition_in: [defend, negotiate]
 disposition_not: [compensate]
+action_type_in: [rule_explain, defend_prepare]
 action_type_not: [monetary_settle]
 strategy_stage_not: [evidence_first]
 customer_value_channel: none

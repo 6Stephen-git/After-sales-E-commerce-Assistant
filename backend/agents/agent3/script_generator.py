@@ -35,6 +35,7 @@ from schemas import (
 )
 
 from backend.tools.agent3_tools import generate_buyer_script
+from backend.tools.agent2_tools import is_semantic_pressure_profile
 from backend.tools.text_signals import pick_balanced_visual_observations
 
 
@@ -75,11 +76,13 @@ def _derive_response_mode(input_data: ScriptInput) -> str:
     """报告展示用应对思想（不参与话术门禁，门禁以 Agent2 字段为准）。"""
     strategy = input_data.strategy_output
     malicious = strategy.malicious_detection
+    action_type = (strategy.action_type or "").strip().lower()
     if malicious and (malicious.risk_level or "").strip().lower() == "high":
+        if is_semantic_pressure_profile(malicious) and action_type == ACTION_RULE_EXPLAIN:
+            return RESPONSE_MODE_NEUTRAL_NEGOTIATE
         return RESPONSE_MODE_MALICIOUS_RISK
 
     disposition = (strategy.disposition or "").strip().lower()
-    action_type = (strategy.action_type or "").strip().lower()
     evidence_quality = (input_data.facts.evidence_quality or "").strip().lower()
 
     if action_type in {ACTION_RULE_EXPLAIN, ACTION_EVIDENCE_REQUEST, ACTION_RETURN_INSPECTION}:
@@ -97,16 +100,19 @@ def _must_state_compensation_amount(
     strategy_stage: str,
     compensation_policy: str,
     response_mode: str,
+    proposed_compensation_amount: float | None = None,
 ) -> bool:
-    """仅金额动作且 Agent2 已开 explicit_amount 时，要求话术报具体金额。"""
+    """契约已给出确定部分补偿报价，或金额动作且 explicit_amount 时，要求话术报具体元。"""
+    if (strategy_stage or "").strip().lower() == STRATEGY_STAGE_EVIDENCE_FIRST:
+        return False
+    if response_mode == RESPONSE_MODE_MALICIOUS_RISK:
+        return False
+    if proposed_compensation_amount is not None:
+        return True
     action = (action_type or "").strip().lower()
     if action not in {ACTION_MONETARY_SETTLE, ACTION_MERCHANT_REMEDY}:
         return False
     if compensation_policy != COMPENSATION_POLICY_EXPLICIT_AMOUNT:
-        return False
-    if (strategy_stage or "").strip().lower() == STRATEGY_STAGE_EVIDENCE_FIRST:
-        return False
-    if response_mode == RESPONSE_MODE_MALICIOUS_RISK:
         return False
     return True
 
@@ -124,15 +130,27 @@ def _normalize_chat_turns(chat_history: list[ChatTurn]) -> list[dict[str, str]]:
     return turns
 
 
+def _fallback_script_for_dialogue(*, has_turns: bool, missing_evidence: list[str]) -> str:
+    """按举证是否已齐生成兜底话术，避免「材料齐了还在核对」。"""
+    if missing_evidence:
+        item = missing_evidence[0]
+        if has_turns:
+            return f"麻烦您再补一下{item}，我收到马上继续查。"
+        return f"您好，麻烦您再补一下{item}，我收到马上继续查。"
+    if has_turns:
+        return "这单材料我看了，跟您说下目前能怎么处理。"
+    return "您好，这单材料我看了，跟您说下目前能怎么处理。"
+
+
 def _minimal_dialogue_context(input_data: ScriptInput) -> DialogueContext:
     """Agent2 未提供 dialogue_context 时的最小结构。"""
     turns = _normalize_chat_turns(input_data.chat_history)
-    missing = list(input_data.facts.missing_evidence or [])
+    missing = [str(item).strip() for item in (input_data.facts.missing_evidence or []) if str(item).strip()]
     return DialogueContext(
         dialogue_mode="continue" if turns else "cold_start",
         blocked_evidence_requests=[],
         actionable_evidence_requests=missing,
-        fallback_script="我这边还在核对材料，核实完马上回您。" if turns else "您好，我这边还在核对材料，核实完马上回您。",
+        fallback_script=_fallback_script_for_dialogue(has_turns=bool(turns), missing_evidence=missing),
     )
 
 
@@ -151,7 +169,7 @@ _ACTION_TONE_MAP: dict[str, str] = {
     ACTION_RULE_EXPLAIN: "冷静、有理有据、不卑不亢",
     ACTION_MONETARY_SETTLE: "果断、清晰、有担当，主动给方案",
     ACTION_MERCHANT_REMEDY: "真诚、贴心、有温度，像店主亲自善后",
-    ACTION_DEFEND_PREPARE: "冷静、有理有据、不卑不亢，守住底线",
+    ACTION_DEFEND_PREPARE: "冷静、有理有据；若 buyer_service_posture 为降格协商，先接住情绪再讲边界，勿亮平台牌",
 }
 
 
@@ -247,11 +265,21 @@ def _build_script_payload(
     if visual_observations:
         payload["visual_observations"] = visual_observations
     missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
-    if missing:
-        payload["missing_evidence"] = missing[:3]
+    payload["missing_evidence"] = missing[:3]
+    stage = (strategy.strategy_stage or "").strip().lower()
+    action_type = (strategy.action_type or "").strip().lower()
+    payload["evidence_complete"] = (
+        not missing
+        and action_type != ACTION_EVIDENCE_REQUEST
+        and stage != STRATEGY_STAGE_EVIDENCE_FIRST
+    )
 
     ratio_cap = _extract_compensation_ratio_cap(input_data)
-    if ratio_cap is not None and input_data.order_amount > 0:
+    rc = strategy.resolution_contract
+    if rc is not None and rc.proposed_compensation_amount is not None:
+        payload["proposed_compensation_amount"] = rc.proposed_compensation_amount
+        payload["max_compensation_amount"] = rc.proposed_compensation_amount
+    elif ratio_cap is not None and input_data.order_amount > 0:
         payload["max_compensation_amount"] = round(float(input_data.order_amount) * ratio_cap, 2)
 
     customer_value = strategy.customer_value
@@ -262,6 +290,13 @@ def _build_script_payload(
             payload["compensation_uplift"] = customer_value.compensation_uplift
     if strategy.malicious_detection and strategy.malicious_detection.risk_level:
         payload["malicious_risk_level"] = strategy.malicious_detection.risk_level
+    if is_semantic_pressure_profile(strategy.malicious_detection) and action_type in {
+        ACTION_RULE_EXPLAIN,
+        ACTION_DEFEND_PREPARE,
+    }:
+        payload["buyer_service_posture"] = "de_escalate_within_bounds"
+    if strategy.resolution_contract is not None:
+        payload["resolution_contract"] = strategy.resolution_contract.model_dump()
     return payload
 
 
@@ -290,11 +325,18 @@ def generate(input_data: ScriptInput) -> ScriptOutput:
     compensation_policy = _resolve_compensation_policy(strategy)
     response_mode = _derive_response_mode(input_data)
     dialogue_context = _resolve_dialogue_context(input_data)
+    rc = strategy.resolution_contract
+    proposed_amount = (
+        float(rc.proposed_compensation_amount)
+        if rc is not None and rc.proposed_compensation_amount is not None
+        else None
+    )
     must_state_amount = _must_state_compensation_amount(
         action_type=strategy.action_type,
         strategy_stage=strategy.strategy_stage,
         compensation_policy=compensation_policy,
         response_mode=response_mode,
+        proposed_compensation_amount=proposed_amount,
     )
 
     logger.info(

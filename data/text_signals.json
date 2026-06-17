@@ -31,6 +31,7 @@
     "待补充"
   ],
   "settlement_demand_markers": ["退款", "赔偿", "赔付", "退换", "仅退"],
+  "refund_only_demand_markers": ["仅退款", "仅退", "不用退", "不退货", "货我不退", "不想退", "全退吧"],
   "defect_claim_markers": ["质量", "瑕疵", "破损", "划痕", "损坏", "故障"],
   "intact_return_markers": ["完好", "不影响二次销售", "二次销售", "试穿", "使用痕迹", "验收", "退货运费", "运费"],
   "constraint_type_markers": {

@@ -1,0 +1,71 @@
+# 功能验证二期：混合单步（MIX）
+version: 1
+leaf_count: 6
+axis_counts:
+  mixed: 6
+
+axes:
+  - id: mixed
+    label: 混合单步
+    prefix: MIX
+    dir: functional/phase2/mixed
+    leaves:
+      - case_id: MIX-01_loyal_blackmail_conflict
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-01_loyal_blackmail_conflict.md
+        leaf: 高老客 + 差评要挟，恶意压过优待
+        target_ability: 同时识别 long_term 与语义勒索，守全额仅退边界
+        factors: 高CLV, 差评要挟, 举证已齐, CASE-CONF-01
+        category_hint: 咖啡/麦片/冲饮
+        service_tag_hint: 坏单包退
+        notes: 二期混合；判例说明恶意优先于老客优待
+
+      - case_id: MIX-02_loyal_fresh_timing
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-02_loyal_fresh_timing.md
+        leaf: 高老客 + 生鲜超48小时 + 坏单争议
+        target_ability: 价值通道与规则时效边界冲突时的处置
+        factors: 高CLV, 超时效, 坏单包退, 举证已齐
+        category_hint: 水产肉类
+        service_tag_hint: 坏单包退
+        notes: 签收后约56小时；无判例
+
+      - case_id: MIX-03_precedent_abuse_refund
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-03_precedent_abuse_refund.md
+        leaf: 抗辩判例 + 高仅退硬规则
+        target_ability: abuse_refund_only 与判例经验叠加抗辩
+        factors: 高仅退画像, 硬规则, CASE-MAL-01, 举证已齐
+        category_hint: 家装灯饰光源
+        service_tag_hint: 破损包赔
+        notes: malicious_context 注入仅退频次
+
+      - case_id: MIX-04_merchant_fault_precedent_cap
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-04_merchant_fault_precedent_cap.md
+        leaf: 商责物流破损 + 善后判例 + 赔偿上限
+        target_ability: 商责明确时参考 CASE-MF-01 主动善后
+        factors: 商责, 判例, 赔偿上限30%, 举证已齐
+        category_hint: 服饰-连衣裙
+        service_tag_hint: 破损包退
+        notes: 物流异常+明显破损
+
+      - case_id: MIX-05_professional_service_tag
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-05_professional_service_tag.md
+        leaf: 职业索赔 + 伤亡大病包退 + 举证已齐
+        target_ability: 服务标滥用与职业话术识别，守仅退边界
+        factors: 职业话术, 服务标, 高仅退画像, 举证已齐
+        category_hint: 宠物活体
+        service_tag_hint: 伤亡大病包退
+        notes: 二期 MA-03 类混合，无判例
+
+      - case_id: MIX-06_high_order_emotional_negotiate
+        status: existing
+        path: eval/content/scenarios/functional/phase2/mixed/MIX-06_high_order_emotional_negotiate.md
+        leaf: 高本单金额 + 情绪化 + 部分补偿协商
+        target_ability: order 通道与 CASE-VAL-01 指导下限内协商
+        factors: 高本单, 情绪化, 部分补偿, 举证已齐
+        category_hint: 手机
+        service_tag_hint: 无
+        notes: 赔偿不超过订单30%

@@ -1,19 +1,17 @@
 """
-评测树加载与校验：解析 eval_tree.yaml，提供批量生成/跑批共用的叶子列表。
+评测树加载与校验：解析 eval_tree*.yaml，提供批量生成/跑批共用的叶子列表。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eval.pipeline.paths import ROOT_DIR, SCENARIOS_DIR
+from eval.pipeline.paths import EVAL_TREE_PATH, ROOT_DIR, SCENARIOS_DIR
 
-EVAL_TREE_PATH = SCENARIOS_DIR / "eval_tree.yaml"
-_EXPECTED_AXIS_COUNTS = {"negotiation": 10, "merchant_fault": 5, "malicious": 5}
 _SERVICE_TAG_SKIP = frozenset({"无", ""})
 _ONLY_FILTER_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -48,13 +46,13 @@ class EvalLeaf:
 
 
 def _load_yaml_text(path: Path) -> Any:
-    """读取 YAML；无 PyYAML 时尝试按 JSON 解析（仅用于测试兜底）。"""
+    """读取评测树 YAML。"""
     text = path.read_text(encoding="utf-8")
     try:
         import yaml  # type: ignore[import-untyped]
     except ImportError as exc:
         raise RuntimeError(
-            "加载 eval_tree.yaml 需要 PyYAML，请执行：pip install PyYAML"
+            "加载评测树需要 PyYAML，请执行：pip install PyYAML"
         ) from exc
     return yaml.safe_load(text)
 
@@ -126,19 +124,19 @@ def load_eval_tree(tree_path: Path | None = None) -> list[EvalLeaf]:
 
 
 def get_tree_expectations(tree_path: Path | None = None) -> tuple[int, dict[str, int]]:
-    """从评测树 YAML 读取叶子总数与分轴数量期望；缺省沿用首批默认。"""
+    """从评测树 YAML 读取叶子总数与分轴数量期望。"""
     path = tree_path or EVAL_TREE_PATH
     if not path.is_file():
-        return 20, dict(_EXPECTED_AXIS_COUNTS)
+        raise FileNotFoundError(f"评测树文件不存在：{path}")
     payload = _load_yaml_text(path)
     if not isinstance(payload, dict):
-        return 20, dict(_EXPECTED_AXIS_COUNTS)
-    leaf_count = int(payload.get("leaf_count") or 20)
+        raise ValueError(f"评测树根节点必须是对象：{path}")
+    leaf_count = payload.get("leaf_count")
     raw_counts = payload.get("axis_counts")
-    if isinstance(raw_counts, dict) and raw_counts:
-        axis_counts = {str(axis_id): int(count) for axis_id, count in raw_counts.items()}
-        return leaf_count, axis_counts
-    return leaf_count, dict(_EXPECTED_AXIS_COUNTS)
+    if leaf_count is None or not isinstance(raw_counts, dict) or not raw_counts:
+        raise ValueError(f"评测树须声明 leaf_count 与 axis_counts：{path}")
+    axis_counts = {str(axis_id): int(count) for axis_id, count in raw_counts.items()}
+    return int(leaf_count), axis_counts
 
 
 def validate_eval_tree(leaves: list[EvalLeaf], *, tree_path: Path | None = None) -> None:
@@ -223,14 +221,18 @@ def filter_leaves(
     require_file: bool = False,
 ) -> list[EvalLeaf]:
     """按 --only 片段、status 与文件是否存在过滤叶子。"""
-    token = _ONLY_FILTER_RE.sub("", only.strip().lower())
+    raw = only.strip().lower()
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts and raw:
+        parts = [raw]
+    tokens = [_ONLY_FILTER_RE.sub("", part) for part in parts if _ONLY_FILTER_RE.sub("", part)]
     result: list[EvalLeaf] = []
     for leaf in leaves:
         if status and leaf.status != status:
             continue
-        if token:
+        if tokens:
             haystack = f"{leaf.case_id} {leaf.source_key}".lower()
-            if token not in haystack:
+            if not any(part in haystack for part in tokens):
                 continue
         if require_file and not leaf.path.is_file():
             continue

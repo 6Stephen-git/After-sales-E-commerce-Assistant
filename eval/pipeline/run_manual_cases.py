@@ -2,8 +2,8 @@
 手工全链路用例跑批：读取 scenario_gen 产出的 fixture.json，注入画像与判例 mock，走 AssistedController 并导出报告。
 
 用法（一般由 scenario_gen 调用；也可单独重跑已生成的 fixture）:
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
-  python -m eval.pipeline.run_manual_cases --file eval/output/scenarios/ng-02_evidence_compensation/fixture.json -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md --run -v
+  python -m eval.pipeline.run_manual_cases --file eval/output/scenarios/phase1/ma-01_review_blackmail/fixture.json -v
 
   须配置 .env（LLM、MySQL 平台规则库）；无图用例依赖 facts_override / visual_preset。
 """
@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
 
-from eval.pipeline.paths import MANUAL_REPORTS_DIR, ROOT_DIR
+from eval.pipeline.output_layout import manual_reports_bucket
+from eval.pipeline.paths import ROOT_DIR
 
 os.environ.setdefault("ENABLE_REDIS_CACHE", "0")
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -52,7 +53,6 @@ from backend.controllers.assisted_controller import clear_cache, run
 RUNNER_LOG_PREFIX = "[ManualCases]"
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = MANUAL_REPORTS_DIR
 
 DISPOSITION_LABEL = {
     "defend": "抗辩",
@@ -796,10 +796,11 @@ def _write_outputs(
     markdown_body: str,
 ) -> tuple[Path, Path]:
     """写入 Markdown 与 JSON 报告。"""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     base_name = f"{case_id}{step_suffix}"
-    md_path = OUTPUT_DIR / f"{base_name}.md"
-    json_path = OUTPUT_DIR / f"{base_name}.json"
+    out_dir = manual_reports_bucket(base_name)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = out_dir / f"{base_name}.md"
+    json_path = out_dir / f"{base_name}.json"
     try:
         md_path.write_text(markdown_body, encoding="utf-8")
         json_path.write_text(

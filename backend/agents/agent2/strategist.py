@@ -46,7 +46,15 @@ from schemas import (
     StrategyOutput,
 )
 from backend.tools.llm_client import chat_completion
+from backend.tools.agent2_tools import is_semantic_pressure_profile
 from backend.tools.text_signals import contains_any, pick_balanced_visual_observations, signal_group
+from backend.agents.agent2.resolution_contract import (
+    compose_offered_modes_next_step,
+    finalize_proposed_compensation,
+    infer_resolution_contract,
+    materialize_action_from_resolution,
+    should_de_escalate_pressure,
+)
 
 
 AGENT2_LOG_PREFIX = "[Agent2]"
@@ -274,12 +282,21 @@ def _is_evidence_insufficient_for_decision(input_data: StrategyInput) -> bool:
         True 表示应先进入「补证/固定证据」阶段。
     """
     facts = input_data.facts
+    missing = [str(item).strip() for item in (facts.missing_evidence or []) if str(item).strip()]
     skip_quality_evidence_gate = (
         _primary_dispute_frame(input_data) in FRAMES_SKIP_QUALITY_EVIDENCE_GATE
         and not _has_defect_claim(facts.defect_type)
     )
-    if facts.missing_evidence and not skip_quality_evidence_gate:
+    if missing and not skip_quality_evidence_gate:
         return True
+
+    readiness = (facts.decision_readiness or "").strip().lower()
+    if readiness == "high":
+        return False
+
+    evidence_quality = (facts.evidence_quality or "").strip().lower()
+    if not missing and evidence_quality == "high":
+        return False
 
     corpus_parts: List[str] = []
     if facts.uncertainty_note:
@@ -358,6 +375,25 @@ def _compose_evidence_first_next_step(input_data: StrategyInput) -> str:
     return "，".join(parts)
 
 
+def _should_de_escalate_pressure(
+    malicious_result: MaliciousDetectionOutput,
+    *,
+    responsibility: str,
+    responsibility_confidence: float,
+) -> bool:
+    """高/中恶意但仅语义施压、且非明确商责时，对外协商降格。"""
+    merchant_fault = (
+        responsibility == RESPONSIBILITY_MERCHANT
+        and responsibility_confidence >= 0.6
+    )
+    return should_de_escalate_pressure(
+        malicious_result,
+        responsibility=responsibility,
+        responsibility_confidence=responsibility_confidence,
+        merchant_fault=merchant_fault,
+    )
+
+
 def _infer_action_contract(
     input_data: StrategyInput,
     *,
@@ -370,29 +406,17 @@ def _infer_action_contract(
     malicious_result: MaliciousDetectionOutput,
 ) -> dict[str, Any]:
     """
-    将粗粒度处置方向细化为 Agent3 可执行的当前动作契约。
+    将粗粒度处置方向细化为 Agent3 可执行的当前动作契约（由 ResolutionContract 驱动）。
     """
     facts = input_data.facts
-    intent_blob = " ".join(str(tag) for tag in (facts.intent_tags or []))
-    constraints_blob = " ".join(str(item) for item in rule_constraints if item)
-    return_service_frame = _primary_dispute_frame(input_data) == DISPUTE_FRAME_SEVEN_DAY_RETURN
-    return_flow_context = return_service_frame or contains_any(
-        constraints_blob, ("退货", "寄回", "验收")
-    )
     merchant_fault = (
         responsibility == RESPONSIBILITY_MERCHANT
         and responsibility_confidence >= 0.6
     )
-
     timing_not_satisfied = _has_structured_constraint(
         input_data,
         constraint_type=RULE_CONSTRAINT_TIMING,
         statuses={RULE_CONSTRAINT_VIOLATED, RULE_CONSTRAINT_MISSING_FACT},
-    )
-    evidence_constraint = _has_structured_constraint(
-        input_data,
-        constraint_type=RULE_CONSTRAINT_EVIDENCE,
-        statuses={RULE_CONSTRAINT_APPLIES, RULE_CONSTRAINT_MISSING_FACT},
     )
     ratio_limit_texts = _structured_constraint_texts(
         input_data,
@@ -400,62 +424,36 @@ def _infer_action_contract(
         statuses={RULE_CONSTRAINT_APPLIES},
         limit=2,
     )
+    evidence_insufficient = _is_evidence_insufficient_for_decision(input_data)
+    de_escalate = _should_de_escalate_pressure(
+        malicious_result,
+        responsibility=responsibility,
+        responsibility_confidence=responsibility_confidence,
+    )
 
-    if timing_not_satisfied:
-        action_type = ACTION_RULE_EXPLAIN
-        compensation_policy = COMPENSATION_POLICY_NONE
-        timing_text = _primary_timing_constraint_text(input_data)
-        next_step = timing_text or "先向买家说明规则时效与处理边界，再核验保存方式和举证材料"
-    elif strategy_stage == STRATEGY_STAGE_EVIDENCE_FIRST:
-        action_type = ACTION_EVIDENCE_REQUEST
-        compensation_policy = COMPENSATION_POLICY_FORBID
-        next_step = _compose_evidence_first_next_step(input_data)
-    elif (
-        _primary_dispute_frame(input_data) in FRAMES_NO_MONETARY_SETTLE
-    ):
-        action_type = ACTION_RULE_EXPLAIN
-        compensation_policy = COMPENSATION_POLICY_NONE
-        if contains_any(f"{constraints_blob} {intent_blob}", signal_group("intact_return_markers")):
-            next_step = "引导买家按退货流程寄回，商家收到后严格验收，并提前告知验收不通过和运费风险"
-        else:
-            next_step = "先向买家说明规则边界和退货验收流程，再根据买家反馈推进寄回与验收"
-    elif disposition == DISPOSITION_COMPENSATE and merchant_fault:
-        action_type = ACTION_MERCHANT_REMEDY
-        compensation_policy = COMPENSATION_POLICY_EXPLICIT_AMOUNT
-        next_step = "商家给出明确的退款、退货、换货、补发或补偿处理方案，并请买家确认"
-    elif disposition == DISPOSITION_DEFEND or (malicious_result.risk_level or "").lower() == "high":
-        action_type = ACTION_DEFEND_PREPARE
-        compensation_policy = COMPENSATION_POLICY_NONE
-        next_step = "按规则说明当前不满足直接退款或补偿条件，并整理聊天、订单、物流和举证材料以备平台介入"
-    elif rule_constraints and (
-        rule_stance in {"neutral", "merchant"} or evidence_constraint
-    ):
-        if return_flow_context:
-            action_type = ACTION_RULE_EXPLAIN
-            if return_service_frame and contains_any(
-                f"{constraints_blob} {intent_blob}",
-                signal_group("intact_return_markers"),
-            ):
-                next_step = "引导买家按退货流程寄回，商家收到后严格验收，并提前告知验收不通过和运费风险"
-            else:
-                next_step = "引导买家按退货流程寄回，商家收到后按规则验收并根据结果处理"
-        else:
-            action_type = ACTION_RULE_EXPLAIN
-            next_step = "先向买家说明规则边界和处理流程，再根据买家反馈进入补证、验收或协商"
-        compensation_policy = COMPENSATION_POLICY_NONE
-    elif disposition == DISPOSITION_NEGOTIATE:
-        if _primary_dispute_frame(input_data) in FRAMES_NO_MONETARY_SETTLE and not merchant_fault:
-            action_type = ACTION_RULE_EXPLAIN
-            compensation_policy = COMPENSATION_POLICY_NONE
-            next_step = "先向买家说明规则边界和退货验收流程，再根据买家反馈推进寄回与验收"
-        else:
-            action_type = ACTION_MONETARY_SETTLE
-            compensation_policy = COMPENSATION_POLICY_EXPLICIT_AMOUNT
-            next_step = "在规则允许范围内给出明确金额或具体方案，并征求买家是否接受"
-    else:
-        action_type = ACTION_RETURN_INSPECTION
-        compensation_policy = COMPENSATION_POLICY_SOFT_NO_AMOUNT
-        next_step = "按退回验收流程推进，结果确认前不承诺最终退款或补偿"
+    resolution = infer_resolution_contract(
+        input_data,
+        disposition=disposition,
+        merchant_fault=merchant_fault,
+        timing_not_satisfied=timing_not_satisfied,
+        malicious_result=malicious_result,
+        de_escalate_pressure=de_escalate,
+        evidence_insufficient=evidence_insufficient,
+    )
+    timing_text = _primary_timing_constraint_text(input_data)
+    action = materialize_action_from_resolution(
+        resolution,
+        input_data=input_data,
+        disposition=disposition,
+        merchant_fault=merchant_fault,
+        timing_not_satisfied=timing_not_satisfied,
+        de_escalate_pressure=de_escalate,
+        timing_constraint_text=timing_text or "",
+    )
+
+    action_type = str(action.get("action_type") or ACTION_RULE_EXPLAIN)
+    compensation_policy = str(action.get("compensation_policy") or COMPENSATION_POLICY_NONE)
+    next_step = str(action.get("next_step") or "")
 
     resolved_constraints = list(rule_constraints)
     for ratio_text in ratio_limit_texts:
@@ -469,12 +467,27 @@ def _infer_action_contract(
         no_promise = "举证未闭环前，不承诺退款、补偿、优惠券或换新"
         if no_promise not in resolved_constraints:
             resolved_constraints.append(no_promise)
+    if resolution.require_inspection_before_refund:
+        inspection_note = "退款须走退货验收，验收前不承诺到账"
+        if inspection_note not in resolved_constraints:
+            resolved_constraints.append(inspection_note)
+
+    resolution = finalize_proposed_compensation(
+        resolution,
+        order_amount=float(input_data.order_amount or 0),
+    )
+    if resolution.proposed_compensation_amount is not None:
+        next_step = compose_offered_modes_next_step(
+            resolution,
+            de_escalate_pressure=de_escalate,
+        )
 
     return {
         "action_type": action_type,
         "compensation_policy": compensation_policy,
         "rule_constraints": resolved_constraints,
         "next_step": next_step,
+        "resolution_contract": resolution,
     }
 
 
@@ -497,10 +510,14 @@ def _determine_disposition(
     )
 
     if malicious_result.risk_level == "high":
+        if is_semantic_pressure_profile(malicious_result) and not merchant_fault:
+            return DISPOSITION_NEGOTIATE
         return DISPOSITION_DEFEND
     if malicious_result.risk_level == "medium" and merchant_fault:
         return DISPOSITION_NEGOTIATE
     if malicious_result.risk_level == "medium" and not merchant_fault:
+        if is_semantic_pressure_profile(malicious_result):
+            return DISPOSITION_NEGOTIATE
         return DISPOSITION_DEFEND
     if merchant_fault and malicious_result.risk_level == "low":
         return DISPOSITION_COMPENSATE
@@ -802,7 +819,18 @@ def _normalize_dialogue_context(
     fallback = str(data.get("fallback_script") or "").strip()
     if not fallback:
         turns = input_data.chat_turns or []
-        fallback = "我这边还在核对材料，核实完马上回您。" if turns else "您好，我这边还在核对材料，核实完马上回您。"
+        if missing:
+            fallback = (
+                f"麻烦您再补一下{missing[0]}，我收到马上继续查。"
+                if turns
+                else f"您好，麻烦您再补一下{missing[0]}，我收到马上继续查。"
+            )
+        else:
+            fallback = (
+                "这单材料我看了，跟您说下目前能怎么处理。"
+                if turns
+                else "您好，这单材料我看了，跟您说下目前能怎么处理。"
+            )
 
     return DialogueContext(
         dialogue_mode=mode,
@@ -1026,6 +1054,10 @@ def recommend(
         advice = str(malicious_result.disposition_advice or "").strip()
         if advice:
             risk_factors.append(f"[恶意层] {advice}")
+        if is_semantic_pressure_profile(malicious_result):
+            risk_factors.append(
+                "[恶意层] 识别到谈判施压信号：对外建议协商降格沟通并守住赔偿边界，内部仍固定备档"
+            )
     risk_factors.extend(value_risks)
 
     # 第二层：构建初始 prompt payload，调用 LLM 获取 responsibility
@@ -1238,4 +1270,5 @@ def recommend(
         customer_value=customer_value,
         malicious_detection=malicious_result,
         dialogue_context=dialogue_context,
+        resolution_contract=action_contract.get("resolution_contract"),
     )

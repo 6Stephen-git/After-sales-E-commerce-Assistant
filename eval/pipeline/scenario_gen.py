@@ -1,12 +1,12 @@
 """
-半结构化情景 Markdown → 审阅说明 + spec + fixture →（可选）跑全链路。
+半结构化情景 Markdown → spec + fixture →（可选）跑全链路。
 
 情景须含固定 6 段（背景/买家/争议/证据/参考/期望与禁忌），可选「其他说明」。
 模板见 eval/content/scenarios/scenario_template.md。
 
 用法:
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md -v
-  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md -v
+  python -m eval.pipeline.scenario_gen --input eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md --run -v
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ try:
 except ImportError:
     load_dotenv = None  # type: ignore[misc, assignment]
 
-from eval.pipeline.auxiliary_cases import apply_auxiliary_cases
-from eval.pipeline.paths import ROOT_DIR, SCENARIO_OUTPUT_DIR, SCENARIO_TEMPLATE_PATH
+from eval.pipeline.auxiliary_cases import apply_auxiliary_cases, resolve_similar_cases_from_narrative
+from eval.pipeline.output_layout import scenario_output_dir
+from eval.pipeline.paths import ROOT_DIR, SCENARIO_TEMPLATE_PATH
 from eval.pipeline.scenario_llm_utils import (
     call_llm_json,
     load_json_prompt,
@@ -33,7 +34,8 @@ from eval.pipeline.scenario_llm_utils import (
     scenario_gen_model_env,
     scenario_gen_temperature,
 )
-from eval.pipeline.scenario_spec import ScenarioSpec, validate_spec_dict
+from eval.pipeline.multistep_scenario import is_multistep_narrative, parse_multistep_narrative
+from eval.pipeline.scenario_spec import validate_spec_dict
 from eval.pipeline.spec_to_fixture import fixture_from_spec_dict, write_fixture
 
 if load_dotenv is not None:
@@ -41,7 +43,6 @@ if load_dotenv is not None:
 
 GEN_LOG_PREFIX = "[ScenarioGen]"
 logger = logging.getLogger(__name__)
-OUTPUT_DIR = SCENARIO_OUTPUT_DIR
 
 # ---------- 半结构化情景：固定段落标题 ----------
 SCENARIO_SECTION_HEADERS = (
@@ -136,8 +137,14 @@ def _chat_history_is_empty(spec_dict: dict[str, Any]) -> bool:
     return not isinstance(chat_history, list) or not chat_history
 
 
-def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
-    """调用编写 LLM：半结构化 Markdown → scenario_spec。"""
+def generate_spec_from_narrative(narrative: str, *, source_key: str = "") -> dict[str, Any]:
+    """半结构化 Markdown → scenario_spec（多步确定性解析或 LLM）。"""
+    if is_multistep_narrative(narrative):
+        spec_dict = parse_multistep_narrative(narrative, source_key=source_key)
+        spec = validate_spec_dict(spec_dict)
+        logger.info("%s 多步解析 spec case_id=%s steps=%d", GEN_LOG_PREFIX, spec.meta.case_id, len(spec.steps))
+        return spec.model_dump(mode="json")
+
     missing = _missing_section_headers(narrative)
     if missing:
         logger.warning(
@@ -162,6 +169,12 @@ def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
         fallback_model_env_key="AGENT2_LLM_MODEL",
         temperature=scenario_gen_temperature(),
     )
+    # ## 参考 为判例真源；LLM 常输出字符串 CASE-*，须在 validate 前归一
+    resolved_cases = resolve_similar_cases_from_narrative(narrative)
+    if resolved_cases is not None:
+        payload["similar_cases"] = resolved_cases
+    elif isinstance(payload.get("similar_cases"), list):
+        payload["similar_cases"] = [item for item in payload["similar_cases"] if isinstance(item, dict)]
     spec = validate_spec_dict(payload)
     if not (spec.human_review.scenario_restated or "").strip():
         raise ValueError(f"{GEN_LOG_PREFIX} 生成结果缺少 human_review.scenario_restated，请重试")
@@ -173,72 +186,27 @@ def generate_spec_from_narrative(narrative: str) -> dict[str, Any]:
     return spec_dict
 
 
-def render_review_markdown(spec: ScenarioSpec) -> str:
-    """把 spec 中的审阅块与期望整理为可读 Markdown。"""
-    hr = spec.human_review
-    exp = spec.expectation
-    lines = [
-        f"# 用例审阅：{spec.meta.case_id}",
-        "",
-        f"**标题**：{spec.meta.title}",
-        "",
-        "## 我们是否理解您的情景",
-        "",
-        hr.scenario_restated.strip(),
-        "",
-        "## 本用例要验证什么",
-        "",
-        hr.fixture_focus.strip(),
-        "",
-        "## 跑批前请确认",
-        "",
-    ]
-    for item in hr.checks_before_run:
-        lines.append(f"- {item}")
-    lines.extend(["", "## 期望策略倾向", "", exp.intent_summary.strip() or "（未提取）", ""])
-    if exp.forbidden_outputs:
-        lines.extend(["## 禁忌（不应出现的处理）", ""])
-        for item in exp.forbidden_outputs:
-            lines.append(f"- {item}")
-    if exp.acceptable_dispositions:
-        lines.extend(["", "## 可接受 disposition", "", ", ".join(exp.acceptable_dispositions)])
-    lines.extend(
-        [
-            "",
-            "## 技术产物",
-            "",
-            "- `spec.json`：完整中间态（含原文 `scenario_narrative`）",
-            "- `fixture.json`：可跑 `run_manual_cases` 的用例",
-            "",
-            "确认无误后再执行：`python -m eval.pipeline.scenario_gen --spec <spec路径> --run`",
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
 def write_outputs(
     spec_dict: dict[str, Any],
     *,
     out_dir: Path | None = None,
     source_key: str | None = None,
 ) -> dict[str, Path]:
-    """落盘 spec、fixture、审阅 Markdown。"""
+    """落盘 spec.json 与 fixture.json。"""
     spec = validate_spec_dict(spec_dict)
     slug = (source_key or spec.meta.source_key or _slug_from_case_id(spec.meta.case_id)).strip()
     if not slug:
         slug = _slug_from_case_id(spec.meta.case_id)
-    base = out_dir or (OUTPUT_DIR / slug)
+    base = out_dir or scenario_output_dir(slug)
     base.mkdir(parents=True, exist_ok=True)
 
     spec_path = base / "spec.json"
     fixture_path = base / "fixture.json"
-    review_path = base / "REVIEW.md"
 
     spec_path.write_text(json.dumps(spec_dict, ensure_ascii=False, indent=2), encoding="utf-8")
     write_fixture(fixture_from_spec_dict(spec_dict), fixture_path)
-    review_path.write_text(render_review_markdown(spec), encoding="utf-8")
 
-    return {"spec": spec_path, "fixture": fixture_path, "review": review_path}
+    return {"spec": spec_path, "fixture": fixture_path}
 
 
 def run_fixture(fixture_path: Path) -> list[tuple[Path, Path]]:
@@ -250,7 +218,7 @@ def run_fixture(fixture_path: Path) -> list[tuple[Path, Path]]:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="半结构化情景 Markdown → 审阅说明 + 测试用例（你审后再 --run）",
+        description="半结构化情景 Markdown → spec/fixture（可选 --run 跑全链路）",
     )
     parser.add_argument("--text", type=str, default="", help="直接粘贴半结构化情景（含 ## 背景 等标题）")
     parser.add_argument(
@@ -259,7 +227,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="情景 .md 路径（推荐；可复制 scenario_template.md）",
     )
-    parser.add_argument("--spec", type=str, default="", help="已审过的 spec.json，与 --run 联用")
+    parser.add_argument("--spec", type=str, default="", help="已有 spec.json，与 --run 联用")
     parser.add_argument("--run", action="store_true", help="跑全链路（须已生成或指定 --spec 同目录 fixture）")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
@@ -296,7 +264,10 @@ def main() -> int:
             text=args.text,
             input_path=input_path,
         )
-        spec_dict = generate_spec_from_narrative(narrative)
+        spec_dict = generate_spec_from_narrative(
+            narrative,
+            source_key=source_key_from_path(input_path) if input_path else "",
+        )
         spec_dict = apply_source_identity(spec_dict, input_path=input_path)
         resolved_source_key = str((spec_dict.get("meta") or {}).get("source_key") or "").strip()
         paths = write_outputs(spec_dict, source_key=resolved_source_key or None)
@@ -304,8 +275,7 @@ def main() -> int:
         print(f"生成失败：{exc}", file=sys.stderr)
         return 1
 
-    print("已生成（请先打开 REVIEW.md 审阅）：")
-    print(f"  审阅说明：{paths['review']}")
+    print("已生成：")
     print(f"  spec：    {paths['spec']}")
     print(f"  fixture： {paths['fixture']}")
 
@@ -318,7 +288,7 @@ def main() -> int:
         for md_path, json_path in written:
             print(f"报告：{md_path}\n      {json_path}")
     else:
-        print("确认后跑批：")
+        print("跑批：")
         print(f"  python -m eval.pipeline.scenario_gen --spec {paths['spec']} --run -v")
 
     return 0

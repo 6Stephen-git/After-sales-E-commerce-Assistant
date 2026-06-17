@@ -365,6 +365,16 @@ def _normalize_test_overrides_keys(overrides: dict[str, Any]) -> dict[str, Any]:
                     normalized["customer_lifetime_value"] = amount
                     break
 
+    if "compensation_ratio_cap" not in normalized:
+        for alias in ("compensation_ratio_cap", "赔偿", "赔偿上限"):
+            if alias not in normalized:
+                continue
+            text = str(normalized[alias] or "")
+            match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+            if match:
+                normalized["compensation_ratio_cap"] = float(match.group(1)) / 100
+                break
+
     if "order_value_score_threshold" in normalized:
         amount = _parse_amount_from_text(normalized["order_value_score_threshold"])
         if amount is not None:
