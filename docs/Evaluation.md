@@ -30,114 +30,101 @@
 
 ## LLM 情景评测（主路径）
 
-流程：**评测树 → Scenario Designer（批量）→ 情景 Markdown → 用例 LLM → 全链路跑批 → 报告 → Judge LLM → 批次汇总**。
+流程：**评测树 → 情景 Markdown → scenario_gen → 全链路跑批 → 硬断言 / Judge → 批次汇总**。
 
-当前 pilot 规模：**20 叶**（NG 8 / MF 4 / MA 4，比例 2:1:1），定义见 [`eval/content/scenarios/eval_tree.yaml`](../eval/content/scenarios/eval_tree.yaml)。工作流为 **Designer 生成后直接批量测试**，不设人工 REVIEW 环节与批次通过门槛。
+当前主测集为 **功能验证三期**（`functional/phase1|2|3/`），评测树见下表。`eval/output/` 按 phase 分子目录存放产物（详见 [`eval/output/README.md`](../eval/output/README.md)）。
+
+### 评测树
+
+| 文件 | 叶数 | 内容 |
+|------|------|------|
+| `eval_tree_ma.yaml` | 3 | 一期 MA 恶意抗辩 |
+| `eval_tree_val.yaml` | 3 | 一期 VAL 客户价值 |
+| `eval_tree_prec.yaml` | 3 | 一期 PREC 判例引用 |
+| `eval_tree_rule_evidence.yaml` | 3 | 一期 RULE 专责补证 |
+| `eval_tree_mixed.yaml` | 6 | 二期 MIX 混合单步 |
+| `eval_tree_multistep.yaml` | 8 | 三期 MS 多步 |
 
 ### 目录结构
 
 | 路径 | 职责 |
 |------|------|
-| `eval/content/scenarios/eval_tree.yaml` | 评测树（20 叶元数据、路径、因子、多样性提示） |
-| `eval/content/scenarios/` | 情景 Markdown（模板 + `pilot/<轴>/*.md`） |
-| `eval/content/prompts/` | 情景生成 / Judge 提示词与 JSON Schema |
-| `eval/pipeline/` | 跑批与 Judge（`batch_from_tree`、`run_batch_eval`、`scenario_gen`、`judge_cases` 等） |
-| `eval/output/` | 跑批与 Judge 产出（gitignore） |
-| `tests/eval/` | 评测链路的 pytest 单测 |
-| `tests/test_agent*.py` 等 | Agent / Controller 单元与集成测试 |
+| `eval/content/scenarios/functional/` | 功能验证情景 Markdown |
+| `eval/content/scenarios/eval_tree_*.yaml` | 各期评测树元数据 |
+| `eval/content/scenarios/scenario_template.md` | 情景模板 |
+| `eval/content/prompts/` | 情景生成 / Judge 提示词 |
+| `eval/pipeline/` | 跑批与 Judge 实现 |
+| `eval/output/` | 跑批产出（gitignore） |
+| `tests/eval/` | 评测链路 pytest |
 
 ### 1. 写情景
 
-需要从评测树叶子节点生成新情景时，可先用轻量 Scenario Designer Agent 生成单个 Markdown 草稿：
+复制 [`scenario_template.md`](../eval/content/scenarios/scenario_template.md) 手工编写，或用 Scenario Designer 生成草稿：
 
 ```bash
 python -m eval.pipeline.scenario_designer \
-  --axis 商责善后 \
-  --leaf "物流责任 + 补偿边界" \
-  --target-ability "识别物流责任并控制赔偿边界" \
-  --factors "物流异常, 破损包赔, 赔偿上限" \
-  --output eval/content/scenarios/pilot/merchant_fault/MF-01_example.md
+  --axis 恶意抗辩 \
+  --leaf "差评要挟 + 举证已齐" \
+  --target-ability "识别语义勒索并守住仅退边界" \
+  --factors "差评要挟, 举证已齐, 仅退款诉求" \
+  --output eval/content/scenarios/functional/phase1/malicious/MA-99_example.md
 ```
 
-单案仍可用 `scenario_designer`；**批量**新增叶子用：
+批量生成 `status: new` 的叶子：
 
 ```bash
-python -m eval.pipeline.batch_from_tree -v
-python -m eval.pipeline.batch_from_tree --only NG-01_rule_boundary_negotiate -v
+python -m eval.pipeline.batch_from_tree --tree eval/content/scenarios/eval_tree_ma.yaml -v
 ```
 
-仅处理 `eval_tree.yaml` 中 `status: new` 的叶子；失败记录写入 `eval/output/batch_gen_errors.jsonl`。
+失败记录写入 `eval/output/batch_gen_errors.jsonl`。
 
-亦可复制 [`eval/content/scenarios/scenario_template.md`](../eval/content/scenarios/scenario_template.md) 手工编写。
-
-**文件命名**（源情景 → 产出一一对应）：
+**文件命名**：
 
 | 层级 | 格式 | 示例 |
 |------|------|------|
-| 源 Markdown | `{轴缩写}-{序号}_{snake_case}.md` | `NG-02_evidence_compensation.md` |
-| 输出目录 `slug` / `source_key` | 源文件名 stem **小写** | `ng-02_evidence_compensation` |
-| `case_id` / 报告文件名 | stem **大写** | `NG-02_EVIDENCE_COMPENSATION.md` |
-| `dispute_id` | `DISPUTE-{case_id}` | `DISPUTE-NG-02_EVIDENCE_COMPENSATION` |
+| 源 Markdown | `{轴缩写}-{序号}_{snake_case}.md` | `MA-01_review_blackmail.md` |
+| `source_key` | stem 小写 | `ma-01_review_blackmail` |
+| `case_id` / 报告名 | stem 大写 | `MA-01_REVIEW_BLACKMAIL` |
 
-轴缩写：`NG` 协商、`MF` 商责善后、`MA` 恶意抗辩；序号两位数字。`eval/output/` 为跑批产物，可随时清理后按 `--spec … --run` 重跑。
-
-**服务标**：须为 `data/rule_match_lexicon.json` → `E_service_tag_to_doc_id` 已有键（如 `果径无忧`、`试饮可退`、`15天包活`、`先鉴后发`、`以旧换新` 等），勿反复只用 `坏单包退`/`破损包退`。评测树 `service_tag_hint` 按叶分配，Designer 生成前可查 `python -c "from eval.pipeline.eval_tree import list_lexicon_service_tags; print(len(list_lexicon_service_tags()))"`。
-
-| 段落 | 写什么 |
-|------|--------|
-| 背景 | 品类、金额、签收、服务标（lexicon 短名） |
-| 买家 | 表格 +「特殊说明」；`return_rate` / `refund_only_rate` 分开 |
-| 对话记录 | 买家诉求 + 4-7 轮聊天记录 |
-| 事实证据 | 图/视频解析、物流、视觉严重度、可挽回性、缺失材料 → `evidence_facts`（不传 URL） |
-| 参考 | 判例或单独一行「无」 |
-| 期望与禁忌 | 目标方向 + 关键动作 + 禁忌（Judge 专用，不进聊天） |
-| 其他说明 | 老客价值/赔偿/恶意规则自然语言 → `test_overrides` 数字键 |
+**服务标**：须为 `data/rule_match_lexicon.json` → `E_service_tag_to_doc_id` 已有键。可查 `python -c "from eval.pipeline.eval_tree import list_lexicon_service_tags; print(len(list_lexicon_service_tags()))"`。
 
 ### 2. 生成用例并跑链路
 
 ```bash
-python -m eval.pipeline.scenario_gen --input eval/content/scenarios/pilot/negotiation/NG-02_evidence_compensation.md --run -v
+python -m eval.pipeline.scenario_gen \
+  --input eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md --run -v
 ```
 
-产出（均在 `eval/output/`，已 gitignore）：
+产出（均在 `eval/output/`，按 phase 分子目录）：
 
 | 路径 | 内容 |
 |------|------|
-| `eval/output/scenarios/<slug>/` | `REVIEW.md`、`spec.json`、`fixture.json` |
-| `eval/output/manual_reports/` | `{CASE_ID}.md` / `.json`（全链路报告，如 `NG-02_EVIDENCE_COMPENSATION.md`） |
-
-生成后核对 `fixture.json` 中 `platform_service_tags`、`product_category_slug`。仅重跑链路：
-
-生成 fixture 时会检查被测输入是否泄露 `expectation`、`forbidden_outputs`、`human_review`、`期望策略`、`禁止`、`禁忌` 等 Judge 专用答案信息。
+| `eval/output/scenarios/<phase>/<slug>/` | `spec.json`、`fixture.json` |
+| `eval/output/manual_reports/<phase>/` | `{CASE_ID}.md` / `.json` |
+| `eval/output/eval_runs/<phase>/<run_id>/` | 批次汇总 |
 
 ```bash
-python -m eval.pipeline.scenario_gen --spec eval/output/scenarios/<slug>/spec.json --run -v
+python -m eval.pipeline.scenario_gen --spec eval/output/scenarios/phase1/<slug>/spec.json --run -v
 ```
 
 ### 3. Judge 评测
 
 ```bash
 python -m eval.pipeline.judge_cases \
-  --scenario-output eval/output/scenarios/<slug> \
-  --report eval/output/manual_reports/NG-02_EVIDENCE_COMPENSATION.json \
+  --scenario-output eval/output/scenarios/phase1/ma-01_review_blackmail \
+  --report eval/output/manual_reports/phase1/MA-01_REVIEW_BLACKMAIL.json \
   -v
 ```
 
-产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`。环境变量：`JUDGE_LLM_MODEL`（可回退 `AGENT2_LLM_MODEL`）。
-
 ### 4. 批量评测
 
-一键跑评测树全部已有 Markdown（生成 spec/fixture → 全链路 → Judge）：
-
 ```bash
-python -m eval.pipeline.run_batch_eval -v
-python -m eval.pipeline.run_batch_eval --skip-gen -v          # 仅重跑 fixture + Judge
-python -m eval.pipeline.run_batch_eval --only ng-02 -v      # 单案重跑
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_ma.yaml -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_multistep.yaml --skip-gen -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_mixed.yaml --only mix-04 -v
 ```
 
-产出：`eval/output/eval_runs/<run_id>/records.jsonl`、`SUMMARY.md`、**`BATCH_SUMMARY.md`**（分轴通过率、硬失败清单、跑批错误）。**不设批次 pass/fail 门槛**，仅供分析。
-
-本轮 Judge 采用硬失败 + 等权评分，重点指标包含期望对齐、禁忌安全、规则理解、规则边界能力、证据处理、恶意风险识别、客户价值权衡、商家利益、买家沟通、话术安全、话术可靠性；稳定性与策略一致性另做专项。
+产出：`BATCH_SUMMARY.md`、分轴通过率、硬失败清单。**不设批次 pass/fail 门槛**。
 
 ### 评测实现模块
 
@@ -153,3 +140,97 @@ python -m eval.pipeline.run_batch_eval --only ng-02 -v      # 单案重跑
 | `eval/pipeline/judge_cases.py` / `judge_models.py` | Judge 跑批 |
 
 pytest：`tests/eval/test_*.py` 覆盖上述链路；Agent/Controller 单测仍在 `tests/test_agent*.py` 等，与情景评测并行。
+
+## 功能验证评测（一期）
+
+目标：分轴隔离验证全链路决策能力——**硬断言挡门**，Judge **不挡门**（仅记 warnings）。Agent1 视觉由 `evidence_facts` 注入，不测识别准确率。
+
+计划全文见 Cursor Plan：`功能验证评测计划`。一期 **12 叶 / 4 轴**，情景在 `eval/content/scenarios/functional/phase1/`。
+
+### 三期递进
+
+| 期 | 内容 | 情景数 | 挡门 |
+|----|------|--------|------|
+| 一期 | MA / VAL / PREC / RULE 单轴隔离 | 12 | **仅硬断言** |
+| 二期 | 混合单步 MIX | 6 | **仅硬断言** |
+| 三期 | 混合多步 MS | 8 | **每步硬断言** |
+| 全程 | Judge LLM | 全跑 | **不挡门** |
+
+### 目录与评测树
+
+| 路径 | 职责 |
+|------|------|
+| `functional/phase1/malicious/` | MA 恶意抗辩（3 叶） |
+| `functional/phase1/value/` | VAL 客户价值（3 叶） |
+| `functional/phase1/precedent/` | PREC 判例引用（3 叶） |
+| `functional/phase1/rule_evidence/` | RULE 专责补证（3 叶） |
+| `functional/phase2/mixed/` | MIX 混合单步（6 叶） |
+| `eval_tree_ma.yaml` 等四棵 YAML | 一期各轴 3 叶元数据 |
+| `eval_tree_mixed.yaml` | 二期混合 6 叶 |
+| `eval_tree_multistep.yaml` | 三期多步 8 叶 |
+| `eval/content/cases/CASE-*.json` | 辅助判例（PREC / MIX 引用） |
+| `eval/pipeline/assert_report.py` | 结构化硬断言 |
+
+**证据约定**：决策类案普通举证默认已齐；仅 RULE 树在「缺失材料」写明规则专责缺口。
+
+**硬断言键**（写在情景 `expected_report` → `spec.expectation`，不进 fixture）：`malicious_risk_level_min` / `customer_value_channel` / `disposition_in` / `action_type` / `similar_cases_min` / `actionable_evidence_requests_contains` 等，见 [`assert_report.py`](../eval/pipeline/assert_report.py)。
+
+### 单案调试
+
+```bash
+python -m eval.pipeline.scenario_gen \
+  --input eval/content/scenarios/functional/phase1/malicious/MA-01_review_blackmail.md --run -v
+python -m eval.pipeline.assert_report \
+  --scenario-output eval/output/scenarios/phase1/ma-01_review_blackmail \
+  --report eval/output/manual_reports/phase1/MA-01_REVIEW_BLACKMAIL.json -v
+python -m eval.pipeline.judge_cases \
+  --scenario-output eval/output/scenarios/phase1/ma-01_review_blackmail \
+  --report eval/output/manual_reports/phase1/MA-01_REVIEW_BLACKMAIL.json -v
+```
+
+### 一期批次（按轴分别跑）
+
+```bash
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_ma.yaml -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_val.yaml -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_prec.yaml -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_rule_evidence.yaml -v
+```
+
+产出：`BATCH_SUMMARY.md` 分 **assert_pass** 与 **judge_warnings**；功能验证以硬断言通过率为准。
+
+## 功能验证评测（二期）
+
+目标：多因子**混合单步**验证——每叶叠 ≥2 因子，普通举证默认已齐；**硬断言挡门**，Judge 不挡门。
+
+情景目录：`eval/content/scenarios/functional/phase2/mixed/`（MIX-01～06）。
+
+| ID | 混合因子 |
+|----|----------|
+| MIX-01 | 高老客 + 差评勒索（`CASE-CONF-01`，恶意压过优待） |
+| MIX-02 | 高老客 + 生鲜超48小时 + 坏单争议 |
+| MIX-03 | 抗辩判例 + 高仅退画像（`CASE-MAL-01` + `abuse_refund_only`） |
+| MIX-04 | 商责明确 + 善后判例 + 赔偿上限（`CASE-MF-01`） |
+| MIX-05 | 职业索赔 + 伤亡大病包退 + 举证已齐 |
+| MIX-06 | 高本单金额 + 情绪化 + 部分补偿协商（`CASE-VAL-01`） |
+
+### 二期批次
+
+```bash
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_mixed.yaml -v
+```
+
+产出与一期相同：`eval/output/eval_runs/<phase>/<run_id>/BATCH_SUMMARY.md`（`assert_pass` + `judge_warnings`）。
+
+## 功能验证评测（三期）
+
+目标：多步对话弧 — 每步独立快照跑批，终局验「给方案」；**每步硬断言**，Judge 可选。
+
+情景目录：`eval/content/scenarios/functional/phase3/multistep/`（MS-01～08）。
+
+```bash
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_multistep.yaml -v
+python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_multistep.yaml --skip-assert --run-id phase3-ms-judge -v
+```
+
+多步报告路径：`eval/output/manual_reports/phase3/{CASE_ID}__stepNN_{标签}.json`。

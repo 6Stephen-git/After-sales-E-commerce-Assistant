@@ -454,6 +454,30 @@ STRONG_MALICIOUS_SIGNAL_TYPES = frozenset(
 )
 _RISK_LEVEL_ORDER = {"low": 0, "medium": 1, "high": 2}
 
+# 语义施压类信号：常见于情绪+要挟，识别后对外宜协商降格，非硬欺诈
+PRESSURE_SEMANTIC_SIGNAL_TYPES = frozenset(
+    {
+        "review_blackmail",
+        "abuse_refund_intent_chat",
+        "professional_claim_pattern",
+    }
+)
+# 硬欺诈/套利类信号：须抗辩备料，不宜仅按施压处理
+HARD_MALICIOUS_SIGNAL_TYPES = frozenset(
+    {
+        "deceptive_credential",
+        "statement_evidence_mismatch",
+        "identity_impersonation",
+        "evidence_contradiction",
+        "abuse_refund_only",
+        "batch_malicious_orders",
+        "freight_insurance_abuse",
+        "swap_or_missing_items",
+        "abnormal_return_address",
+        "related_accounts",
+    }
+)
+
 
 def _make_malicious_signal(signal_type: str, description: str, score: int, source: str) -> MaliciousSignal:
     """
@@ -906,10 +930,35 @@ def _resolve_risk_level(risk_score: int, signals: List[MaliciousSignal]) -> str:
     return _max_risk_level(_risk_level_from_score(risk_score), _risk_level_floor_from_signals(signals))
 
 
-def _disposition_advice_from_level(risk_level: str) -> str:
+def is_semantic_pressure_signals(signals: List[MaliciousSignal]) -> bool:
+    """判断信号列表是否仅含语义施压类（无硬欺诈/硬规则）。"""
+    if not signals:
+        return False
+    for item in signals:
+        if item.source == "hard_rule" or item.signal_type in HARD_MALICIOUS_SIGNAL_TYPES:
+            return False
+        if item.signal_type not in PRESSURE_SEMANTIC_SIGNAL_TYPES:
+            return False
+    return True
+
+
+def is_semantic_pressure_profile(malicious_result: MaliciousDetectionOutput | None) -> bool:
+    """
+    判断是否仅为语义施压（差评要挟、聊天套利话术等），无硬规则欺诈信号。
+
+    用于策略层：识别可保持 high/medium，但对外动作宜 rule_explain + 协商降格。
+    """
+    if malicious_result is None:
+        return False
+    return is_semantic_pressure_signals(malicious_result.triggered_signals or [])
+
+
+def _disposition_advice_from_level(risk_level: str, *, signals: List[MaliciousSignal] | None = None) -> str:
     """
     根据风险等级生成处置建议。
     """
+    if risk_level == "high" and signals and is_semantic_pressure_signals(signals):
+        return "已识别谈判施压信号，建议对外协商降格沟通并守住赔偿边界，内部同步固定备档材料。"
     if risk_level == "high":
         return "建议优先抗辩并准备平台介入材料，固定完整证据链后再沟通。"
     if risk_level == "medium":
@@ -930,7 +979,7 @@ def detect_malicious_behavior(input_data: MaliciousDetectionInput) -> MaliciousD
     risk_level = _resolve_risk_level(risk_total_score, all_signals)
     hard_rule_summary = _build_hard_rule_summary(hard_signals)
     malicious_risk_hints = _format_malicious_risk_hints(all_signals)
-    disposition_advice = _disposition_advice_from_level(risk_level)
+    disposition_advice = _disposition_advice_from_level(risk_level, signals=all_signals)
 
     logger.info(
         "%s 恶意行为检测完成 risk_score=%s risk_level=%s signal_count=%s",

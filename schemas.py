@@ -103,6 +103,22 @@ VALID_COMPENSATION_POLICIES = [
     COMPENSATION_POLICY_EXPLICIT_AMOUNT,
 ]
 
+# 处置方案模式（ResolutionContract 真源，Agent3 口语化须服从）
+SETTLEMENT_REFUND_ONLY = "refund_only"
+SETTLEMENT_RETURN_REFUND = "return_refund"
+SETTLEMENT_EXCHANGE = "exchange"
+SETTLEMENT_PARTIAL_COMPENSATE = "partial_compensate"
+SETTLEMENT_REPAIR = "repair"
+SETTLEMENT_REFUND_FULL = "refund_full"
+VALID_SETTLEMENT_MODES = [
+    SETTLEMENT_REFUND_ONLY,
+    SETTLEMENT_RETURN_REFUND,
+    SETTLEMENT_EXCHANGE,
+    SETTLEMENT_PARTIAL_COMPENSATE,
+    SETTLEMENT_REPAIR,
+    SETTLEMENT_REFUND_FULL,
+]
+
 # 责任归属枚举
 RESPONSIBILITY_MERCHANT = "merchant_fault"
 RESPONSIBILITY_BUYER = "buyer_fault"
@@ -444,6 +460,39 @@ class MaliciousDetectionOutput(BaseModel):
     disposition_advice: str = Field(default="", description="处置建议方向")
 
 
+class ResolutionContract(BaseModel):
+    """
+    单步可执行方案空间契约：由 Agent2 根据事实、规则与画像推断，Agent3 仅口语化不得越界。
+    """
+    decision_ready: bool = Field(
+        ...,
+        description="举证已闭环，可向买家给出处置方案（非补证拖延）",
+    )
+    forbidden_modes: List[str] = Field(
+        default_factory=list,
+        description=f"禁止向买家承诺的结算模式：{'/'.join(VALID_SETTLEMENT_MODES)}",
+    )
+    offered_modes: List[str] = Field(
+        default_factory=list,
+        description=f"须向买家明确给出的可接受方案（至少择一说明）：{'/'.join(VALID_SETTLEMENT_MODES)}",
+    )
+    require_inspection_before_refund: bool = Field(
+        default=False,
+        description="退款须走退货验收流程，禁止口头承诺到账",
+    )
+    compensation_ratio_cap: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="部分补偿占订单金额上限比例（0-1）",
+    )
+    proposed_compensation_amount: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="本案建议向买家报出的确定部分补偿金额（元）；有值时 Agent3 须照此口语化，不得改为「X以内商量」",
+    )
+
+
 class StrategyOutput(BaseModel):
     """Agent 2 输出：策略建议"""
     disposition: str = Field(..., description=f"处置方向：{'/'.join(VALID_DISPOSITIONS)}")
@@ -506,6 +555,10 @@ class StrategyOutput(BaseModel):
     dialogue_context: Optional[DialogueContext] = Field(
         default=None,
         description="对话语境（blocked/actionable 举证与 fallback 话术，供 Agent3 消费）",
+    )
+    resolution_contract: Optional[ResolutionContract] = Field(
+        default=None,
+        description="方案空间契约：decision_ready/forbidden_modes/offered_modes，Agent3 服从此字段",
     )
 
 

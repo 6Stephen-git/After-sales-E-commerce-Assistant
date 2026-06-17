@@ -2,9 +2,9 @@
 批量评测：评测树叶子 → scenario_gen + 全链路跑批 → 硬断言 → Judge → BATCH_SUMMARY。
 
 用法:
-  python -m eval.pipeline.run_batch_eval -v
-  python -m eval.pipeline.run_batch_eval --skip-gen -v
-  python -m eval.pipeline.run_batch_eval --only ng-02 -v
+  python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_ma.yaml -v
+  python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_multistep.yaml --skip-gen -v
+  python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_mixed.yaml --only mix-04 -v
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ except ImportError:
     load_dotenv = None  # type: ignore[misc, assignment]
 
 from eval.pipeline.assert_models import AssertRecord
-from eval.pipeline.assert_report import assert_case, write_assert_jsonl
+from eval.pipeline.assert_report import assert_case, assert_multistep_case, write_assert_jsonl
+from eval.pipeline.assert_report import _spec_has_steps
 from eval.pipeline.eval_tree import (
     EVAL_TREE_PATH,
     EvalLeaf,
@@ -33,14 +34,16 @@ from eval.pipeline.eval_tree import (
     validate_eval_tree,
     write_jsonl_line,
 )
-from eval.pipeline.judge_cases import judge_case, write_summary
+from eval.pipeline.judge_cases import judge_case, judge_multistep_case, write_summary
 from eval.pipeline.judge_models import JudgeRecord
-from eval.pipeline.paths import (
-    EVAL_RUNS_DIR,
-    MANUAL_REPORTS_DIR,
-    ROOT_DIR,
-    SCENARIO_OUTPUT_DIR,
+from eval.pipeline.output_layout import (
+    eval_run_dir,
+    list_step_report_jsons,
+    manual_report_json_path,
+    manual_report_md_path,
+    scenario_output_dir,
 )
+from eval.pipeline.paths import ROOT_DIR
 from eval.pipeline.scenario_gen import (
     apply_source_identity,
     generate_spec_from_narrative,
@@ -64,17 +67,17 @@ def _now_run_id() -> str:
 
 def _scenario_output_dir(leaf: EvalLeaf) -> Path:
     """叶子对应的 scenario_gen 输出目录。"""
-    return SCENARIO_OUTPUT_DIR / leaf.source_key
+    return scenario_output_dir(leaf.source_key)
 
 
 def _report_json_path(leaf: EvalLeaf) -> Path:
     """全链路报告 JSON 路径。"""
-    return MANUAL_REPORTS_DIR / f"{leaf.report_case_id}.json"
+    return manual_report_json_path(leaf.report_case_id)
 
 
 def _report_md_path(leaf: EvalLeaf) -> Path:
     """全链路报告 Markdown 路径。"""
-    return MANUAL_REPORTS_DIR / f"{leaf.report_case_id}.md"
+    return manual_report_md_path(leaf.report_case_id)
 
 
 def generate_and_run_leaf(leaf: EvalLeaf) -> tuple[Path, Path]:
@@ -87,7 +90,7 @@ def generate_and_run_leaf(leaf: EvalLeaf) -> tuple[Path, Path]:
         raise FileNotFoundError(f"情景 Markdown 不存在：{leaf.path}")
 
     narrative = load_narrative(text="", input_path=leaf.path)
-    spec_dict = generate_spec_from_narrative(narrative)
+    spec_dict = generate_spec_from_narrative(narrative, source_key=source_key_from_path(leaf.path))
     spec_dict = apply_source_identity(spec_dict, input_path=leaf.path)
     paths = write_outputs(spec_dict, source_key=source_key_from_path(leaf.path))
 
@@ -113,32 +116,67 @@ def rerun_leaf(leaf: EvalLeaf) -> tuple[Path, Path]:
     return scenario_dir, report_json
 
 
-def assert_leaf(leaf: EvalLeaf, *, run_id: str) -> AssertRecord:
-    """对单叶报告执行结构化硬断言。"""
+def assert_leaf_records(leaf: EvalLeaf, *, run_id: str) -> list[AssertRecord]:
+    """对单叶（或逐步）报告执行结构化硬断言。"""
     scenario_dir = _scenario_output_dir(leaf)
+    spec_path = scenario_dir / "spec.json"
+    if not spec_path.is_file():
+        raise FileNotFoundError(f"缺少 spec.json：{spec_path}")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+
+    if _spec_has_steps(spec):
+        report_paths = list_step_report_jsons(leaf.report_case_id)
+        if not report_paths:
+            raise FileNotFoundError(f"缺少多步报告 JSON：{leaf.report_case_id}__step*.json")
+        return assert_multistep_case(
+            scenario_output=scenario_dir,
+            report_json_paths=report_paths,
+            run_id=run_id,
+        )
+
     report_json = _report_json_path(leaf)
     if not report_json.is_file():
         raise FileNotFoundError(f"缺少报告 JSON：{report_json}")
-    return assert_case(
-        scenario_output=scenario_dir,
-        report_json_path=report_json,
-        run_id=run_id,
-    )
+    return [
+        assert_case(
+            scenario_output=scenario_dir,
+            report_json_path=report_json,
+            run_id=run_id,
+        )
+    ]
 
 
-def judge_leaf(leaf: EvalLeaf, *, run_id: str) -> JudgeRecord:
-    """对单叶报告执行 Judge。"""
+def judge_leaf_records(leaf: EvalLeaf, *, run_id: str, eval_root: Path) -> list[JudgeRecord]:
+    """对单叶（或多步每步）报告执行 Judge。"""
     scenario_dir = _scenario_output_dir(leaf)
+    spec_path = scenario_dir / "spec.json"
+    if not spec_path.is_file():
+        raise FileNotFoundError(f"缺少 spec.json：{spec_path}")
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+
+    if _spec_has_steps(spec):
+        report_paths = list_step_report_jsons(leaf.report_case_id)
+        if not report_paths:
+            raise FileNotFoundError(f"缺少多步报告 JSON：{leaf.report_case_id}__step*.json")
+        return judge_multistep_case(
+            scenario_output=scenario_dir,
+            report_json_paths=report_paths,
+            eval_root=eval_root,
+            run_id=run_id,
+        )
+
     report_json = _report_json_path(leaf)
     if not report_json.is_file():
         raise FileNotFoundError(f"缺少报告 JSON：{report_json}")
-    return judge_case(
-        scenario_output=scenario_dir,
-        report_json_path=report_json,
-        report_md_path=_report_md_path(leaf),
-        eval_root=EVAL_RUNS_DIR,
-        run_id=run_id,
-    )
+    return [
+        judge_case(
+            scenario_output=scenario_dir,
+            report_json_path=report_json,
+            report_md_path=_report_md_path(leaf),
+            eval_root=eval_root,
+            run_id=run_id,
+        )
+    ]
 
 
 def _axis_label(axis_id: str) -> str:
@@ -147,6 +185,11 @@ def _axis_label(axis_id: str) -> str:
         "negotiation": "NG 妥善协商",
         "merchant_fault": "MF 商责善后",
         "malicious": "MA 恶意抗辩",
+        "value": "VAL 客户价值",
+        "precedent": "PREC 判例",
+        "rule_evidence": "RULE 专责补证",
+        "mixed": "MIX 混合单步",
+        "multistep": "MS 多步快照",
     }
     return mapping.get(axis_id, axis_id)
 
@@ -191,7 +234,7 @@ def write_batch_summary(
         f"- 完成 Judge 数：{total}",
         f"- Judge 通过数：{judge_passed}（{judge_pass_rate:.1f}%）",
         f"- Judge 失败数：{judge_failed}",
-        f"- Judge 平均分：{average:.1f}",
+        f"- Judge 平均分：{average:.1f}" if total else "- Judge：**已跳过**",
         "",
         "> 功能验证以**硬断言**为准；Judge 不挡门，话术问题见 Judge 记录与 warnings。",
         "",
@@ -260,6 +303,8 @@ def run_batch_eval(
     tree_path: Path,
     only: str = "",
     skip_gen: bool = False,
+    skip_judge: bool = False,
+    skip_assert: bool = False,
     run_id: str = "",
     error_log: Path | None = None,
 ) -> Path:
@@ -275,8 +320,9 @@ def run_batch_eval(
         raise ValueError("无可用叶子（Markdown 文件不存在或 --only 无匹配）")
 
     resolved_run_id = run_id.strip() or _now_run_id()
-    run_dir = EVAL_RUNS_DIR / resolved_run_id
+    run_dir = eval_run_dir(resolved_run_id, tree_path=tree_path)
     run_dir.mkdir(parents=True, exist_ok=True)
+    eval_root = run_dir.parent
 
     errors_path = error_log or (run_dir / "batch_errors.jsonl")
     if errors_path.is_file():
@@ -296,38 +342,46 @@ def run_batch_eval(
             else:
                 generate_and_run_leaf(leaf)
 
-            assert_record = assert_leaf(leaf, run_id=resolved_run_id)
-            assert_record.timestamp = datetime.now(timezone.utc)
-            write_assert_jsonl(assert_record, run_dir=run_dir)
-            assert_records.append(assert_record)
-            assert_status = "PASS" if assert_record.result.pass_ else "FAIL"
-            if not assert_record.result.pass_:
-                logger.warning(
-                    "%s 硬断言 %s：%s；%s",
-                    BATCH_EVAL_LOG_PREFIX,
-                    leaf.case_id,
-                    assert_status,
-                    "; ".join(assert_record.result.failures),
-                )
+            step_assert_records = assert_leaf_records(leaf, run_id=resolved_run_id)
+            if not skip_assert:
+                for assert_record in step_assert_records:
+                    assert_record.timestamp = datetime.now(timezone.utc)
+                    write_assert_jsonl(assert_record, run_dir=run_dir)
+                    assert_records.append(assert_record)
+                    assert_status = "PASS" if assert_record.result.pass_ else "FAIL"
+                    if not assert_record.result.pass_:
+                        logger.warning(
+                            "%s 硬断言 %s：%s；%s",
+                            BATCH_EVAL_LOG_PREFIX,
+                            assert_record.case_id,
+                            assert_status,
+                            "; ".join(assert_record.result.failures),
+                        )
+                    else:
+                        logger.info(
+                            "%s 硬断言 %s：%s（%d 项）",
+                            BATCH_EVAL_LOG_PREFIX,
+                            assert_record.case_id,
+                            assert_status,
+                            assert_record.result.checked_count,
+                        )
             else:
-                logger.info(
-                    "%s 硬断言 %s：%s（%d 项）",
-                    BATCH_EVAL_LOG_PREFIX,
-                    leaf.case_id,
-                    assert_status,
-                    assert_record.result.checked_count,
-                )
+                logger.info("%s 跳过硬断言 %s", BATCH_EVAL_LOG_PREFIX, leaf.case_id)
 
-            record = judge_leaf(leaf, run_id=resolved_run_id)
-            records.append(record)
-            judge_status = "PASS" if record.result.pass_ else "FAIL"
-            logger.info(
-                "%s Judge %s：%s %d 分",
-                BATCH_EVAL_LOG_PREFIX,
-                leaf.case_id,
-                judge_status,
-                record.result.overall_score,
-            )
+            if not skip_judge:
+                judge_records = judge_leaf_records(leaf, run_id=resolved_run_id, eval_root=eval_root)
+                for record in judge_records:
+                    records.append(record)
+                    judge_status = "PASS" if record.result.pass_ else "FAIL"
+                    logger.info(
+                        "%s Judge %s：%s %d 分",
+                        BATCH_EVAL_LOG_PREFIX,
+                        record.case_id,
+                        judge_status,
+                        record.result.overall_score,
+                    )
+            else:
+                logger.info("%s 跳过 Judge %s", BATCH_EVAL_LOG_PREFIX, leaf.case_id)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "%s 失败 %s：%s",
@@ -367,6 +421,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="跳过 scenario_gen，仅重跑 fixture 链路与 Judge",
     )
+    parser.add_argument(
+        "--skip-judge",
+        action="store_true",
+        help="跑完整链路，跳过 Judge LLM",
+    )
+    parser.add_argument(
+        "--skip-assert",
+        action="store_true",
+        help="跳过结构化硬断言，仅跑链路与 Judge",
+    )
     parser.add_argument("--run-id", default="", help="指定 eval_runs 子目录名")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
@@ -385,6 +449,8 @@ def main(argv: list[str] | None = None) -> int:
             tree_path=Path(args.tree),
             only=args.only,
             skip_gen=args.skip_gen,
+            skip_judge=args.skip_judge,
+            skip_assert=args.skip_assert,
             run_id=args.run_id,
         )
     except Exception as exc:  # noqa: BLE001

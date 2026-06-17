@@ -1,0 +1,41 @@
+# 功能验证一期：判例轴（PREC）
+version: 1
+leaf_count: 3
+axis_counts:
+  precedent: 3
+
+axes:
+  - id: precedent
+    label: 判例引用
+    prefix: PREC
+    dir: functional/phase1/precedent
+    leaves:
+      - case_id: PREC-01_defend_precedent
+        status: existing
+        path: eval/content/scenarios/functional/phase1/precedent/PREC-01_defend_precedent.md
+        leaf: 注入抗辩成功判例 → defend 倾向
+        target_ability: similar_cases 注入后策略引用经验抗辩
+        factors: 描述不符主张, 举证已齐, CASE-MAL-01
+        category_hint: 家装灯饰光源
+        service_tag_hint: 破损包赔
+        notes: 无恶意、价值中性
+
+      - case_id: PREC-02_negotiate_precedent
+        status: existing
+        path: eval/content/scenarios/functional/phase1/precedent/PREC-02_negotiate_precedent.md
+        leaf: 注入部分补偿判例 → negotiate
+        target_ability: 判例引导下协商处置
+        factors: 部分货损, 举证已齐, CASE-VAL-01
+        category_hint: 水产肉类
+        service_tag_hint: 坏单包退
+        notes: 无恶意、价值中性
+
+      - case_id: PREC-03_no_precedent_baseline
+        status: existing
+        path: eval/content/scenarios/functional/phase1/precedent/PREC-03_no_precedent_baseline.md
+        leaf: 参考「无」对照基线
+        target_ability: 无判例时独立推理
+        factors: 品质划痕, 举证已齐, 无判例
+        category_hint: 住宅家具
+        service_tag_hint: 破损包退
+        notes: similar_cases 应为空

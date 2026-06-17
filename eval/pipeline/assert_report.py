@@ -3,8 +3,8 @@
 
 用法:
   python -m eval.pipeline.assert_report \\
-    --scenario-output eval/output/scenarios/ma-01_review_blackmail \\
-    --report eval/output/manual_reports/MA-01_REVIEW_BLACKMAIL.json -v
+    --scenario-output eval/output/scenarios/phase1/ma-01_review_blackmail \\
+    --report eval/output/manual_reports/phase1/MA-01_REVIEW_BLACKMAIL.json -v
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ except ImportError:
     load_dotenv = None  # type: ignore[misc, assignment]
 
 from eval.pipeline.assert_models import AssertRecord, AssertResult
-from eval.pipeline.paths import EVAL_RUNS_DIR, ROOT_DIR
+from eval.pipeline.output_layout import eval_run_dir
+from eval.pipeline.paths import ROOT_DIR
 
 if load_dotenv is not None:
     load_dotenv(ROOT_DIR / ".env")
@@ -76,6 +77,27 @@ def _extract_expected_report(spec: dict[str, Any]) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _extract_step_expected_report(spec: dict[str, Any], step_index: int) -> dict[str, Any]:
+    """从 spec.steps[step_index] 取出 expected_report。"""
+    steps = spec.get("steps")
+    if not isinstance(steps, list) or step_index < 0 or step_index >= len(steps):
+        return {}
+    step = steps[step_index]
+    if not isinstance(step, dict):
+        return {}
+    expectation = step.get("expectation")
+    if not isinstance(expectation, dict):
+        return {}
+    raw = expectation.get("expected_report")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _spec_has_steps(spec: dict[str, Any]) -> bool:
+    """spec 是否含多步快照。"""
+    steps = spec.get("steps")
+    return isinstance(steps, list) and len(steps) > 0
+
+
 def _report_view(report: dict[str, Any]) -> dict[str, Any]:
     """从 AnalysisReport JSON 提取断言常用字段。"""
     strategy = report.get("strategy") if isinstance(report.get("strategy"), dict) else {}
@@ -105,6 +127,9 @@ def _report_view(report: dict[str, Any]) -> dict[str, Any]:
     matched_rules = report.get("matched_rules") or []
     similar_cases = report.get("similar_cases") or []
 
+    resolution_raw = strategy.get("resolution_contract")
+    resolution: dict[str, Any] = dict(resolution_raw) if isinstance(resolution_raw, dict) else {}
+
     return {
         "malicious_risk_level": str(malicious.get("risk_level") or "").strip().lower(),
         "triggered_signal_types": signal_types,
@@ -116,6 +141,22 @@ def _report_view(report: dict[str, Any]) -> dict[str, Any]:
         "similar_cases_count": len(similar_cases) if isinstance(similar_cases, list) else 0,
         "actionable_evidence_requests": actionable_list,
         "reasoning_blob": reasoning_blob,
+        "resolution_decision_ready": bool(resolution.get("decision_ready")),
+        "offered_modes": [
+            str(mode).strip().lower()
+            for mode in (resolution.get("offered_modes") or [])
+            if str(mode).strip()
+        ]
+        if isinstance(resolution.get("offered_modes"), list)
+        else [],
+        "forbidden_modes": [
+            str(mode).strip().lower()
+            for mode in (resolution.get("forbidden_modes") or [])
+            if str(mode).strip()
+        ]
+        if isinstance(resolution.get("forbidden_modes"), list)
+        else [],
+        "proposed_compensation_amount": resolution.get("proposed_compensation_amount"),
     }
 
 
@@ -271,6 +312,13 @@ def assert_report_fields(
             _fail(failures, field="action_type_not", expected=f"非 {blocked}", actual=view["action_type"])
 
     # ---------- 策略阶段 ----------
+    stage_in = _as_str_list(expected.get("strategy_stage_in"))
+    if stage_in:
+        checked += 1
+        allowed = {s.lower() for s in stage_in}
+        if view["strategy_stage"] not in allowed:
+            _fail(failures, field="strategy_stage_in", expected=list(allowed), actual=view["strategy_stage"])
+
     for blocked in _as_str_list(expected.get("strategy_stage_not")):
         checked += 1
         if view["strategy_stage"] == blocked.lower():
@@ -324,6 +372,22 @@ def assert_report_fields(
                 actual=view["actionable_evidence_requests"],
             )
 
+    requests_min = _parse_non_negative_int(
+        expected.get("actionable_evidence_requests_min"),
+        field="actionable_evidence_requests_min",
+        failures=failures,
+    )
+    if requests_min is not None:
+        checked += 1
+        actual_count = len(view["actionable_evidence_requests"])
+        if actual_count < requests_min:
+            _fail(
+                failures,
+                field="actionable_evidence_requests_min",
+                expected=f">={requests_min}",
+                actual=view["actionable_evidence_requests"],
+            )
+
     for fragment in _as_str_list(expected.get("actionable_evidence_requests_contains")):
         checked += 1
         joined = " ".join(view["actionable_evidence_requests"])
@@ -334,6 +398,120 @@ def assert_report_fields(
                 expected=fragment,
                 actual=view["actionable_evidence_requests"],
             )
+
+    # ---------- ResolutionContract（方案空间） ----------
+    if expected.get("resolution_contract_decision_ready") is True:
+        checked += 1
+        if not view["resolution_decision_ready"]:
+            _fail(
+                failures,
+                field="resolution_contract_decision_ready",
+                expected=True,
+                actual=view["resolution_decision_ready"],
+            )
+    elif expected.get("resolution_contract_decision_ready") is False:
+        checked += 1
+        if view["resolution_decision_ready"]:
+            _fail(
+                failures,
+                field="resolution_contract_decision_ready",
+                expected=False,
+                actual=view["resolution_decision_ready"],
+            )
+
+    for mode in _as_str_list(expected.get("offered_modes_contains")):
+        checked += 1
+        if mode.lower() not in view["offered_modes"]:
+            _fail(
+                failures,
+                field="offered_modes_contains",
+                expected=mode,
+                actual=view["offered_modes"],
+            )
+
+    for mode in _as_str_list(expected.get("forbidden_modes_not_contains")):
+        checked += 1
+        if mode.lower() in view["forbidden_modes"]:
+            _fail(
+                failures,
+                field="forbidden_modes_not_contains",
+                expected=f"不含 {mode}",
+                actual=view["forbidden_modes"],
+            )
+
+    for mode in _as_str_list(expected.get("forbidden_modes_contains")):
+        checked += 1
+        if mode.lower() not in view["forbidden_modes"]:
+            _fail(
+                failures,
+                field="forbidden_modes_contains",
+                expected=mode,
+                actual=view["forbidden_modes"],
+            )
+
+    amount_expected = expected.get("proposed_compensation_amount_expected")
+    if amount_expected is not None:
+        checked += 1
+        try:
+            expected_amount = float(amount_expected)
+        except (TypeError, ValueError):
+            _fail(
+                failures,
+                field="proposed_compensation_amount_expected",
+                expected="数值",
+                actual=amount_expected,
+            )
+        else:
+            actual_raw = view["proposed_compensation_amount"]
+            try:
+                actual_amount = float(actual_raw)
+            except (TypeError, ValueError):
+                _fail(
+                    failures,
+                    field="proposed_compensation_amount_expected",
+                    expected=expected_amount,
+                    actual=actual_raw,
+                )
+            else:
+                if abs(actual_amount - expected_amount) > 0.05:
+                    _fail(
+                        failures,
+                        field="proposed_compensation_amount_expected",
+                        expected=expected_amount,
+                        actual=actual_amount,
+                    )
+
+    amount_min = expected.get("proposed_compensation_amount_min")
+    if amount_min is not None:
+        checked += 1
+        try:
+            min_amount = float(amount_min)
+        except (TypeError, ValueError):
+            _fail(
+                failures,
+                field="proposed_compensation_amount_min",
+                expected="数值",
+                actual=amount_min,
+            )
+        else:
+            actual_raw = view["proposed_compensation_amount"]
+            try:
+                actual_amount = float(actual_raw)
+            except (TypeError, ValueError):
+                _fail(
+                    failures,
+                    field="proposed_compensation_amount_min",
+                    expected=f">={min_amount}",
+                    actual=actual_raw,
+                )
+            else:
+                if actual_amount + 0.05 < min_amount:
+                    _fail(
+                        failures,
+                        field="proposed_compensation_amount_min",
+                        expected=f">={min_amount}",
+                        actual=actual_amount,
+                    )
 
     # ---------- 推理文本引用（子串，辅助） ----------
     for fragment in _as_str_list(expected.get("reasoning_contains_any")):
@@ -406,6 +584,69 @@ def assert_case(
     )
 
 
+def assert_multistep_case(
+    *,
+    scenario_output: Path,
+    report_json_paths: list[Path],
+    run_id: str = "",
+) -> list[AssertRecord]:
+    """
+    多步情景：对每一步报告分别硬断言。
+
+    report_json_paths 须与 spec.steps 顺序一致（按 __stepNN 排序）。
+    """
+    spec_path = _resolve_spec_path(scenario_output)
+    spec = _load_json(spec_path)
+    steps = spec.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError(f"{ASSERT_LOG_PREFIX} spec 不含 steps：{spec_path}")
+
+    meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
+    base_case_id = str(meta.get("case_id") or scenario_output.name).strip()
+
+    if len(report_json_paths) != len(steps):
+        raise RuntimeError(
+            f"{ASSERT_LOG_PREFIX} 报告步数与 spec 不一致："
+            f"reports={len(report_json_paths)} steps={len(steps)} case_id={base_case_id}"
+        )
+
+    records: list[AssertRecord] = []
+    for index, (step, report_path) in enumerate(zip(steps, report_json_paths)):
+        if not report_path.is_file():
+            raise FileNotFoundError(f"{ASSERT_LOG_PREFIX} 缺少步骤报告：{report_path}")
+        label = str(step.get("label") or f"步骤{index + 1}") if isinstance(step, dict) else f"步骤{index + 1}"
+        case_id = f"{base_case_id}__step{index + 1:02d}"
+        expected = _extract_step_expected_report(spec, index)
+        report = _load_json(report_path)
+        result = assert_report_fields(case_id=case_id, expected=expected, report=report)
+        if not result.pass_:
+            logger.warning(
+                "%s 硬断言未通过 case_id=%s (%s) failures=%s",
+                ASSERT_LOG_PREFIX,
+                case_id,
+                label,
+                result.failures,
+            )
+        else:
+            logger.info(
+                "%s 硬断言通过 case_id=%s (%s) checked=%s",
+                ASSERT_LOG_PREFIX,
+                case_id,
+                label,
+                result.checked_count,
+            )
+        records.append(
+            AssertRecord(
+                run_id=run_id,
+                case_id=case_id,
+                spec_path=str(spec_path),
+                report_json_path=str(report_path),
+                result=result,
+            )
+        )
+    return records
+
+
 def write_assert_jsonl(record: AssertRecord, *, run_dir: Path) -> Path:
     """追加写入 assert_records.jsonl；写入失败时抛出中文 RuntimeError。"""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -448,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.run_id:
-        write_assert_jsonl(record, run_dir=EVAL_RUNS_DIR / args.run_id)
+        write_assert_jsonl(record, run_dir=eval_run_dir(args.run_id))
 
     status = "PASS" if record.result.pass_ else "FAIL"
     print(f"{status} {record.case_id}（检查项 {record.result.checked_count}）")

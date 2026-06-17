@@ -1,0 +1,91 @@
+# 功能验证三期：多步快照（MS）
+version: 1
+leaf_count: 8
+axis_counts:
+  multistep: 8
+
+axes:
+  - id: multistep
+    label: 多步快照
+    prefix: MS
+    dir: functional/phase3/multistep
+    leaves:
+      - case_id: MS-01_plant_live_evidence_arc
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-01_plant_live_evidence_arc.md
+        leaf: 15天包活定植补证 → 部分赔/换苗 → 投诉守界
+        target_ability: 专责缺口先补证，闭环后给确定元方案
+        factors: 15天包活, 专责补证, 赔偿上限30%, 施压
+        category_hint: 鲜花绿植
+        service_tag_hint: 15天包活
+        notes: 三期多步；每步硬断言
+
+      - case_id: MS-02_furniture_install_return
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-02_furniture_install_return.md
+        leaf: 送装划痕商责 → 验收补齐 → 退货上门 → 抗仅退
+        target_ability: 大件验收专责与退货退款可执行方案
+        factors: 送装一体, 商责, 验收专责, 仅退要挟
+        category_hint: 住宅家具
+        service_tag_hint: 送装一体
+        notes: 三期多步；每步硬断言
+
+      - case_id: MS-03_frozen_thaw_compensate
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-03_frozen_thaw_compensate.md
+        leaf: 化冻时效边界 → 测温补齐 → 部分赔 → 情绪守界
+        target_ability: 化冻专责补证后在上限内给具体元
+        factors: 化冻包退, 时效边界, 测温专责, 情绪化
+        category_hint: 水产肉类
+        service_tag_hint: 化冻包退
+        notes: 三期多步；每步硬断言
+
+      - case_id: MS-04_jade_auth_evidence_arc
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-04_jade_auth_evidence_arc.md
+        leaf: 先鉴后发鉴定补证 → 退货方案 → 抗仅退
+        target_ability: 鉴定专责补证后给退货验收方案
+        factors: 先鉴后发, 鉴定专责, 仅退施压
+        category_hint: 珠宝
+        service_tag_hint: 先鉴后发
+        notes: 三期第二批；Judge 评测
+
+      - case_id: MS-05_seven_day_wear_return
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-05_seven_day_wear_return.md
+        leaf: 七天无理由穿着照补证 → 退货指引 → 催促守界
+        target_ability: 穿着状态专责后给可执行退货流程
+        factors: 七天无理由, 穿着专责, 催促
+        category_hint: 服饰-连衣裙
+        service_tag_hint: 七天无理由
+        notes: 三期第二批；Judge 评测
+
+      - case_id: MS-06_ceramic_damage_return
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-06_ceramic_damage_return.md
+        leaf: 破损包赔物流破损 → 外包装补齐 → 退货/赔付
+        target_ability: 商责破损举证闭环后给善后方案
+        factors: 破损包赔, 物流破损, 差评施压
+        category_hint: 餐饮具
+        service_tag_hint: 破损包赔
+        notes: 三期第二批；Judge 评测
+
+      - case_id: MS-07_wine_tasting_compensate
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-07_wine_tasting_compensate.md
+        leaf: 试饮可退开瓶补证 → 部分赔具体元 → 全退守界
+        target_ability: 开瓶专责后在上限内报价
+        factors: 试饮可退, 开瓶专责, 情绪化
+        category_hint: 酒类
+        service_tag_hint: 试饮可退
+        notes: 三期第二批；Judge 评测
+
+      - case_id: MS-08_trade_in_exchange_arc
+        status: existing
+        path: eval/content/scenarios/functional/phase3/multistep/MS-08_trade_in_exchange_arc.md
+        leaf: 以旧换新旧机凭证 → 换货方案 → 催促守界
+        target_ability: 旧机回收专责后给换货时间节点
+        factors: 以旧换新, IMEI专责, 催促
+        category_hint: 手机
+        service_tag_hint: 以旧换新
+        notes: 三期第二批；Judge 评测
