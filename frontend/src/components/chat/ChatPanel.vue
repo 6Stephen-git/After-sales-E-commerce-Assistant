@@ -4,33 +4,52 @@
       <div class="chat-header">
         <span>聊天窗口</span>
         <el-button type="primary" :loading="loading" @click="emit_request_ai_help">
-          请求 AI 帮助
+          分析对话
         </el-button>
       </div>
     </template>
 
     <div class="messages-container">
-      <MessageItem v-for="message in messages" :key="message.id" :message="message" />
+      <MessageItem
+        v-for="message in messages"
+        :key="message.id"
+        :message="message"
+        @recall="emit_recall_message"
+      />
     </div>
 
     <div class="input-container">
       <div class="sender-row">
-        <span class="sender-label">以身份发送</span>
         <el-radio-group
           :model-value="sender_role"
           size="small"
           @update:model-value="emit_update_sender_role"
         >
           <el-radio-button label="merchant">商家</el-radio-button>
-          <el-radio-button label="buyer">买家（自测）</el-radio-button>
+          <el-radio-button label="buyer">买家</el-radio-button>
         </el-radio-group>
       </div>
+
+      <!-- 待发图片预览条 -->
+      <div v-if="pending_images.length > 0" class="pending-images">
+        <div v-for="img in pending_images" :key="img.id" class="pending-thumb-wrap">
+          <el-image class="pending-thumb" :src="img.data_url" fit="cover" />
+          <button
+            type="button"
+            class="pending-remove"
+            aria-label="移除图片"
+            @click="emit_remove_pending_image(img.id)"
+          >×</button>
+        </div>
+      </div>
+
       <el-input
         :model-value="input_text"
         type="textarea"
         :rows="3"
         :placeholder="input_placeholder"
         @update:model-value="emit_update_input_text"
+        @keydown="handle_input_keydown"
       />
       <div class="action-row">
         <input
@@ -40,8 +59,8 @@
           accept="image/*"
           @change="handle_image_change"
         />
-        <el-button @click="open_image_picker">发送图片</el-button>
-        <el-button type="success" @click="emit_send_message">发送文字</el-button>
+        <el-button class="btn-pick-image" :icon="Picture" circle @click="open_image_picker" />
+        <el-button type="success" @click="emit_send_message">发送</el-button>
       </div>
     </div>
   </el-card>
@@ -49,9 +68,10 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { Picture } from '@element-plus/icons-vue'
 import MessageItem from './MessageItem.vue'
 
-// ---------- 组件输入：聊天数据、发送身份与加载状态 ----------
+// ---------- 组件输入：聊天数据、待发图片、发送身份与加载状态 ----------
 const props = defineProps({
   messages: {
     type: Array,
@@ -65,28 +85,35 @@ const props = defineProps({
     type: String,
     default: 'merchant'
   },
+  pending_images: {
+    type: Array,
+    default: () => []
+  },
   loading: {
     type: Boolean,
     default: false
   }
 })
 
-// ---------- 组件输出：上抛输入、身份、发送与分析触发事件 ----------
+// ---------- 组件输出：上抛输入、身份、待发图与发送事件 ----------
 const emit = defineEmits([
   'update:input_text',
   'update:sender_role',
   'send_message',
-  'send_image',
+  'add_pending_image',
+  'remove_pending_image',
+  'recall_message',
   'request_ai_help'
 ])
 const image_input_ref = ref(null)
 
 // ---------- 输入框占位：随商家/买家身份切换提示文案 ----------
-const input_placeholder = computed(() =>
-  props.sender_role === 'buyer'
-    ? '以买家身份输入对话内容（用于自行模拟买家）'
-    : '以商家身份输入要发送给买家的内容'
-)
+const input_placeholder = computed(() => {
+  const role_hint = props.sender_role === 'buyer'
+    ? '输入买家对话内容（模拟买家发言）'
+    : '输入要发送给买家的内容'
+  return `${role_hint}，Enter 发送，Shift+Enter 换行`
+})
 
 // ---------- 输入同步：把文本变化同步到上层状态 ----------
 function emit_update_input_text(value) {
@@ -98,12 +125,21 @@ function emit_update_sender_role(value) {
   emit('update:sender_role', value)
 }
 
-// ---------- 上抛发送：由父组件按当前 sender_role 写入消息 ----------
+// ---------- 键盘：Enter 发送，Shift+Enter 换行 ----------
+function handle_input_keydown(event) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+    return
+  }
+  event.preventDefault()
+  emit_send_message()
+}
+
+// ---------- 上抛发送：由父组件统一写入消息 ----------
 function emit_send_message() {
   emit('send_message')
 }
 
-// ---------- 图片发送：选择本地图片后上抛给父组件 ----------
+// ---------- 待发图：选择本地图片后加入待发列表 ----------
 function open_image_picker() {
   image_input_ref.value?.click()
 }
@@ -113,8 +149,16 @@ function handle_image_change(event) {
   if (!file) {
     return
   }
-  emit('send_image', file)
+  emit('add_pending_image', file)
   event.target.value = ''
+}
+
+function emit_remove_pending_image(image_id) {
+  emit('remove_pending_image', image_id)
+}
+
+function emit_recall_message(message_id) {
+  emit('recall_message', message_id)
 }
 
 // ---------- AI 触发：由商家主动点击请求分析 ----------
@@ -144,7 +188,9 @@ function emit_request_ai_help() {
 
 .messages-container {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 8px;
 }
 
@@ -160,19 +206,61 @@ function emit_request_ai_help() {
 .sender-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
+  justify-content: flex-end;
 }
 
-.sender-label {
-  color: #606266;
-  font-size: 13px;
+.pending-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pending-thumb-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.pending-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  border: 1px solid #ebeef5;
+}
+
+.pending-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: #f56c6c;
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
 }
 
 .action-row {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+}
+
+.btn-pick-image {
+  color: #d48806;
+  border-color: #f0d78c;
+  background-color: #fffbe6;
+}
+
+.btn-pick-image:hover {
+  color: #ffffff;
+  background-color: #e6a23c;
+  border-color: #e6a23c;
 }
 
 .hidden-input {

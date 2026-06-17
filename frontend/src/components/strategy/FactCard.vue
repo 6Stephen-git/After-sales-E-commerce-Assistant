@@ -4,43 +4,40 @@
       <span>事实摘要</span>
     </template>
 
+    <!-- 客户诉求 -->
     <div class="section-block">
-      <h4>用户诉求</h4>
-      <p class="plain-text">{{ issue_summary }}</p>
+      <h4 class="section-title">客户诉求</h4>
+      <p class="plain-text">{{ issue_summary || '暂未提取到明确诉求' }}</p>
     </div>
 
+    <!-- 事实还原：首条可见，其余折叠 -->
     <div class="section-block">
-      <h4>用户反馈的图片/视频描述</h4>
-      <el-empty v-if="visual_all.length === 0" description="暂无可用的视觉描述" :image-size="60" />
-      <template v-else>
-        <el-tag
-          v-for="item in visual_visible"
-          :key="'vis-' + item"
-          class="list-tag"
-          type="info"
-        >{{ item }}</el-tag>
-        <el-collapse v-if="visual_rest.length > 0" class="visual-more visual-collapse">
-          <el-collapse-item :title="`其余 ${visual_rest.length} 条（点击展开）`" name="more">
-            <el-tag
-              v-for="item in visual_rest"
-              :key="'visr-' + item"
-              class="list-tag"
-              type="info"
-            >{{ item }}</el-tag>
-          </el-collapse-item>
-        </el-collapse>
-      </template>
-    </div>
+      <h4 class="section-title">事实还原</h4>
+      <p v-if="primary_visual" class="plain-text">{{ primary_visual }}</p>
+      <el-empty v-else description="暂无事实还原内容" :image-size="60" />
 
-    <div class="section-block">
-      <h4>物流情况</h4>
-      <p class="plain-text">{{ logistics_summary }}</p>
+      <el-collapse v-if="folded_fact_count > 0" v-model="fact_more_active" class="fact-more-collapse">
+        <el-collapse-item name="more">
+          <template #title>
+            <span>{{ fact_more_title }}</span>
+          </template>
+          <ul v-if="folded_visual_items.length > 0" class="folded-list">
+            <li v-for="(item, idx) in folded_visual_items" :key="'fold-vis-' + idx" class="folded-item">
+              {{ item }}
+            </li>
+          </ul>
+          <div v-if="has_logistics_in_fold" class="folded-logistics">
+            <span class="folded-label">物流情况</span>
+            <p class="plain-text">{{ logistics_summary }}</p>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </div>
   </el-card>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 // ---------- 组件输入：事实分析结果 ----------
 const props = defineProps({
@@ -50,13 +47,9 @@ const props = defineProps({
   }
 })
 
-// ---------- 派生状态：用户诉求摘要，优先展示 Agent1 的核心诉求 ----------
+// ---------- 派生状态：客户诉求摘要 ----------
 const issue_summary = computed(() => {
-  const summary = String(props.facts?.issue_summary || '').trim()
-  if (summary) {
-    return summary
-  }
-  return '暂未提取到明确诉求'
+  return String(props.facts?.issue_summary || '').trim()
 })
 
 // ---------- 派生状态：图片/视频描述完整列表（去重归一） ----------
@@ -82,11 +75,13 @@ const visual_all = computed(() => {
   return []
 })
 
-// ---------- 派生状态：默认展示前 3 条，其余放入折叠区 ----------
-const visual_visible = computed(() => visual_all.value.slice(0, 3))
-const visual_rest = computed(() => visual_all.value.slice(3))
+// ---------- 派生状态：事实还原首条可见 ----------
+const primary_visual = computed(() => visual_all.value[0] || '')
 
-// ---------- 派生状态：物流摘要，优先读取 evidence_items 中的物流证据 ----------
+// ---------- 派生状态：折叠区视觉条目（第二条起） ----------
+const folded_visual_items = computed(() => visual_all.value.slice(1))
+
+// ---------- 派生状态：物流摘要 ----------
 const logistics_summary = computed(() => {
   const evidence_items = Array.isArray(props.facts?.evidence_items) ? props.facts.evidence_items : []
   const logistics_item = evidence_items.find((item) => item && item.type === 'logistics')
@@ -108,6 +103,33 @@ const logistics_summary = computed(() => {
   }
   return '暂无物流信息'
 })
+
+// ---------- 派生状态：物流是否放入折叠区 ----------
+const has_logistics_in_fold = computed(() => {
+  if (logistics_summary.value === '暂无物流信息') {
+    return false
+  }
+  return Boolean(primary_visual.value)
+})
+
+// ---------- 折叠状态：展开后标题切换为「其他事实」 ----------
+const fact_more_active = ref([])
+
+const fact_more_title = computed(() => {
+  if (fact_more_active.value.includes('more')) {
+    return '其他事实'
+  }
+  return `展开更多事实（${folded_fact_count.value} 条）`
+})
+
+// ---------- 派生状态：折叠区条目总数 ----------
+const folded_fact_count = computed(() => {
+  let count = folded_visual_items.value.length
+  if (has_logistics_in_fold.value) {
+    count += 1
+  }
+  return count
+})
 </script>
 
 <style scoped>
@@ -115,28 +137,54 @@ const logistics_summary = computed(() => {
   margin-top: 12px;
 }
 
-.section-block h4 {
+.section-block:first-child {
+  margin-top: 0;
+}
+
+.section-title {
   margin: 0 0 8px;
   font-size: 14px;
+  font-weight: 600;
   color: #303133;
 }
 
 .plain-text {
   margin: 0;
   color: #606266;
-  line-height: 1.6;
+  line-height: 1.65;
   white-space: pre-wrap;
 }
 
-.list-tag {
-  margin: 0 8px 8px 0;
+.fact-more-collapse {
+  margin-top: 10px;
 }
 
-.visual-more {
-  margin-top: 8px;
+.folded-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #606266;
+  line-height: 1.65;
 }
 
-.visual-collapse {
-  contain: content;
+.folded-item {
+  margin-bottom: 6px;
+}
+
+.folded-item:last-child {
+  margin-bottom: 0;
+}
+
+.folded-logistics {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.folded-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #909399;
+  margin-bottom: 4px;
 }
 </style>

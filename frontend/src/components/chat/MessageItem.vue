@@ -1,17 +1,24 @@
 <template>
   <div class="message-row" :class="row_class">
-    <div class="message-bubble">
-      <span class="role-label">{{ role_label }}</span>
-      <p v-if="message.content" class="message-text">{{ message.content }}</p>
-      <el-image
-        v-if="message.image_url"
-        class="message-image"
-        :src="message.image_url"
-        :preview-src-list="[message.image_url]"
-        fit="cover"
-        preview-teleported
-      />
-    </div>
+    <el-dropdown trigger="contextmenu" @command="handle_command">
+      <div class="message-bubble">
+        <span class="role-label">{{ role_label }}</span>
+        <p v-if="message.content" class="message-text">{{ message.content }}</p>
+        <el-image
+          v-if="message.image_url"
+          class="message-image"
+          :src="message.image_url"
+          :preview-src-list="[message.image_url]"
+          fit="cover"
+          preview-teleported
+        />
+      </div>
+      <template #dropdown>
+        <el-dropdown-menu>
+          <el-dropdown-item command="recall">撤回</el-dropdown-item>
+        </el-dropdown-menu>
+      </template>
+    </el-dropdown>
   </div>
 </template>
 
@@ -26,6 +33,9 @@ const props = defineProps({
   }
 })
 
+// ---------- 组件输出：撤回等操作 ----------
+const emit = defineEmits(['recall'])
+
 // ---------- 样式状态：根据角色决定消息左右对齐 ----------
 const row_class = computed(() => {
   return props.message.role === 'merchant' ? 'is-merchant' : 'is-buyer'
@@ -35,6 +45,13 @@ const row_class = computed(() => {
 const role_label = computed(() => {
   return props.message.role === 'merchant' ? '商家' : '买家'
 })
+
+// ---------- 右键菜单：分发撤回事件 ----------
+function handle_command(command) {
+  if (command === 'recall') {
+    emit('recall', props.message.id)
+  }
+}
 </script>
 
 <style scoped>
@@ -51,11 +68,23 @@ const role_label = computed(() => {
   justify-content: flex-end;
 }
 
-.message-bubble {
+.message-row :deep(.el-dropdown) {
+  display: flex;
   max-width: 80%;
+  min-width: 0;
+}
+
+.message-row.is-merchant :deep(.el-dropdown) {
+  justify-content: flex-end;
+}
+
+.message-bubble {
+  max-width: 100%;
+  min-width: 0;
   border-radius: 8px;
   padding: 10px 12px;
   background-color: #f2f6fc;
+  box-sizing: border-box;
 }
 
 .message-row.is-merchant .message-bubble {
@@ -74,6 +103,8 @@ const role_label = computed(() => {
   color: #303133;
   line-height: 1.5;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-image {

@@ -20,7 +20,7 @@
 
     <el-skeleton v-else-if="loading" animated :rows="8" />
 
-    <el-empty v-else description='点击左侧「请求 AI 帮助」后查看分析结果' />
+    <el-empty v-else description='点击左侧「分析对话」后查看分析结果' />
   </div>
 </template>
 
@@ -62,6 +62,6 @@ function emit_use_script(script_text) {
 }
 
 .panel-block {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 </style>

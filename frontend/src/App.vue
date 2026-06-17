@@ -3,35 +3,47 @@
     <div class="app-container">
       <el-header class="app-header">
         <span class="app-title">商家应诉助手</span>
-        <el-menu :default-active="active_menu" mode="horizontal" class="app-menu" @select="handle_menu_select">
-          <el-menu-item index="/dispute">辅助模式</el-menu-item>
-          <el-menu-item index="/settings">设置页</el-menu-item>
-        </el-menu>
+        <el-button
+          class="settings-btn"
+          :class="{ 'is-active': settings_visible }"
+          :icon="Setting"
+          circle
+          aria-label="设置"
+          @click="open_settings"
+        />
       </el-header>
-      <el-main class="app-main">
+
+      <el-main class="app-main app-main--dispute">
         <router-view />
       </el-main>
+
+      <!-- 设置浮层：叠在主页之上，右上角可关闭 -->
+      <el-drawer
+        v-model="settings_visible"
+        title="系统设置"
+        direction="rtl"
+        size="360px"
+        :append-to-body="true"
+        destroy-on-close
+        class="settings-drawer"
+      >
+        <SettingsView />
+      </el-drawer>
     </div>
   </el-config-provider>
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { ref } from 'vue'
+import { Setting } from '@element-plus/icons-vue'
+import SettingsView from './views/SettingsView.vue'
 
-// ---------- 路由实例：用于菜单高亮与页面切换 ----------
-const route = useRoute()
-const router = useRouter()
+// ---------- 设置浮层：控制抽屉显隐 ----------
+const settings_visible = ref(false)
 
-// ---------- 菜单状态：根据当前路径高亮顶部导航 ----------
-const active_menu = computed(() => {
-  if (route.path === '/settings') return '/settings'
-  return '/dispute'
-})
-
-// ---------- 菜单跳转：点击导航切换视图 ----------
-function handle_menu_select(path) {
-  router.push(path)
+// ---------- 打开设置浮层 ----------
+function open_settings() {
+  settings_visible.value = true
 }
 </script>
 
@@ -41,41 +53,61 @@ function handle_menu_select(path) {
   display: flex;
   flex-direction: column;
 }
+
 .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  background-color: #409eff;
-  color: #fff;
+  background: #f8fafd;
+  color: #2d4054;
+  border-bottom: 1px solid #e2eaf2;
+  box-shadow: none;
 }
+
 .app-title {
-  font-size: 18px;
-  font-weight: bold;
+  font-size: 22px;
+  font-weight: 600;
   white-space: nowrap;
+  letter-spacing: 0.14em;
+  color: #2d4054;
 }
-.app-menu {
-  flex: 1;
-  min-width: 280px;
-  border-bottom: none;
-  background: transparent;
+
+.settings-btn {
+  color: #5c6b7a;
+  background-color: #ffffff;
+  border-color: #d5dee8;
 }
-.app-menu :deep(.el-menu-item) {
-  color: #eaf3ff;
+
+.settings-btn:hover {
+  color: var(--el-color-primary);
+  background-color: #ffffff;
+  border-color: var(--el-color-primary-light-5);
 }
-.app-menu :deep(.el-menu-item.is-active) {
-  color: #ffffff;
-  border-bottom-color: #ffffff;
+
+.settings-btn.is-active {
+  color: var(--el-color-primary-dark-2);
+  background-color: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5);
 }
+
 .app-main {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #f5f7fa;
+  padding: 0;
+  background: transparent;
 }
 
 .app-main :deep(> *) {
   height: 100%;
   min-height: 0;
+}
+
+.settings-drawer :deep(.el-drawer__body) {
+  display: flex;
+  flex-direction: column;
+  padding: 20px 0 0;
+  overflow: hidden;
 }
 </style>

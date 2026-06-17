@@ -1,8 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import DisputeView from '../views/DisputeView.vue'
-import SettingsView from '../views/SettingsView.vue'
 
-// ---------- 路由定义：辅助模式 + 设置页面 ----------
+// ---------- 路由定义：主页面为纠纷辅助模式 ----------
 const routes = [
   {
     path: '/',
@@ -15,8 +14,7 @@ const routes = [
   },
   {
     path: '/settings',
-    name: 'settings',
-    component: SettingsView
+    redirect: '/dispute'
   }
 ]
 

@@ -17,16 +17,28 @@
       class="usage-tip-alert"
     />
 
-    <p class="script-content">{{ scripts?.script || '暂无话术内容' }}</p>
-    <el-button type="primary" link :disabled="!scripts?.script" @click="emit_use_script(scripts?.script)">
-      使用该话术
-    </el-button>
+    <div v-if="script_sentences.length > 0" class="script-list">
+      <div
+        v-for="(sentence, idx) in script_sentences"
+        :key="'script-sentence-' + idx"
+        class="script-sentence"
+        role="button"
+        tabindex="0"
+        title="点击填入输入框"
+        @click="emit_use_script(sentence)"
+        @keydown.enter="emit_use_script(sentence)"
+      >
+        {{ sentence }}
+      </div>
+    </div>
+    <p v-else class="script-empty">暂无话术内容</p>
   </el-card>
 </template>
 
 <script setup>
 import { computed } from 'vue'
 import { getResponseModeLabel } from '../../utils/enums'
+import { split_script_sentences } from '../../utils/text'
 
 // ---------- 组件输入：单一推荐话术 ----------
 const props = defineProps({
@@ -53,7 +65,12 @@ const usage_tip_text = computed(() => {
     .replace(/\bevidence_first\b/gi, '举证阶段')
 })
 
-// ---------- 事件分发：把点击话术传递给上层 ----------
+// ---------- 派生状态：拆句后的话术列表 ----------
+const script_sentences = computed(() => {
+  return split_script_sentences(props.scripts?.script)
+})
+
+// ---------- 事件分发：把点击句子传递给上层填入输入框 ----------
 function emit_use_script(script_text) {
   emit('use_script', script_text)
 }
@@ -68,10 +85,15 @@ function emit_use_script(script_text) {
   margin-bottom: 12px;
 }
 
-.script-content {
-  margin: 0 0 8px;
-  color: #606266;
-  line-height: 1.6;
-  white-space: pre-wrap;
+.script-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.script-empty {
+  margin: 0;
+  color: #909399;
+  font-size: 14px;
 }
 </style>

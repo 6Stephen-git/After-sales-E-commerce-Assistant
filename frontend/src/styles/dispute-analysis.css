@@ -1,0 +1,394 @@
+/* ---------- 分析区共享视觉变量 ---------- */
+:root {
+  --da-border: #ebeef5;
+  --da-bg-subtle: #fafbfc;
+  --da-bg-block: #f8f9fb;
+  --da-text-primary: #303133;
+  --da-text-secondary: #606266;
+  --da-text-muted: #909399;
+  --da-accent-blue: #409eff;
+  --da-radius: 8px;
+  --da-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* ---------- 核心结论：定义列表 ---------- */
+.conclusion-block {
+  background: var(--da-bg-block);
+  border-radius: var(--da-radius);
+  padding: 12px 16px 4px;
+  margin-bottom: 16px;
+}
+
+.conclusion-dl {
+  margin: 0;
+}
+
+.conclusion-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--da-border);
+}
+
+.conclusion-row:last-child {
+  border-bottom: none;
+}
+
+.conclusion-dt {
+  flex: 0 0 96px;
+  width: 96px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--da-text-secondary);
+  white-space: nowrap;
+  line-height: 1.7;
+}
+
+.conclusion-dd {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  color: var(--da-text-primary);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.zone-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+}
+
+/* ---------- 核心结论：胜率与置信度指标条 ---------- */
+.strategy-metrics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.strategy-metric-card {
+  background: #fff;
+  border-radius: var(--da-radius);
+  padding: 10px 14px;
+  box-shadow: var(--da-shadow);
+}
+
+.strategy-metric-label {
+  font-size: 12px;
+  color: var(--da-text-muted);
+  margin-bottom: 6px;
+}
+
+.strategy-metric-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+  line-height: 1.2;
+}
+
+/* ---------- 关键依据：内嵌 panel 与层级竖线 ---------- */
+.evidence-rail {
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 2px solid #e4e7ed;
+}
+
+.evidence-panel {
+  background: var(--da-bg-subtle);
+  border-radius: var(--da-radius);
+  padding: 12px;
+  margin-bottom: 0;
+  box-shadow: var(--da-shadow);
+}
+
+.evidence-panel-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+}
+
+.inner-collapse :deep(.el-collapse-item__header) {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--da-text-secondary);
+  height: 40px;
+  line-height: 40px;
+}
+
+.inner-collapse :deep(.el-collapse-item__content) {
+  padding-left: 8px;
+  padding-bottom: 8px;
+}
+
+/* ---------- 恶意风险：独立分数卡片 ---------- */
+.risk-score-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  background: #fff;
+  border-radius: var(--da-radius);
+  margin-bottom: 12px;
+  box-shadow: var(--da-shadow);
+}
+
+.risk-score-value {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--da-text-primary);
+}
+
+.risk-score-value.is-high {
+  color: #f56c6c;
+}
+
+.risk-score-value.is-medium {
+  color: #e6a23c;
+}
+
+.risk-score-value.is-low {
+  color: #67c23a;
+}
+
+.risk-score-meta {
+  flex: 1;
+}
+
+.risk-score-label {
+  font-size: 12px;
+  color: var(--da-text-muted);
+  margin-bottom: 4px;
+}
+
+.risk-detail-block {
+  margin-bottom: 10px;
+}
+
+.risk-detail-block:last-child {
+  margin-bottom: 0;
+}
+
+.risk-detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--da-text-secondary);
+  margin-bottom: 4px;
+}
+
+.risk-detail-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--da-text-secondary);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.signal-list-item {
+  font-size: 12px;
+  color: var(--da-text-secondary);
+  line-height: 1.6;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--da-border);
+}
+
+.signal-list-item:last-child {
+  border-bottom: none;
+}
+
+/* ---------- 客户价值：指标格 ---------- */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.metric-cell {
+  background: #fff;
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: var(--da-shadow);
+}
+
+.metric-cell-label {
+  font-size: 12px;
+  color: var(--da-text-muted);
+  margin-bottom: 4px;
+}
+
+.metric-cell-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+}
+
+/* ---------- 参考信息：买家画像统一网格 ---------- */
+.profile-grid-unified {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--da-bg-subtle);
+  border-radius: var(--da-radius);
+  overflow: hidden;
+  box-shadow: var(--da-shadow);
+}
+
+@media (max-width: 1200px) {
+  .profile-grid-unified {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.profile-grid-unified .profile-stat {
+  padding: 12px 10px;
+  text-align: center;
+  border-right: 1px solid var(--da-border);
+  border-bottom: 1px solid var(--da-border);
+}
+
+.profile-grid-unified .profile-stat:nth-child(4n) {
+  border-right: none;
+}
+
+@media (max-width: 1200px) {
+  .profile-grid-unified .profile-stat:nth-child(4n) {
+    border-right: 1px solid var(--da-border);
+  }
+  .profile-grid-unified .profile-stat:nth-child(2n) {
+    border-right: none;
+  }
+}
+
+.profile-grid-unified .profile-stat:nth-last-child(-n + 4) {
+  border-bottom: none;
+}
+
+@media (max-width: 1200px) {
+  .profile-grid-unified .profile-stat:nth-last-child(-n + 4) {
+    border-bottom: 1px solid var(--da-border);
+  }
+  .profile-grid-unified .profile-stat:nth-last-child(-n + 2) {
+    border-bottom: none;
+  }
+}
+
+.profile-stat-label {
+  font-size: 11px;
+  color: var(--da-text-muted);
+  margin-bottom: 4px;
+}
+
+.profile-stat-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+}
+
+/* ---------- 相似判例卡片 ---------- */
+.case-card {
+  background: #fff;
+  border-radius: var(--da-radius);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  box-shadow: var(--da-shadow);
+}
+
+.case-card:last-child {
+  margin-bottom: 0;
+}
+
+.case-card-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+  margin-bottom: 6px;
+}
+
+.case-card-row {
+  font-size: 13px;
+  color: var(--da-text-secondary);
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+
+.case-card-row:last-child {
+  margin-bottom: 0;
+}
+
+.case-card-row strong {
+  color: var(--da-text-secondary);
+  font-weight: 600;
+}
+
+/* ---------- 规则列表：序号徽章 ---------- */
+.rule-list-styled {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-list-item {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--da-text-secondary);
+  line-height: 1.65;
+}
+
+.rule-list-item:last-child {
+  margin-bottom: 0;
+}
+
+.rule-badge {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #f0f2f5;
+  color: var(--da-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- 推荐话术块 ---------- */
+.script-sentence {
+  padding: 8px 10px;
+  background: var(--da-bg-subtle);
+  border-radius: 6px;
+  font-size: 14px;
+  color: var(--da-text-secondary);
+  line-height: 1.55;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.script-sentence:hover {
+  background: #f0f2f5;
+}
+
+.tag-gap {
+  margin: 0 8px 8px 0;
+}
+
+.sub-block-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--da-text-primary);
+}
+
+.ref-sub-block {
+  margin-bottom: 16px;
+}
+
+.ref-sub-block:last-child {
+  margin-bottom: 0;
+}

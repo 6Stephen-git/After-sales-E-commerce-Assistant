@@ -21,15 +21,32 @@ httpClient.interceptors.response.use(
 )
 
 // ---------- 分析请求：调用辅助模式分析接口 ----------
-export async function analyzeDispute(payload) {
+export async function analyzeDispute(payload, options = {}) {
   try {
     const response = await httpClient.post('/analyze', payload, {
-      timeout: ANALYZE_HTTP_TIMEOUT_MS
+      timeout: ANALYZE_HTTP_TIMEOUT_MS,
+      signal: options.signal
     })
     return response.data
   } catch (error) {
+    if (is_request_aborted(error)) {
+      throw error
+    }
     throw new Error(`请求分析失败：${error.message}`)
   }
+}
+
+// ---------- 判断是否为页面刷新/主动取消导致的中断 ----------
+function is_request_aborted(error) {
+  const name = String(error?.name || '')
+  const code = String(error?.code || '')
+  const message = String(error?.message || '')
+  return (
+    name === 'AbortError' ||
+    name === 'CanceledError' ||
+    code === 'ERR_CANCELED' ||
+    /aborted|cancel/i.test(message)
+  )
 }
 
 // ---------- 流式分析请求：按阶段消费 SSE 事件，支持先展示部分结果 ----------
@@ -61,16 +78,18 @@ function _consume_sse_buffer(buffer, on_event) {
   return rest
 }
 
-export async function analyzeDisputeStream(payload, handlers = {}) {
+export async function analyzeDisputeStream(payload, handlers = {}, options = {}) {
   const { on_event, on_done, on_error } = handlers
-  const controller = new AbortController()
-  const timeout_id = setTimeout(() => controller.abort(), ANALYZE_STREAM_TIMEOUT_MS)
+  const owns_controller = !options.signal
+  const controller = owns_controller ? new AbortController() : null
+  const signal = options.signal || controller.signal
+  const timeout_id = setTimeout(() => controller?.abort(), ANALYZE_STREAM_TIMEOUT_MS)
   try {
     const response = await fetch('/api/analyze/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: controller.signal
+      signal
     })
     if (!response.ok) {
       let detail = `HTTP ${response.status}`
@@ -107,6 +126,12 @@ export async function analyzeDisputeStream(payload, handlers = {}) {
       on_done()
     }
   } catch (error) {
+    if (is_request_aborted(error)) {
+      if (typeof on_error === 'function') {
+        on_error(error)
+      }
+      return
+    }
     if (typeof on_error === 'function') {
       on_error(error)
     } else {

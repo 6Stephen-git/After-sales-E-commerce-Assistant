@@ -9,9 +9,43 @@ const report = ref(null)
 const loading = ref(false)
 const input_text = ref('')
 const sender_role = ref('merchant')
+const pending_images = ref([])
 const error_message = ref('')
 const progress_message = ref('')
 const message_id_seed = ref(messages.value.length + 1)
+const pending_image_id_seed = ref(1)
+let analyze_abort_controller = null
+let pagehide_abort_registered = false
+
+// ---------- 进行中的分析：页面卸载时主动中断 HTTP ----------
+function abort_analyze_in_flight() {
+  if (analyze_abort_controller) {
+    analyze_abort_controller.abort()
+    analyze_abort_controller = null
+  }
+  loading.value = false
+  progress_message.value = ''
+}
+
+function register_pagehide_abort() {
+  if (pagehide_abort_registered || typeof window === 'undefined') {
+    return
+  }
+  pagehide_abort_registered = true
+  window.addEventListener('pagehide', abort_analyze_in_flight)
+}
+
+function is_request_aborted(error) {
+  const name = String(error?.name || '')
+  const code = String(error?.code || '')
+  const message = String(error?.message || '')
+  return (
+    name === 'AbortError' ||
+    name === 'CanceledError' ||
+    code === 'ERR_CANCELED' ||
+    /aborted|cancel/i.test(message)
+  )
+}
 
 // ---------- 状态管理：纠纷消息、分析报告与交互状态 ----------
 export function use_dispute() {
@@ -37,19 +71,8 @@ export function use_dispute() {
     message_id_seed.value += 1
   }
 
-  // ---------- 消息发送：按当前 sender_role 写入 buyer 或 merchant ----------
-  function send_message() {
-    const raw_text = input_text.value.trim()
-    if (!raw_text) {
-      return
-    }
-    const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
-    append_message(role, raw_text)
-    input_text.value = ''
-  }
-
-  // ---------- 图片发送：读取本地图片为 data URL 并写入消息 ----------
-  async function send_image(file) {
+  // ---------- 待发图片：加入预览列表，不立即写入消息 ----------
+  async function add_pending_image(file) {
     if (!(file instanceof File)) {
       return
     }
@@ -58,14 +81,49 @@ export function use_dispute() {
       return
     }
     try {
-      const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
       const image_data_url = await read_file_as_data_url(file)
-      append_message(role, input_text.value.trim() || '[图片]', image_data_url, file.name)
-      input_text.value = ''
+      pending_images.value.push({
+        id: pending_image_id_seed.value,
+        data_url: image_data_url,
+        name: file.name
+      })
+      pending_image_id_seed.value += 1
       error_message.value = ''
     } catch (error) {
-      error_message.value = error.message || '发送图片失败，请重试'
+      error_message.value = error.message || '读取图片失败，请重试'
     }
+  }
+
+  // ---------- 待发图片：从预览列表移除 ----------
+  function remove_pending_image(image_id) {
+    pending_images.value = pending_images.value.filter((item) => item.id !== image_id)
+  }
+
+  // ---------- 统一发送：文字 + 待发图片一并写入消息 ----------
+  function send_message() {
+    const raw_text = input_text.value.trim()
+    const images = [...pending_images.value]
+    if (!raw_text && images.length === 0) {
+      return
+    }
+
+    const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
+
+    if (images.length === 0) {
+      append_message(role, raw_text)
+    } else if (!raw_text) {
+      images.forEach((img) => {
+        append_message(role, '', img.data_url, img.name)
+      })
+    } else {
+      append_message(role, raw_text, images[0].data_url, images[0].name)
+      images.slice(1).forEach((img) => {
+        append_message(role, '', img.data_url, img.name)
+      })
+    }
+
+    input_text.value = ''
+    pending_images.value = []
   }
 
   // ---------- 文件读取：将图片转换为可预览与可传输的 data URL ----------
@@ -85,6 +143,11 @@ export function use_dispute() {
 
   // ---------- 分析请求：调用 /analyze 并刷新策略面板 ----------
   async function request_ai_help() {
+    abort_analyze_in_flight()
+    register_pagehide_abort()
+    analyze_abort_controller = new AbortController()
+    const request_signal = analyze_abort_controller.signal
+
     loading.value = true
     error_message.value = ''
     report.value = null
@@ -164,34 +227,56 @@ export function use_dispute() {
           on_error: (error) => {
             stream_error = error
           }
-        })
+        }, { signal: request_signal })
 
         if (stream_error) {
+          if (is_request_aborted(stream_error) || request_signal.aborted) {
+            return
+          }
           const message = String(stream_error.message || '')
           const is_stream_abort = /aborted|BodyStreamBuffer/i.test(message)
           const can_fallback =
-            message.includes('流式分析未启用') ||
+            !request_signal.aborted &&
+            (message.includes('流式分析未启用') ||
             message.includes('404') ||
-            (is_stream_abort && !report.value?.strategy)
+            (is_stream_abort && !report.value?.strategy))
           if (can_fallback) {
             progress_message.value = is_stream_abort
               ? '流式连接中断，正在拉取完整报告...'
               : '流式不可用，已回退普通分析...'
-            report.value = await analyzeDispute(payload)
+            report.value = await analyzeDispute(payload, { signal: request_signal })
             progress_message.value = '分析完成'
           } else {
             throw stream_error
           }
         }
       } else {
-        report.value = await analyzeDispute(payload)
+        report.value = await analyzeDispute(payload, { signal: request_signal })
         progress_message.value = '分析完成'
       }
     } catch (error) {
+      if (is_request_aborted(error) || request_signal.aborted) {
+        return
+      }
       error_message.value = error.message || '请求 AI 分析失败'
       progress_message.value = ''
     } finally {
+      if (analyze_abort_controller?.signal === request_signal) {
+        analyze_abort_controller = null
+      }
       loading.value = false
+    }
+  }
+
+  // ---------- 消息撤回：从会话中移除指定消息，并清空已过期分析结果 ----------
+  function recall_message(message_id) {
+    const target_id = Number(message_id)
+    const before_len = messages.value.length
+    messages.value = messages.value.filter((item) => item.id !== target_id)
+    if (messages.value.length < before_len) {
+      report.value = null
+      error_message.value = ''
+      progress_message.value = ''
     }
   }
 
@@ -201,12 +286,15 @@ export function use_dispute() {
     loading,
     input_text,
     sender_role,
+    pending_images,
     error_message,
     progress_message,
     has_report,
     append_message,
     send_message,
-    send_image,
+    add_pending_image,
+    remove_pending_image,
+    recall_message,
     apply_script,
     request_ai_help
   }
