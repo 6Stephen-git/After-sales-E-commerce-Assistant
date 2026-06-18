@@ -1,8 +1,8 @@
 <template>
   <el-alert
-    v-if="emotion_alert?.alert_triggered"
-    title="情绪预警"
-    type="warning"
+    v-if="should_show"
+    title="情绪提醒"
+    :type="alert_type"
     :description="alert_description"
     :closable="false"
     show-icon
@@ -11,9 +11,8 @@
 
 <script setup>
 import { computed } from 'vue'
-import { getSentimentLabel } from '../../utils/enums'
 
-// ---------- 组件输入：情绪预警对象 ----------
+// ---------- 组件输入：情绪预警对象（侧栏展示，不含弹窗级分析数据） ----------
 const props = defineProps({
   emotion_alert: {
     type: Object,
@@ -21,14 +20,23 @@ const props = defineProps({
   }
 })
 
-// ---------- 展示文本：合并预警信息与情绪标签 ----------
+const should_show = computed(() => {
+  const alert = props.emotion_alert
+  return Boolean(alert?.early_warn_triggered || alert?.alert_triggered)
+})
+
+const alert_type = computed(() => (
+  props.emotion_alert?.alert_triggered ? 'warning' : 'info'
+))
+
 const alert_description = computed(() => {
-  if (!props.emotion_alert) {
+  const alert = props.emotion_alert
+  if (!alert) {
     return ''
   }
-  const sentiment_label = getSentimentLabel(props.emotion_alert.sentiment)
-  const reason_text = props.emotion_alert.alert_reason || '检测到潜在情绪风险'
-  const message_text = props.emotion_alert.alert_message || ''
-  return `${reason_text}（情绪：${sentiment_label}）${message_text ? `；建议：${message_text}` : ''}`
+  if (alert.early_warn_triggered && !alert.alert_triggered) {
+    return alert.early_warn_message || '您最近语气偏硬，建议放慢节奏、先确认事实再表态。'
+  }
+  return alert.emotion_note || alert.early_warn_message || '请注意沟通措辞，避免激化纠纷。'
 })
 </script>

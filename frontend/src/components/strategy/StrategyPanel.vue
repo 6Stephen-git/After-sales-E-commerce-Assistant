@@ -1,26 +1,24 @@
 <template>
   <div class="strategy-panel">
-    <template v-if="report">
-      <!-- 事实还原（Agent1）：独立卡片，与文档「参考信息区」并存；此处保证首屏可见 -->
-      <FactCard :facts="report.facts" class="panel-block" />
-      <!-- 核心结论区 + 关键依据区：策略卡片 -->
-      <StrategyCard
-        :strategy="report.strategy"
-        :facts="report.facts"
-        :matched-rules="report.matched_rules"
-        :buyer_profile="report.buyer_profile"
-        :similar_cases="report.similar_cases"
-        class="panel-block"
-      />
-      <!-- 情绪提醒（若触发）：紧接关键依据区之后 -->
-      <EmotionAlert :emotion_alert="report.emotion_alert" class="panel-block" />
-      <!-- 话术选项 -->
-      <ScriptCard :scripts="report.scripts" class="panel-block" @use_script="emit_use_script" />
-    </template>
+    <div class="panel-scroll" :class="{ 'is-empty': !report && !loading }">
+      <template v-if="report">
+        <FactCard :facts="report.facts" class="panel-block" />
+        <StrategyCard
+          :strategy="report.strategy"
+          :facts="report.facts"
+          :matched-rules="report.matched_rules"
+          :buyer_profile="report.buyer_profile"
+          :similar_cases="report.similar_cases"
+          class="panel-block"
+        />
+        <EmotionAlert :emotion_alert="seller_emotion_alert" class="panel-block" />
+        <ScriptCard :scripts="report.scripts" class="panel-block" @use_script="emit_use_script" />
+      </template>
 
-    <el-skeleton v-else-if="loading" animated :rows="8" />
+      <el-skeleton v-else-if="loading" animated :rows="8" />
 
-    <el-empty v-else description='点击左侧「分析对话」后查看分析结果' />
+      <el-empty v-else class="panel-empty" description='点击左侧「分析对话」后查看分析结果' />
+    </div>
   </div>
 </template>
 
@@ -30,7 +28,6 @@ import FactCard from './FactCard.vue'
 import StrategyCard from './StrategyCard.vue'
 import ScriptCard from './ScriptCard.vue'
 
-// ---------- 组件输入：报告数据与加载状态 ----------
 defineProps({
   report: {
     type: Object,
@@ -39,13 +36,15 @@ defineProps({
   loading: {
     type: Boolean,
     default: false
+  },
+  seller_emotion_alert: {
+    type: Object,
+    default: null
   }
 })
 
-// ---------- 组件输出：上抛话术使用事件 ----------
 const emit = defineEmits(['use_script'])
 
-// ---------- 事件转发：把子组件事件继续抛出 ----------
 function emit_use_script(script_text) {
   emit('use_script', script_text)
 }
@@ -54,11 +53,28 @@ function emit_use_script(script_text) {
 <style scoped>
 .strategy-panel {
   height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 8px;
-  /* 折叠展开时减少滚动条出现/消失导致的横向抖动 */
   scrollbar-gutter: stable;
-  contain: layout;
+}
+
+.panel-scroll.is-empty {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.panel-empty {
+  transform: translateY(-36px);
 }
 
 .panel-block {

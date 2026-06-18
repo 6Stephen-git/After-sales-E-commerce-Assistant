@@ -101,7 +101,12 @@ def fetch_buyer_profile_and_cases(
             buyer_id=normalized_buyer_id,
             merchant_id=merchant_id,
         )
-        future_cases = executor.submit(search_similar_cases, dispute_desc=dispute_desc, top_k=top_k)
+        future_cases = executor.submit(
+            search_similar_cases,
+            dispute_desc=dispute_desc,
+            top_k=top_k,
+            merchant_id=merchant_id,
+        )
         return future_profile.result(), future_cases.result()
 
 
@@ -113,7 +118,6 @@ def run_agent2_tool_batch(
     order_amount: float,
     chat_history_texts: list[str],
     chat_turns: list[ChatTurn],
-    emotion_note: str | None = None,
 ) -> tuple[CustomerValueOutput, MaliciousDetectionOutput, RuleMatchResult, bool]:
     """
     Batch1：客户价值 + 恶意检测并行 → needs_rule_match 门控 → 条文匹配。
@@ -130,14 +134,12 @@ def run_agent2_tool_batch(
         order_amount=max(0.0, order_amount),
         chat_history=chat_history_texts,
         chat_turns=chat_turns,
-        emotion_note=emotion_note,
     )
     malicious_input = MaliciousDetectionInput(
         buyer_profile=buyer_profile,
         facts=facts,
         order_amount=max(0.0, order_amount),
         chat_history=chat_history_texts,
-        emotion_note=emotion_note,
     )
 
     with ThreadPoolExecutor(max_workers=2) as executor:

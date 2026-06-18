@@ -20,6 +20,26 @@ httpClient.interceptors.response.use(
   }
 )
 
+// ---------- 分析请求：调用 /analyze 并刷新策略面板 ----------
+export async function monitorSellerEmotion(payload) {
+  try {
+    const response = await httpClient.post('/emotion/monitor', payload, { timeout: 60000 })
+    return response.data
+  } catch (error) {
+    throw new Error(`卖家情绪监控失败：${error.message}`)
+  }
+}
+
+// ---------- 结束处理：可选触发 Agent5 复盘 ----------
+export async function submitDisputeReview(payload) {
+  try {
+    const response = await httpClient.post('/review', payload, { timeout: 30000 })
+    return response.data
+  } catch (error) {
+    throw new Error(`结束处理失败：${error.message}`)
+  }
+}
+
 // ---------- 分析请求：调用辅助模式分析接口 ----------
 export async function analyzeDispute(payload, options = {}) {
   try {

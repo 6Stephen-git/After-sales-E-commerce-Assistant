@@ -243,7 +243,6 @@ def run_with_events(
         dispute_desc=dispute_desc,
     )
     order_amount = _safe_order_amount(merged_materials.get("order_amount", 0.0))
-    emotion_note = merged_materials.get("emotion_note")
 
     # 2) Batch0：Agent1 与画像/判例并行（B 层命中则跳过 Agent1）
     _emit_event(
@@ -324,7 +323,6 @@ def run_with_events(
             order_amount=order_amount,
             chat_history_texts=chat_history_texts,
             chat_turns=chat_turns,
-            emotion_note=emotion_note if isinstance(emotion_note, str) else None,
         )
         if rule_match_skipped:
             logger.info(
@@ -374,7 +372,6 @@ def run_with_events(
             order_amount=order_amount,
             chat_history=chat_history_texts,
             chat_turns=chat_turns,
-            emotion_note=emotion_note,
             precomputed_customer_value=customer_value,
             precomputed_malicious_detection=malicious_detection,
             rule_match_skipped=rule_match_skipped,
@@ -444,7 +441,6 @@ def run_with_events(
             facts=facts,
             order_id=str(merged_materials.get("order_id", "") or ""),
             order_amount=order_amount,
-            emotion_note=emotion_note,
             chat_history=chat_turns,
         )
         scripts = generate(input_data=script_input)
@@ -475,13 +471,12 @@ def run_with_events(
         )
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
-    # 5) 聚合为前端/API 使用的单对象（情绪预警由后续 Agent4 接入）
+    # 5) 聚合为前端/API 使用的单对象（卖家情绪预警走独立 /emotion/monitor）
     report = AnalysisReport(
         dispute_id=normalized_dispute_id,
         facts=facts,
         strategy=strategy_output,
         scripts=scripts,
-        emotion_alert=None,
         buyer_profile=buyer_profile,
         similar_cases=similar_cases[:2],
         matched_rules=matched_rules,

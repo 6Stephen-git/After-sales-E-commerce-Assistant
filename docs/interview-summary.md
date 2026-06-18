@@ -1,223 +1,412 @@
-# 电商应诉助手 — 项目总结（面试版）
+# 电商应诉助手 — 面试项目总结（代码真源版）
 
-## 一、项目定位
-
-帮助电商中小商家处理售后纠纷的 AI 系统。核心痛点：商家不熟悉平台规则、不懂有效举证、情绪化决策导致不必要损失。
-
-- **辅助模式**：人工主导，AI 侧边栏提供事实摘要、策略建议、多版本话术
-- **智能模式**：AI 主导对话，商家随时可接管（前端路由尚未完成）
-- 两种模式共享同一套 5-Agent 核心代码
+> 本文以 **代码实现** 为准（`schemas.py`、`assisted_controller.py`、各 Agent/Tools 模块）。`docs/modules/` 等设计文档可能滞后，面试讲解以本文与代码一致。
 
 ---
 
-## 二、技术架构
+## 一、一句话定位
 
-### 2.1 整体分层
+面向电商中小商家的 **售后纠纷 AI 应诉助手**：商家与买家人工对话，AI 侧边栏实时输出 **事实摘要 → 策略建议 → 可发送话术**，降低「不懂规则、举证无效、情绪化让步」带来的损失。
 
+**当前可演示主链路**：仅 **辅助模式（assisted）**。智能模式（AI 代聊）、Agent4 情绪监控、Agent5 复盘 HTTP 触发 **已实现模块但未接入主链路**。
+
+---
+
+## 二、架构总览
+
+### 2.1 分层结构
+
+```mermaid
+flowchart TB
+    subgraph FE["前端 Vue 3 + Element Plus"]
+        DV[DisputeView 双栏]
+        SP[StrategyPanel 策略侧栏]
+        UD[useDispute 状态机]
+    end
+
+    subgraph API["FastAPI routers"]
+        AN["/analyze | /analyze/stream"]
+        MC["/merchants/config"]
+        BP["/merchants/{id}/buyers/{hash}"]
+    end
+
+    subgraph CTRL["controllers"]
+        AC[assisted_controller.run_with_events]
+    end
+
+    subgraph PIPE["pipeline + agents"]
+        B0[Batch0: Agent1 ∥ 画像/判例]
+        B1[Batch1: 价值 ∥ 恶意 → 规则门控]
+        A2[Agent2 recommend]
+        A3[Agent3 generate]
+    end
+
+    subgraph INFRA["基础设施"]
+        CACHE[A/B/C 三级缓存 + 工具缓存]
+        DB[(MySQL)]
+        LLM[MiMo OpenAI 兼容]
+        VIS[百炼视觉 API]
+        REDIS[(Redis)]
+    end
+
+    DV --> UD --> AN
+    AN --> AC
+    AC --> CACHE
+    AC --> B0 --> B1 --> A2 --> A3
+    B0 --> LLM & VIS
+    B1 --> DB
+    A2 --> LLM
+    A3 --> LLM
+    CACHE --> REDIS
+    BP --> DB
 ```
-前端 Vue 3 + Element Plus
-        |
-路由层 FastAPI (routers/)
-        |
-控制器层 (controllers/assisted_controller.py)
-        |
-Agent 层 (agents/agent1~5)
-        |
-工具层 (tools/) + 缓存层 (cache/) + 数据层 (db/)
+
+### 2.2 五 Agent 职责与接入状态
+
+| Agent | 模块 | 职责 | 主链路 |
+|-------|------|------|--------|
+| Agent1 事实还原 | `agent1/fact_extractor.py` | 文本+视觉+物流 → 结构化事实、争议框架、规则导航计划 | ✅ |
+| Agent2 策略参谋 | `agent2/strategist.py` | 综合判责、处置方向、动作契约、方案空间 | ✅ |
+| Agent3 话术生成 | `agent3/script_generator.py` | 在契约约束下生成店主口吻话术 | ✅ |
+| Agent4 情绪监控 | `agent4/emotion_monitor.py` | BERT/关键词情绪分析 → emotion_note | ❌ 未调用 |
+| Agent5 复盘分析 | `agent5/reviewer.py` + Celery | 纠纷关闭后提炼判例 | ❌ 无 HTTP 入口 |
+
+**协作原则**（`schemas.py` 文件头注释）：所有 Agent 输入输出 **必须引用全局契约**，禁止自造字段；Agent 间通过 Pydantic 模型传递，可单测、可评测对齐。
+
+### 2.3 核心处理链路（`assisted_controller.run_with_events`）
+
+```mermaid
+sequenceDiagram
+    participant F as 前端
+    participant R as analyze router
+    participant C as AssistedController
+    participant CA as Cache A/B/C
+    participant A1 as Agent1
+    participant T as Agent2 Tools
+    participant A2 as Agent2 LLM
+    participant A3 as Agent3
+
+    F->>R: POST materials (chat/images/order)
+    R->>C: run_with_events
+    C->>CA: merge_materials (A层)
+    C->>CA: get_cached_report (C层)
+    alt C层命中
+        CA-->>C: AnalysisReport
+        C-->>F: final_report (cache_hit)
+    else 未命中
+        par Batch0
+            C->>A1: extract (或 B层短路)
+            C->>T: fetch_buyer_profile_and_cases
+        end
+        par Batch1
+            C->>T: customer_value ∥ malicious_detection
+        end
+        C->>T: needs_rule_match 门控
+        alt 需匹配
+            T->>T: match_rules_from_facts
+        end
+        C->>A2: recommend(StrategyInput)
+        C->>A3: generate(ScriptInput)
+        C->>CA: save_report (C层)
+        C-->>F: SSE stage_* / final_report
+    end
 ```
 
-### 2.2 核心处理链路
-
-```
-买家发起纠纷
-  -> 材料收集与合并 (merge_materials, 缓存层)
-  -> C 层缓存短路检查（命中则直接返回）
-  -> Batch0 并行:
-       Agent1 事实提取 (fact_extractor.py, 820行)
-       买家画像与相似判例查询
-  -> Batch1 并行:
-       客户价值评估 (evaluate_customer_value)
-       恶意行为检测 (detect_malicious_behavior)
-  -> 规则匹配门控 (needs_rule_match)
-       -> match_rules_from_facts (rule_matcher.py, 877行)
-  -> Agent2 策略制定 (strategist.py, 1213行)
-       -> 产出 ActionContract（动作类型+补偿政策+规则约束+下一步）
-  -> Agent3 话术生成 (script_generator.py, 331行)
-       -> 在 ActionContract 约束下生成多版本话术
-  -> AnalysisReport 聚合 + 缓存保存
-  -> SSE 流式推送给前端 (progress/delta/final_report)
-```
-
-### 2.3 Agent 协作关系
-
-| Agent | 文件 | 代码量 | 职责 | 输入 | 输出 |
-|-------|------|--------|------|------|------|
-| Agent1 事实还原员 | agent1/fact_extractor.py | 820行 | 提取结构化事实，不判责 | 材料（文本+图片+物流） | FactOutput |
-| Agent2 策略参谋员 | agent2/strategist.py | 1213行 | 综合分析输出处置方向 | FactOutput + 规则 + 恶意 + 画像 | StrategyOutput (含ActionContract) |
-| Agent3 话术生成员 | agent3/script_generator.py | 331行 | 生成店主口吻话术 | ActionContract + 对话上下文 | ScriptOutput |
-| Agent4 情绪监控员 | agent4/emotion_monitor.py | 159行 | 消息情绪分析 | 消息文本 | EmotionOutput |
-| Agent5 复盘分析师 | agent5/reviewer.py | 244行 | 经验提炼存入判例库 | 完整轨迹 | ReviewOutput |
-
-关键设计：Agent 间通过 schemas.py 中定义的 Pydantic 结构体通信，所有 Agent 的输入输出必须引用该文件，禁止自行发明字段。
+**阶段事件**（流式）：`stage_start` → `stage_done`（含 `partial_report`）→ `stage_delta`（Agent2 reasoning）→ `final_report` → `pipeline_done`。
 
 ---
 
-## 三、功能点清单
+## 三、功能点清单（代码已实现）
 
-### 3.1 核心智能功能（5项）
+### 3.1 产品与交互
 
-#### 1) 多模态事实提取
-- 位置：backend/agents/agent1/fact_extractor.py
-- 流程：LLM 提取核心诉求和意图标签 -> 诉求锚定视觉指导 -> 并行多图分析（最多3张）-> 多图结论合并 -> 证据质量与可决策度评估
-- 技术亮点：
-  - _build_vision_guidance() 用诉求锚定多模态分析方向
-  - pick_balanced_visual_observations() 多图轮询采样，避免截断后只剩首图结论
-  - resolve_primary_dispute_frame() 单点判定主争议框架（七天无理由/质量缺陷/描述不符/物流），下游只读不再猜
-  - _derive_evidence_quality() 给证据覆盖度档位（high/medium/low）
+| 功能 | 实现位置 | 说明 |
+|------|----------|------|
+| 辅助模式双栏 UI | `DisputeView.vue` + `ChatPanel` + `StrategyPanel` | 左对话、右 AI 分析 |
+| 多轮材料增量合并 | `cache/materials_store.merge_materials` | 同 dispute_id 累积 chat/images |
+| 快照覆盖 / 重置上下文 | `analyze` 请求参数 | `reset_context` 清 A/B/C 缓存 |
+| 图片举证 | 前端 data URL → Agent1 `analyze_image` | 最多并行 3 张 |
+| 一键填入话术 | `useDispute.apply_script` | 将推荐话术写入输入框 |
+| SSE 流式进度 | `routers/analyze.analyze_stream` | `ENABLE_ANALYZE_STREAM=1`；可 HTTP 降级 |
+| Agent2 推理增量展示 | `reasoning_delta_callback` | 前端实时拼接策略推理 |
+| 商家配置 | `routers/merchants` | `mode=assisted`、`auto_threshold`（后者未驱动自动化） |
+| 买家画像 CRUD | `routers/buyers` | 按 merchant_id 隔离，buyer_id 为哈希 |
 
-#### 2) 规则匹配引擎
-- 位置：backend/tools/rule_matcher.py + backend/tools/rule_lexicon.py
-- 流程：品类slug解析 -> 通道激活 -> doc锁定 -> 节过滤 -> LLM条文选型 -> must/should分级
-- 技术亮点：
-  - rule_lexicon.py 多层解析策略：精确匹配 -> 去引号键匹配 -> 大小写不敏感 -> 中文核心名子串唯一命中 -> 模糊最长匹配
-  - rule_matcher.py 锁定规则文档后，通过LLM从候选节中选出最相关条文
-  - must(必须遵守)/should(建议遵守)/weak(参考) 三级相关性分级
-  - needs_rule_match() 证据门控：简单案跳过规则匹配，减少LLM调用成本
+### 3.2 智能决策能力
 
-#### 3) 恶意行为检测
-- 位置：backend/tools/agent2_tools.py
-- 流程：硬规则层（虚假凭证、AI伪造、差评勒索模式识别）+ LLM语义层（综合上下文判断）-> 两层结果融合
-- 技术亮点：
-  - 双轨检测降低误判率
-  - 硬规则层快速拦截明显恶意，语义层处理复杂场景
-  - 检测结果注入 StrategyInput.precomputed_malicious_detection，避免Agent2内部重复调用
+| 能力 | 关键模块 | 要点 |
+|------|----------|------|
+| 多模态事实提取 | `fact_extractor.py` | LLM 文本 + 视觉 + 物流占位 |
+| 主争议框架单点判定 | `dispute_frame.resolve_primary_dispute_frame` | 七天无理由/质量/描述不符/物流；下游只读 |
+| 证据质量 & 可决策度 | `FactOutput.evidence_quality` / `decision_readiness` | 驱动策略阶段与金额门禁 |
+| 规则导航计划 | `agent1/rule_plan.py` | Agent1 锁定 doc/通道/检索词，Agent2 执行匹配 |
+| 规则匹配引擎 | `rule_matcher.py` + `rule_lexicon.py` | doc 锁定 → 节过滤 → LLM 条文选型 → must/should |
+| 简单案规则跳过 | `agent2_tools.needs_rule_match` | 降本：无品类通道、低恶意、单诉求、无价值通道 |
+| 买家画像 & 相似判例 | `agent2_tools` + MySQL | 缓存 + 默认画像兜底 |
+| 客户价值双通道 | `evaluate_customer_value` | 长期价值 / 本单价值，触发 `long_term`/`order` 通道 |
+| 恶意行为双轨检测 | `detect_malicious_behavior` | 硬规则信号 + LLM 语义，融合 risk_level |
+| 策略 LLM + 责任归属 | `strategist.recommend` | disposition / responsibility / win_rate |
+| **动作契约 ActionContract** | `strategist._infer_action_contract` | 6 种 action_type、4 种 compensation_policy |
+| **方案空间 ResolutionContract** | `resolution_contract.infer_resolution_contract` | offered/forbidden modes、验收门禁、具体补偿额 |
+| 话术生成 + 质量门禁 | `agent3_tools.generate_buyer_script` | 禁套话/踢皮球/人机味/过早亮规则/方案越界等 |
+| 配置化文本信号 | `data/text_signals.json` | 全品类词表，避免硬编码分支 |
+| 规则数据管线 | `scripts/crawl_*` + `import_rules_*` | 爬取 → MySQL → 词表构建 |
 
-#### 4) 客户价值评估
-- 位置：backend/tools/agent2_tools.py
-- 流程：长期通道触发条件 + 本单通道（视觉损失暴露）+ red_flags拦截
-- 技术亮点：
-  - 评估结果注入 StrategyInput.precomputed_customer_value
-  - 预计算注入模式：Batch1并行预计算，避免Agent2串行等待
+### 3.3 工程与质量保障
 
-#### 5) 动作契约机制
-- 位置：backend/agents/agent2/strategist.py 中 _infer_action_contract()
-- 流程：策略分析 -> 产出 action_type(6种) + compensation_policy(4种) + rule_constraints + next_step -> Agent3严格在契约内生成话术
-- 技术亮点：
-  - 核心创新：用结构化契约约束LLM输出范围，解决"策略与话术不一致"问题
-  - action_type: rule_explain / evidence_request / return_inspection / merchant_remedy / monetary_settle / defend_prepare
-  - compensation_policy: forbid / none / soft_no_amount / explicit_amount
-  - Agent3 的 _must_state_compensation_amount() 门禁：仅金额动作且 explicit_amount 时要求报具体金额
-
-### 3.2 工程化亮点（4项）
-
-#### 1) 三级缓存体系
-- 位置：backend/cache/
-- 分层：材料层缓存（合并后的材料避免重复拉取）+ 事实层缓存（B层，Agent1输出可复用）+ 报告层缓存（C层，完整分析结果直接返回）
-- 价值：碎片化对话场景（商家分多次查看）中，C层缓存可跳过整个分析链路
-
-#### 2) 流式SSE响应
-- 位置：backend/routers/analyze.py 中 /analyze/stream
-- 机制：EventEmitter 回调按 progress / delta / final_report 三阶段推送
-- 前端降级：环境变量 VITE_ENABLE_ANALYZE_STREAM=1 控制，支持普通HTTP回退
-
-#### 3) 配置化文本信号
-- 位置：data/text_signals.json + backend/tools/text_signals.py
-- 设计：所有词表统一管理在JSON配置中，业务代码零散落硬编码关键词
-- 价值：新增信号词只需改配置，不需要改代码
-
-#### 4) 质量门禁机制
-- 位置：backend/agents/agent3/script_generator.py
-- 五项门禁：
-  1. 禁客服套话
-  2. 禁踢皮球
-  3. 禁人机味
-  4. 非终局抗辩时禁亮规则条文
-  5. 须报金额时禁空泛商量
-- 重试：门禁不通过自动重试一次
-
-### 3.3 评估体系（2项）
-
-#### 1) 评测树 + LLM-as-Judge
-- 位置：eval/ 目录
-- 评测树：20个场景 x 三维度（协商NG:10 / 商责MF:5 / 恶意MA:5）
-- Judge评分：11维分项评分（1~5分等权）+ 总分换算（均值/5*100，通过阈值80分）
-- 硬失败规则：禁忌触犯>=2条、script_safety<4、推荐话术提前承诺、报告事实冲突、编造规则等
-- 11个评分维度：expectation_alignment / forbidden_output_safety / rule_understanding / rule_boundary_ability / evidence_handling / malicious_risk_recognition / customer_value_tradeoff / merchant_interest / buyer_communication / script_safety / script_reliability
-
-#### 2) 防泄题机制
-- 位置：eval/pipeline/spec_to_fixture.py
-- 字段级拦截：expectation、forbidden_outputs、human_review 等Judge专用字段不得进入fixture
-- 文本级拦截：非对话字段扫描"期望策略""标准答案""测试重点"等泄题短语
-- 价值：保证LLM跑批时不会通过fixture读到"标准答案"
-
----
-
-## 四、业务难点与设计决策
-
-### 难点1：规则边界模糊
-- 问题：平台规则表述不清晰、存在交叉和歧义，简单关键词匹配无法准确命中
-- 方案：rule_lexicon.py 品类导航 + rule_matcher.py 双层匹配。先通过品类slug锁定规则文档，再通过LLM进行条文选型和分级推荐
-- 面试要点：为什么不能用简单关键词匹配？因为规则表述存在"一句话涵盖多种场景"和"同一场景涉及多条规则"的交叉问题，需要LLM做语义级条文选型
-
-### 难点2：策略与话术一致性
-- 问题：LLM生成话术时容易偏离策略意图，自由发挥导致前后矛盾
-- 方案：动作契约机制。Agent2输出结构化的 action_type + compensation_policy + rule_constraints + next_step，Agent3被严格约束在此契约内
-- 面试要点：这是项目核心创新点，体现"用确定性结构约束LLM不确定性"的设计思想
-
-### 难点3：证据质量评估
-- 问题：从碎片化的聊天记录、图片、物流信息中判断证据充分性
-- 方案：Agent1多维度证据融合：文本诉求分析 -> 多模态视觉分析 -> 物流状态 -> 综合判定 evidence_quality 和 decision_readiness
-- 面试要点：多图轮询采样（pick_balanced_visual_observations）和诉求锚定视觉指导（_build_vision_guidance）的技术细节
-
-### 难点4：恶意行为识别的准确性
-- 问题：需要区分真实纠纷和恶意索赔，避免误判影响正常用户体验
-- 方案：双轨检测——硬规则层快速拦截明显恶意 + LLM语义层处理复杂场景，两层结果融合降低误判率
-- 面试要点：硬规则和LLM各自的优势和局限，以及融合决策的必要性
-
-### 难点5：确定性与LLM的平衡
-- 问题：LLM输出不稳定，但纯规则又无法覆盖所有语义场景
-- 方案：确定性优先原则——规则匹配、恶意硬规则、客户价值评分、主争议框架判定全部用纯代码/配置化实现，LLM仅在需要语义推理时介入
-- 面试要点：对AI能力边界的理解，以及"核心链路首版即生产强度"的工程原则
-
-### 难点6：AI系统质量评估
-- 问题：LLM输出非确定性，传统单元测试无法验证业务语义质量
-- 方案：评测树 + LLM-as-Judge体系。20个场景覆盖三维度，11维评分+硬失败规则，防泄题机制保证评估客观性
-- 面试要点：评测树设计思路、Judge评分体系的合理性、防泄题机制的必要性
-
----
-
-## 五、面试讲解大纲（约7分钟）
-
-### 1. 项目概述（1分钟）
-"这是一个面向电商中小商家的 AI 纠纷应诉助手。核心解决商家不熟悉平台规则、不懂有效举证、情绪化决策导致不必要损失的问题。系统采用 5-Agent 协作架构，支持辅助模式和智能模式，核心链路是 Agent1(事实提取) -> Agent2(策略制定) -> Agent3(话术生成)。"
-
-### 2. 架构亮点（2分钟）
-- Agent 职责严格分离：5个Agent各司其职，通过结构化schema通信，可独立测试和优化
-- 确定性优先于LLM：规则匹配、恶意检测等用纯代码实现，确保确定性；LLM仅在语义推理时介入
-- 动作契约机制：Agent2产出结构化契约，Agent3严格在契约内生成话术，从结构层面保证策略与话术一致性
-- 预计算注入：恶意检测和客户价值在Batch1并行预计算，注入StrategyInput，避免Agent2内部串行等待
-
-### 3. 核心创新（2分钟）
-- 动作契约机制：将"策略到话术的一致性"从prompt层面提升到架构层面解决
-- 评测树+LLM Judge：20场景x11维评分的科学评估体系，包含防泄题机制
-- 多模态融合分析：文本+图片+物流三维度融合，诉求锚定视觉指导
-
-### 4. 技术难点应对（2分钟）
-准备好6个难点的30秒版本应答（见第四部分）
-
----
-
-## 六、量化指标
-
-| 指标 | 数值 |
+| 能力 | 位置 |
 |------|------|
-| 核心 Agent 代码量 | 2767行（Agent1:820 + Agent2:1213 + Agent3:331 + Agent4:159 + Agent5:244） |
-| 规则匹配引擎 | 877行 |
-| 数据结构定义 | 585行（schemas.py） |
-| 评测场景数 | 20个（协商10 + 商责5 + 恶意5） |
-| Judge 评分维度 | 11维 |
-| 测试用例数 | 33个 |
-| 质量门禁项 | 5项 |
-| 缓存层级 | 3层 |
-| 动作类型 | 6种 |
-| 补偿策略 | 4种 |
+| 三级纠纷缓存 A/B/C | `materials_store` / `result_cache` + `fingerprint` |
+| 工具层缓存 | `vision_cache`、`tool_cache`（视觉/物流/画像/判例） |
+| 全局异常与结构化日志 | `main.py` 中间件 + `[Agentx]`/`[AssistedController]` 前缀 |
+| 评测树批量跑批 | `eval/pipeline/run_batch_eval.py` |
+| LLM-as-Judge 11 维 | `eval/content/prompts/judge_system.md` |
+| 硬断言 + 防泄题 | `assert_report.py` + `spec_to_fixture.py` |
+| pytest | `tests/`（约 200+ 用例，覆盖 schemas/各 Agent/API/规则/缓存） |
+
+### 3.4 明确未接入 / 占位（面试须诚实说明）
+
+- **智能模式**：`controllers/` 仅 `assisted_controller`，`auto_threshold` 存库未用
+- **Agent4**：`emotion_alert` 恒为 `None`，前端 `EmotionAlert.vue` 已预留
+- **Agent5**：Celery `review_task` 存在，无对外 API
+- **平台物流 API**：`platform_api.query_logistics` 返回默认空值
+
+---
+
+## 四、设计思想（面试价值点）
+
+### 4.1 契约驱动，而非 Prompt 拼接
+
+`schemas.py`（约 630 行）是 **唯一字段真源**：枚举、输入输出、规则约束、方案模式全部集中定义。好处：
+
+- Agent 可独立单测；评测可对结构化字段做硬断言
+- 变更有迹可循，避免「各 Agent 各说各话」
+
+### 4.2 决策与表达分离（核心创新）
+
+两层约束解决「策略说 A、话术说 B」：
+
+1. **ActionContract**（Agent2）：`action_type`（如 `evidence_request`）、`compensation_policy`（能否谈钱）、`next_step`、`rule_constraints`
+2. **ResolutionContract**（Agent2）：`offered_modes` / `forbidden_modes`（如禁止 `refund_only`）、`require_inspection_before_refund`、`proposed_compensation_amount`
+
+Agent3 **只做口语化**，通过 `agent3_tools` 多项门禁检测越界（如禁止仅退款承诺、验收前说「到账」）。
+
+> 面试话术：「不是让同一个 LLM 又决策又写话术，而是把决策压成结构化契约，话术模型在契约内生成，再用代码门禁兜底。」
+
+### 4.3 确定性优先，LLM 补语义
+
+| 环节 | 实现方式 |
+|------|----------|
+| 主争议框架 | 规则 + lexicon facet 映射（`dispute_frame.py`） |
+| 规则 doc/通道锁定 | Agent1 `rule_plan` + `rule_lexicon` |
+| 恶意硬信号 | 配置化规则打分 |
+| 客户价值 | 分项评分公式 |
+| 条文选型 / 策略推理 / 话术 | LLM |
+
+原则：**能写死的边界不写进 prompt 赌运气**；LLM 失败有模板/规则降级，不伪造成功。
+
+### 4.4 编排层预计算，避免 Agent 内串行
+
+`assisted_controller` 在 Batch0/Batch1 用 `ThreadPoolExecutor` 并行：
+
+- Agent1 ∥ 画像/判例
+- 客户价值 ∥ 恶意检测
+
+结果通过 `StrategyInput.precomputed_*` 注入 Agent2，避免策略 Agent 内部重复调工具、拉长尾延迟。
+
+### 4.5 单路径迭代
+
+`controllers/__init__.py` 约定：智能模式后续 **独立 controller**，不与 assisted 互相导入。当前只维护一条可验证主链路，符合「迭代即替换」工程原则。
+
+---
+
+## 五、业务疑难点深度剖析
+
+### 难点 1：规则边界模糊，关键词不够用
+
+**业务现象**：同一纠纷可能涉及七天无理由、质量、服务标、物流等多条规则交叉；条文表述覆盖多场景。
+
+**代码方案**（分层，非一步到位）：
+
+1. Agent1 产出 `rule_match_plan`（`target_doc_ids`、`section_selections`、检索词）— **导航而非终判**
+2. `needs_rule_match` 门控：简单案跳过全文匹配，省延迟与 token
+3. `match_rules_from_facts`：MySQL 加载正文 → `prepare_llm_candidates` 缩候选 → LLM 选型 → `must`/`should` 分级 → `RuleConstraint` 结构化约束
+
+**面试追问**：为什么不让 Agent2 直接读整本规则？  
+**答**：规则库体积大、噪声高；先 doc/节锁定再 LLM 选型，兼顾 recall 与上下文窗口；简单案门控避免 over-engineering。
+
+---
+
+### 难点 2：策略与话术一致性
+
+**业务风险**：LLM 话术容易「过度承诺退款」「与策略阶段矛盾」「向买家亮平台对峙牌」。
+
+**代码方案**：
+
+- Agent2 输出 `strategy_stage`（`evidence_first` / `negotiate_settle` / …）+ ActionContract + ResolutionContract
+- Agent3 prompt 显式传入契约 JSON
+- `_collect_style_issues` / `_violates_resolution_contract` 代码检测，失败 **重试一次**
+
+**可举例**：`forbidden_modes` 含 `refund_only` 时，话术出现「直接退款不退货」→ 门禁拦截。
+
+---
+
+### 难点 3：证据质量与「可决策度」
+
+**业务现象**：聊天记录碎片化、图片质量参差、物流信息滞后。
+
+**代码方案**：
+
+- 文本 LLM 提取诉求、`intent_tags`、`defect_type`
+- `_build_vision_guidance` 用诉求锚定视觉分析方向
+- `pick_balanced_visual_observations` 多图轮询，避免只取首图
+- 综合输出 `evidence_quality`、`decision_readiness`、`credential_trust`（视觉链路写入，下游只读）
+- `decision_readiness=false` 时策略倾向 `evidence_first`，话术禁止空泛谈钱
+
+---
+
+### 难点 4：恶意识别 vs 误伤正常买家
+
+**业务张力**：漏判恶意 → 商家损失；误判 → 体验与平台处罚。
+
+**代码方案**：
+
+- **硬规则层**：高频仅退款、调包标记、运费险滥用等 → `MaliciousSignal(source=hard_rule)`
+- **LLM 语义层**：复杂话术施压、专业索赔模式
+- 融合为 `risk_level` / `risk_score`；`medium+` 会触发 `needs_rule_match` 并影响策略 disposition
+- 话术侧 `malicious_risk` 模式有专门门禁（如非 `defend_prepare` 不宜轻率对峙）
+
+---
+
+### 难点 5：客户价值与商家利益的权衡
+
+**业务场景**：高 CLV 老客 vs 本单大额订单 vs 新客基线。
+
+**代码方案**：
+
+- `long_term_score`（画像驱动）与 `order_score`（本单金额+视觉严重度）双通道
+- `channel` 为 `long_term`/`order`/`none`；触发规则匹配门控与补偿 uplift 建议
+- 策略 LLM 输入含 `similar_cases` 判例，避免纯公式僵化
+
+---
+
+### 难点 6：全品类复用，禁止单品类硬编码
+
+**工程约束**（`.cursor/rules`）：禁止只匹配服饰等窄场景。
+
+**代码体现**：
+
+- `data/rule_match_lexicon.json` + `rule_lexicon_config.json` 品类/通道/facet 映射
+- `data/text_signals.json` 统一信号词
+- `dispute_frame` 通过 `intent_to_facets` 归一，非写死品类名
+
+---
+
+### 难点 7：LLM 非确定性下的质量保障
+
+**问题**：单元测试无法覆盖「策略是否合理」。
+
+**代码方案**：
+
+- **评测树**：`eval/content/scenarios/` 下 functional（phase1~3）+ pilot/legacy，按轴分组（恶意/商责/协商/价值/判例/多步等）
+- **流水线**：Markdown 叙事 → `scenario_gen` → fixture → 全链路 `assisted_run` → 硬断言 → Judge
+- **11 维 Judge** + **硬失败**（提前承诺、事实冲突、编造规则等优先于总分）
+- **防泄题**：`spec_to_fixture` 剥离 `expectation`/`forbidden_outputs` 等 Judge 专用字段
+
+---
+
+### 难点 8：性能与体验（流式 + 缓存）
+
+**场景**：商家反复点开同一纠纷、材料微增。
+
+| 层级 | 内容 | 失效 |
+|------|------|------|
+| A | 原始 materials 合并 | 指纹变 / reset_context |
+| B | Agent1 `FactOutput` | materials 指纹变 |
+| C | 完整 `AnalysisReport` | 报告指纹变 |
+
+C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。默认 `ENABLE_REDIS_CACHE=0` 开发走内存 fallback。
+
+---
+
+## 六、面试讲解脚本
+
+### 6.1 电梯稿（约 60 秒）
+
+「我做的是电商售后纠纷 AI 助手，服务中小商家。商家自己跟买家聊，系统在侧边栏给事实摘要、策略和可直接发送的话术。架构上是契约驱动的多 Agent：Agent1 做多模态事实和规则导航，Agent2 做策略并输出动作契约和方案空间，Agent3 只在契约里写话术，代码门禁防止过度承诺。规则匹配、恶意检测、客户价值等确定性逻辑用代码实现，LLM 负责语义推理。还有评测树和 LLM Judge 做回归。目前辅助模式端到端可演示，智能模式和情绪监控模块已写好待接入。」
+
+### 6.2 标准版（约 5–7 分钟）
+
+1. **背景与痛点**（1 min）：规则复杂、举证难、情绪化让步  
+2. **架构**（2 min）：五 Agent 分工 + 契约 + 编排层并行 + 三级缓存；展开 **决策/表达分离**  
+3. **难点**（2 min）：规则分层匹配、证据与可决策度、恶意双轨、评测体系  
+4. **结果与边界**（1 min）：辅助模式 MVP、评测覆盖、诚实说未接入部分  
+
+### 6.3 深挖准备（面试官常追问）
+
+| 追问 | 答题要点 |
+|------|----------|
+| 为什么多 Agent 不用一个大的？ | 职责分离、可测、可替换；契约降低耦合 |
+| 如何保证话术不瞎承诺？ | ResolutionContract + compensation_policy + 代码门禁 |
+| 规则从哪来？ | 爬取入库 MySQL + lexicon 索引 + 运行时匹配 |
+| LLM 挂了怎么办？ | 各层有降级/模板；外部调用有重试；错误中文日志 |
+| 怎么评估效果？ | 评测树 + 硬断言 + 11 维 Judge + 硬失败规则 |
+| 和客服机器人区别？ | 面向 **纠纷决策** 而非 FAQ；强调规则边界与商家利益 |
+| 你的贡献？ | （按个人实际填写：如契约设计、规则引擎、评测体系、门禁、编排优化等） |
+
+### 6.4 STAR 示例（可替换为你的真实经历）
+
+- **S**：商家在七天无理由纠纷中常被买家用「质量问题」逼退全款  
+- **T**：系统需识别框架差异，避免话术错误亮质量举证或过早全额退  
+- **A**：`resolve_primary_dispute_frame` 单点判定 + `FRAMES_SKIP_QUALITY_EVIDENCE_GATE` + ResolutionContract 禁止模式  
+- **R**：评测场景 RULE-01/NG-03 等可回归；话术门禁拦截「验收前到账」类表述  
+
+---
+
+## 七、量化参考（面试前本地复核）
+
+| 指标 | 参考值 | 核对方式 |
+|------|--------|----------|
+| 全局契约 | `schemas.py` ~630 行 | `wc -l schemas.py` |
+| 主链路编排 | `assisted_controller.py` ~510 行 | 含 Batch0/1 并行 |
+| 规则匹配 | `rule_matcher.py` ~877 行 | 含 LLM 选型 |
+| 评测情景 Markdown | functional 26 + pilot legacy 40+ | `eval/content/scenarios/` |
+| Judge 维度 | 11 维 | `judge_system.md` |
+| 动作类型 / 补偿策略 | 6 / 4 | `schemas.py` 枚举 |
+| 缓存层级 | A/B/C + 工具缓存 | `backend/cache/` |
+| pytest | 200+ collected | `pytest --collect-only` |
+
+---
+
+## 八、关键文件速查
+
+| 类别 | 路径 |
+|------|------|
+| 后端入口 | `backend/main.py` |
+| 主链路 | `backend/controllers/assisted_controller.py` |
+| 批处理 | `backend/pipeline/dispute_batch.py` |
+| 全局契约 | `schemas.py` |
+| Agent1 | `backend/agents/agent1/fact_extractor.py` |
+| 争议框架 | `backend/agents/agent1/dispute_frame.py` |
+| Agent2 | `backend/agents/agent2/strategist.py` |
+| 方案空间 | `backend/agents/agent2/resolution_contract.py` |
+| Agent3 门禁 | `backend/tools/agent3_tools.py` |
+| 规则匹配 | `backend/tools/rule_matcher.py` |
+| 规则门控 | `backend/tools/agent2_tools.py` → `needs_rule_match` |
+| 分析 API | `backend/routers/analyze.py` |
+| 前端状态 | `frontend/src/composables/useDispute.js` |
+| 评测入口 | `eval/pipeline/run_batch_eval.py` |
+| 环境模板 | `.env.example` |
+
+---
+
+## 九、讲解时建议强调的「能力信号」
+
+1. **AI 工程化**：不是套 ChatGPT，而是契约 + 门禁 + 评测闭环  
+2. **领域建模**：纠纷框架、规则通道、方案模式等业务抽象进 `schemas`  
+3. **性能意识**：并行批处理、分级缓存、规则门控降本  
+4. **诚实与演进**：清楚说明 MVP 边界与待接入模块，体现工程成熟度  
+
+---
+
+*文档版本：与仓库代码同步梳理；若代码变更请以 `assisted_controller` 与 `schemas.py` 为准更新本文。*

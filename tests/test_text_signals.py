@@ -11,7 +11,15 @@ if ROOT_DIR not in sys.path:
 
 from schemas import CREDENTIAL_TRUST_SUSPECT, CREDENTIAL_TRUST_UNKNOWN, FactOutput
 
-from backend.tools.text_signals import facts_has_deceptive_credential_clues, read_credential_trust
+from backend.tools.text_signals import facts_has_deceptive_credential_clues, read_credential_trust, signal_group
+
+
+def test_seller_negative_keywords_loaded_from_text_signals() -> None:
+    """卖家过激词表应来自 data/text_signals.json，前后端共用。"""
+    keywords = signal_group("seller_negative_keywords")
+    assert "滚" in keywords
+    assert "爱买不买" in keywords
+    assert len(keywords) >= 10
 
 
 def test_credential_trust_suspect_triggers_deceptive() -> None:

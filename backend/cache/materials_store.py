@@ -95,6 +95,16 @@ def _merge_dicts(
     return merged_materials
 
 
+def load_materials(dispute_id: str) -> dict[str, Any] | None:
+    """
+    读取已缓存的纠纷材料（Redis 优先，进程内 fallback）。
+    """
+    cached = _load_redis(dispute_id)
+    if cached is None:
+        cached = _load_local(dispute_id)
+    return deepcopy(cached) if cached else None
+
+
 def merge_materials(dispute_id: str, new_materials: dict[str, Any]) -> dict[str, Any]:
     """
     合并纠纷材料：Redis 优先，进程内 fallback；返回合并结果的副本。

@@ -1,76 +1,91 @@
 """
 Agent4（情绪监控员）模块测试
-覆盖：情绪标签归一化、预警阈值、历史负面轨迹与工具层兜底
+覆盖：卖家情绪预警、阈值、工具层关键词兜底
 """
 
 import os
 import sys
+from unittest.mock import patch
 
 
-# ---------- 与仓库根对齐的导入路径 ----------
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 
 from backend.agents.agent4.emotion_monitor import monitor
-from backend.tools.agent4_tools import analyze_sentiment
+from backend.tools.agent4_tools import analyze_seller_emotion
 
 
-# ---------- monitor：强负面预警、温和负面、历史负面转缓和、空文本边界 ----------
+_MERCHANT_CTX = {"alert_threshold": 0.8, "chat_history": []}
+
+
 class TestAgent4Monitor:
-    def test_monitor_should_trigger_alert_for_high_negative_intensity(self):
-        """强负面文本应触发预警。"""
+    def test_monitor_should_trigger_alert_for_aggressive_seller_text(self):
+        """卖家攻击性文本应触发预警。"""
         output = monitor(
-            text="太差了！我要投诉平台！",
-            context={"alert_threshold": 0.8, "chat_history": ["一直不处理", "非常失望"]},
+            text="你爱买不买，随便你投诉，我不承担！",
+            context={**_MERCHANT_CTX, "chat_history": [{"role": "buyer", "content": "我要退款"}]},
         )
         assert output.sentiment == "negative"
         assert output.alert_triggered is True
         assert output.alert_reason and "超过阈值" in output.alert_reason
-        assert output.emotion_note and "升级投诉" in output.emotion_note
 
-    def test_monitor_should_not_trigger_alert_for_medium_negative(self):
-        """中等负面强度不应触发预警。"""
+    def test_monitor_should_not_trigger_alert_for_calm_seller_text(self):
+        """卖家克制文本不应触发预警。"""
         output = monitor(
-            text="衣服有问题，我不满意，想确认怎么处理",
-            context={"alert_threshold": 0.95, "chat_history": ["物流到了但不太满意"]},
+            text="不好意思让您久等了，我这边马上帮您核实处理。",
+            context={**_MERCHANT_CTX, "alert_threshold": 0.95},
         )
-        assert output.sentiment in {"negative", "neutral"}
         assert output.alert_triggered is False
         assert output.alert_message == ""
 
-    def test_monitor_should_include_reluctant_note_for_positive_with_negative_trace(self):
-        """历史有负面轨迹时，缓和文本应输出“勉强”语义。"""
-        output = monitor(
-            text="好吧，先这样吧",
-            context={
-                "chat_history": ["这次购物很失望，准备投诉", "你们一直没给方案"],
-                "alert_threshold": 0.8,
+    def test_monitor_should_trigger_early_warn_for_mild_negative_text(self, monkeypatch):
+        """轻度负面情绪应触发 early_warn，供下一条发送前轻确认。"""
+        monkeypatch.setattr(
+            "backend.agents.agent4.emotion_monitor.analyze_seller_emotion",
+            lambda **_: {
+                "label": "negative",
+                "intensity": 0.62,
+                "emotion_note": "您语气偏硬，建议放慢节奏。",
             },
         )
-        assert output.sentiment == "positive"
+        output = monitor(
+            text="这事我已经说了很多遍了，请您看清楚规则。",
+            context={**_MERCHANT_CTX, "chat_history": [{"role": "buyer", "content": "我要退款"}]},
+        )
+        assert output.early_warn_triggered is True
         assert output.alert_triggered is False
-        assert output.emotion_note and "勉强" in output.emotion_note
+        assert output.early_warn_message
 
     def test_monitor_boundary_should_return_neutral_for_empty_text(self):
         """空文本边界：应返回 neutral 且不触发预警。"""
-        output = monitor(text="", context={})
+        output = monitor(text="", context=_MERCHANT_CTX)
         assert output.sentiment == "neutral"
         assert output.intensity == 0.0
         assert output.alert_triggered is False
 
 
-# ---------- 工具层：标签统一与关键词兜底 ----------
 class TestAgent4Tools:
-    def test_analyze_sentiment_should_fallback_to_negative_keywords(self):
-        """模型不可用时，负面关键词应命中 negative。"""
-        result = analyze_sentiment("太差了，质量很烂，我要退货")
+    def test_analyze_seller_emotion_should_fallback_to_negative_keywords(self, monkeypatch):
+        """LLM 不可用时，卖家负面关键词应命中 negative。"""
+        monkeypatch.setattr(
+            "backend.tools.agent4_tools._call_seller_emotion_llm",
+            lambda **_: None,
+        )
+        result = analyze_seller_emotion("你爱咋咋，随便你投诉，别烦我")
         assert result["label"] == "negative"
         assert 0.0 <= result["intensity"] <= 1.0
+        assert result.get("emotion_note")
 
-    def test_analyze_sentiment_should_fallback_to_positive_keywords(self):
-        """模型不可用时，正面关键词应命中 positive。"""
-        result = analyze_sentiment("谢谢你们，问题已经解决了，可以接受")
-        assert result["label"] == "positive"
-        assert 0.0 <= result["intensity"] <= 1.0
+    @patch("backend.tools.agent4_tools.chat_completion")
+    def test_analyze_seller_emotion_should_parse_llm_json(self, mock_chat):
+        """LLM 返回 JSON 时应正确解析。"""
+        mock_chat.return_value = (
+            '{"sentiment":"negative","intensity":0.91,'
+            '"emotion_note":"卖家语气强硬，建议冷静措辞。"}'
+        )
+        result = analyze_seller_emotion("你懂什么，爱买不买", chat_history=[])
+        assert result["label"] == "negative"
+        assert result["intensity"] == 0.91
+        assert "冷静" in result["emotion_note"]

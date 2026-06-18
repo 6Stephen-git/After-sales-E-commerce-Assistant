@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from schemas import ReviewInput, ReviewOutput
+from schemas import CaseScenario, ReviewInput, ReviewOutput
+
+from backend.tools.agent5_tools import generate_review_card
 
 
 AGENT5_LOG_PREFIX = "[Agent5]"
@@ -199,6 +201,82 @@ def _build_tags(case_type: str, outcome: str, strategy: str, ai_strategy_adopted
     return deduplicated
 
 
+def _build_scenario_from_timeline(full_timeline: dict[str, Any], strategy: str) -> CaseScenario:
+    """从轨迹 facts/strategy 映射情境画像（规则兜底用）。"""
+    facts = full_timeline.get("facts") if isinstance(full_timeline.get("facts"), dict) else {}
+    strategy_output = (
+        full_timeline.get("strategy")
+        if isinstance(full_timeline.get("strategy"), dict)
+        else full_timeline.get("strategy_output")
+        if isinstance(full_timeline.get("strategy_output"), dict)
+        else {}
+    )
+    dispute_type = str(
+        facts.get("issue_summary")
+        or facts.get("defect_type")
+        or full_timeline.get("dispute_desc")
+        or ""
+    ).strip()[:120]
+    evidence_quality = str(facts.get("evidence_quality") or "").strip().lower()
+    responsibility = str(strategy_output.get("responsibility") or facts.get("responsibility") or "").strip()
+    customer_value = ""
+    cv = strategy_output.get("customer_value")
+    if isinstance(cv, dict):
+        customer_value = str(cv.get("channel") or cv.get("summary") or "").strip()
+
+    order_amount = full_timeline.get("order_amount")
+    try:
+        amount = float(order_amount) if order_amount is not None else None
+    except (TypeError, ValueError):
+        amount = None
+
+    return CaseScenario(
+        dispute_type=dispute_type or "通用纠纷",
+        customer_value=customer_value,
+        evidence_quality=evidence_quality,
+        responsibility=responsibility or "不清",
+        strategy_direction=strategy if strategy != "unknown" else "",
+        risk_level="",
+        order_amount=amount,
+    )
+
+
+def _review_by_rules(input: ReviewInput) -> ReviewOutput:
+    """规则链复盘（LLM 失败兜底）。"""
+    full_timeline = input.full_timeline if isinstance(input.full_timeline, dict) else {}
+    strategy = _detect_strategy(payload=full_timeline)
+    outcome = _normalize_outcome(final_outcome=input.final_outcome)
+    case_type = _build_case_type(strategy=strategy)
+
+    fact_text = _find_first_text_by_keys(payload=full_timeline, keys=set(_FACT_CANDIDATE_KEYS))
+    key_facts = f"{outcome}；{fact_text}" if fact_text else f"{outcome}；关键事实待补充"
+    if input.outcome_note.strip():
+        key_facts = f"{key_facts}（{input.outcome_note.strip()}）"
+
+    action_text = _find_first_text_by_keys(payload=full_timeline, keys=set(_ACTION_CANDIDATE_KEYS))
+    adopted_prefix = "采纳AI建议" if input.ai_strategy_adopted else "未采纳AI建议"
+    merchant_action_taken = f"{adopted_prefix}，{action_text}" if action_text else adopted_prefix
+
+    lesson_text = _build_lesson_text(outcome=outcome, ai_strategy_adopted=input.ai_strategy_adopted)
+    tags = _build_tags(
+        case_type=case_type,
+        outcome=outcome,
+        strategy=strategy,
+        ai_strategy_adopted=input.ai_strategy_adopted,
+    )
+    scenario = _build_scenario_from_timeline(full_timeline=full_timeline, strategy=strategy)
+
+    return ReviewOutput(
+        case_type=case_type,
+        key_facts=key_facts,
+        merchant_action_taken=merchant_action_taken,
+        outcome=outcome,
+        lesson_text=lesson_text,
+        tags=tags,
+        scenario=scenario,
+    )
+
+
 # ---------- 主入口：从 ReviewInput 生成结构化复盘卡片 ----------
 def review(input: ReviewInput) -> ReviewOutput:
     """
@@ -213,31 +291,8 @@ def review(input: ReviewInput) -> ReviewOutput:
     if not isinstance(input, ReviewInput):
         raise TypeError(f"{AGENT5_LOG_PREFIX} input 必须是 ReviewInput 类型")
 
-    full_timeline = input.full_timeline if isinstance(input.full_timeline, dict) else {}
-    strategy = _detect_strategy(payload=full_timeline)
-    outcome = _normalize_outcome(final_outcome=input.final_outcome)
-    case_type = _build_case_type(strategy=strategy)
+    llm_output = generate_review_card(review_input=input)
+    if llm_output is not None:
+        return llm_output
 
-    fact_text = _find_first_text_by_keys(payload=full_timeline, keys=set(_FACT_CANDIDATE_KEYS))
-    key_facts = f"{outcome}；{fact_text}" if fact_text else f"{outcome}；关键事实待补充"
-
-    action_text = _find_first_text_by_keys(payload=full_timeline, keys=set(_ACTION_CANDIDATE_KEYS))
-    adopted_prefix = "采纳AI建议" if input.ai_strategy_adopted else "未采纳AI建议"
-    merchant_action_taken = f"{adopted_prefix}，{action_text}" if action_text else adopted_prefix
-
-    lesson_text = _build_lesson_text(outcome=outcome, ai_strategy_adopted=input.ai_strategy_adopted)
-    tags = _build_tags(
-        case_type=case_type,
-        outcome=outcome,
-        strategy=strategy,
-        ai_strategy_adopted=input.ai_strategy_adopted,
-    )
-
-    return ReviewOutput(
-        case_type=case_type,
-        key_facts=key_facts,
-        merchant_action_taken=merchant_action_taken,
-        outcome=outcome,
-        lesson_text=lesson_text,
-        tags=tags,
-    )
+    return _review_by_rules(input=input)

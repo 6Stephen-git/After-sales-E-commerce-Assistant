@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
-import { analyzeDispute, analyzeDisputeStream } from '../api'
+import { analyzeDispute, analyzeDisputeStream, monitorSellerEmotion } from '../api'
+import { should_block_seller_text_locally } from '../utils/sellerEmotionLocal'
 
 const ENABLE_ANALYZE_STREAM = String(import.meta.env.VITE_ENABLE_ANALYZE_STREAM || '0') === '1'
 
@@ -12,6 +13,13 @@ const sender_role = ref('merchant')
 const pending_images = ref([])
 const error_message = ref('')
 const progress_message = ref('')
+const seller_emotion_alert = ref(null)
+const show_seller_emotion_dialog = ref(false)
+const emotion_dialog_mode = ref('block')
+const emotion_watch_active = ref(false)
+const emotion_mild_notice_acknowledged = ref(false)
+const emotion_checking = ref(false)
+const pending_send = ref(null)
 const message_id_seed = ref(messages.value.length + 1)
 const pending_image_id_seed = ref(1)
 let analyze_abort_controller = null
@@ -71,6 +79,87 @@ export function use_dispute() {
     message_id_seed.value += 1
   }
 
+  // ---------- 情绪升级态：语气恢复平静后重置，允许下一轮硬语气提示 ----------
+  function reset_emotion_escalation() {
+    emotion_watch_active.value = false
+    emotion_mild_notice_acknowledged.value = false
+  }
+
+  // ---------- 卖家情绪：发送后异步检测，硬语气提示仅弹一次 ----------
+  async function check_seller_emotion_after_send(merchant_text) {
+    const normalized_text = String(merchant_text || '').trim()
+    if (!normalized_text) {
+      return
+    }
+    try {
+      const chat_history = messages.value.map((item) => ({
+        role: item.role,
+        content: item.content
+      }))
+      const result = await monitorSellerEmotion({
+        text: normalized_text,
+        chat_history
+      })
+      seller_emotion_alert.value = result
+      if (result?.early_warn_triggered || result?.alert_triggered) {
+        emotion_watch_active.value = true
+        if (!emotion_mild_notice_acknowledged.value) {
+          emotion_dialog_mode.value = 'notice'
+          show_seller_emotion_dialog.value = true
+          emotion_mild_notice_acknowledged.value = true
+        }
+        return
+      }
+      reset_emotion_escalation()
+    } catch (error) {
+      console.warn('[useDispute] 卖家情绪监控失败', error)
+    }
+  }
+
+  // ---------- 卖家情绪：预警态下一条发送前复检待发内容 ----------
+  async function check_seller_emotion_before_send(merchant_text) {
+    const normalized_text = String(merchant_text || '').trim()
+    if (!normalized_text) {
+      return null
+    }
+    const chat_history = messages.value.map((item) => ({
+      role: item.role,
+      content: item.content
+    }))
+    const result = await monitorSellerEmotion({
+      text: normalized_text,
+      chat_history
+    })
+    seller_emotion_alert.value = result
+    return result
+  }
+
+  // ---------- 打开情绪弹窗：本地秒拦或轻度预警确认 ----------
+  function open_emotion_dialog(payload, mode) {
+    pending_send.value = payload
+    emotion_dialog_mode.value = mode
+    show_seller_emotion_dialog.value = true
+  }
+
+  // ---------- 写入会话：将待发文字与图片落盘到消息列表 ----------
+  function commit_send({ raw_text, images, role }) {
+    if (images.length === 0) {
+      append_message(role, raw_text)
+    } else if (!raw_text) {
+      images.forEach((img) => {
+        append_message(role, '', img.data_url, img.name)
+      })
+    } else {
+      append_message(role, raw_text, images[0].data_url, images[0].name)
+      images.slice(1).forEach((img) => {
+        append_message(role, '', img.data_url, img.name)
+      })
+    }
+    input_text.value = ''
+    pending_images.value = []
+    pending_send.value = null
+  }
+
   // ---------- 待发图片：加入预览列表，不立即写入消息 ----------
   async function add_pending_image(file) {
     if (!(file instanceof File)) {
@@ -99,8 +188,8 @@ export function use_dispute() {
     pending_images.value = pending_images.value.filter((item) => item.id !== image_id)
   }
 
-  // ---------- 统一发送：文字 + 待发图片一并写入消息 ----------
-  function send_message() {
+  // ---------- 统一发送：本地秒拦；预警态下条发送前复检；其余即时发出 ----------
+  async function send_message() {
     const raw_text = input_text.value.trim()
     const images = [...pending_images.value]
     if (!raw_text && images.length === 0) {
@@ -108,22 +197,66 @@ export function use_dispute() {
     }
 
     const role = sender_role.value === 'buyer' ? 'buyer' : 'merchant'
+    const payload = { raw_text, images, role }
+    let emotion_prechecked = false
 
-    if (images.length === 0) {
-      append_message(role, raw_text)
-    } else if (!raw_text) {
-      images.forEach((img) => {
-        append_message(role, '', img.data_url, img.name)
-      })
-    } else {
-      append_message(role, raw_text, images[0].data_url, images[0].name)
-      images.slice(1).forEach((img) => {
-        append_message(role, '', img.data_url, img.name)
-      })
+    if (role === 'merchant' && raw_text) {
+      if (should_block_seller_text_locally(raw_text)) {
+        open_emotion_dialog(payload, 'block')
+        return
+      }
+      if (emotion_watch_active.value) {
+        emotion_checking.value = true
+        try {
+          const result = await check_seller_emotion_before_send(raw_text)
+          if (result?.early_warn_triggered || result?.alert_triggered) {
+            open_emotion_dialog(payload, 'intercept')
+            return
+          }
+          // 下一条情绪正常：解除预警态，静默放行，不再弹窗拦截
+          reset_emotion_escalation()
+          seller_emotion_alert.value = result
+          emotion_prechecked = true
+        } catch (error) {
+          console.warn('[useDispute] 卖家情绪发送前复检失败，跳过拦截', error)
+        } finally {
+          emotion_checking.value = false
+        }
+      }
     }
 
-    input_text.value = ''
-    pending_images.value = []
+    commit_send(payload)
+    if (role === 'merchant' && raw_text && !emotion_prechecked) {
+      void check_seller_emotion_after_send(raw_text)
+    }
+  }
+
+  // ---------- 情绪拦截：用户选择修改内容，保留输入框待发 ----------
+  function cancel_emotion_block() {
+    pending_send.value = null
+    show_seller_emotion_dialog.value = false
+  }
+
+  // ---------- 情绪拦截：用户确认仍要发送 ----------
+  function confirm_send_despite_emotion() {
+    const payload = pending_send.value
+    if (!payload) {
+      show_seller_emotion_dialog.value = false
+      return
+    }
+    pending_send.value = null
+    show_seller_emotion_dialog.value = false
+    emotion_mild_notice_acknowledged.value = true
+    commit_send(payload)
+    if (payload.role === 'merchant' && payload.raw_text) {
+      void check_seller_emotion_after_send(payload.raw_text)
+    }
+  }
+
+  // ---------- 情绪提醒：硬语气当场提示已知晓，后续仅走发送前拦截 ----------
+  function dismiss_emotion_notice() {
+    emotion_mild_notice_acknowledged.value = true
+    show_seller_emotion_dialog.value = false
   }
 
   // ---------- 文件读取：将图片转换为可预览与可传输的 data URL ----------
@@ -289,6 +422,10 @@ export function use_dispute() {
     pending_images,
     error_message,
     progress_message,
+    seller_emotion_alert,
+    show_seller_emotion_dialog,
+    emotion_dialog_mode,
+    emotion_checking,
     has_report,
     append_message,
     send_message,
@@ -296,6 +433,9 @@ export function use_dispute() {
     remove_pending_image,
     recall_message,
     apply_script,
-    request_ai_help
+    request_ai_help,
+    cancel_emotion_block,
+    confirm_send_despite_emotion,
+    dismiss_emotion_notice
   }
 }

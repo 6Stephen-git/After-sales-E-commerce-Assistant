@@ -3,9 +3,12 @@
     <template #header>
       <div class="chat-header">
         <span>聊天窗口</span>
-        <el-button type="primary" :loading="loading" @click="emit_request_ai_help">
-          分析对话
-        </el-button>
+        <div class="header-actions">
+          <el-button type="primary" :loading="loading" @click="emit_request_ai_help">
+            分析对话
+          </el-button>
+          <el-button type="danger" plain @click="emit_end_processing">结束处理</el-button>
+        </div>
       </div>
     </template>
 
@@ -60,7 +63,7 @@
           @change="handle_image_change"
         />
         <el-button class="btn-pick-image" :icon="Picture" circle @click="open_image_picker" />
-        <el-button type="success" @click="emit_send_message">发送</el-button>
+        <el-button type="success" :loading="emotion_checking" @click="emit_send_message">发送</el-button>
       </div>
     </div>
   </el-card>
@@ -92,6 +95,10 @@ const props = defineProps({
   loading: {
     type: Boolean,
     default: false
+  },
+  emotion_checking: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -103,7 +110,8 @@ const emit = defineEmits([
   'add_pending_image',
   'remove_pending_image',
   'recall_message',
-  'request_ai_help'
+  'request_ai_help',
+  'end_processing'
 ])
 const image_input_ref = ref(null)
 
@@ -165,6 +173,10 @@ function emit_recall_message(message_id) {
 function emit_request_ai_help() {
   emit('request_ai_help')
 }
+
+function emit_end_processing() {
+  emit('end_processing')
+}
 </script>
 
 <style scoped>
@@ -184,6 +196,12 @@ function emit_request_ai_help() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .messages-container {

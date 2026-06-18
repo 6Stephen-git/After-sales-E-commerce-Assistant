@@ -122,6 +122,58 @@ def _apply_schema_patches(engine: Engine) -> None:
     logger.info("%s merchant_config.max_compensation 补列完成", DB_LOG_PREFIX)
 
 
+def _patch_dispute_cases_columns(engine: Engine) -> None:
+    """
+    为 dispute_cases 表补齐 Agent5 复盘所需列。
+
+    说明：MySQL 的 TEXT 列不允许 DEFAULT，scenario_json 需分步补列并回填。
+    """
+    inspector = inspect(engine)
+    if "dispute_cases" not in inspector.get_table_names():
+        return
+
+    column_names = {col["name"] for col in inspector.get_columns("dispute_cases")}
+    dialect = engine.dialect.name
+    patches: list[tuple[str, str]] = []
+    needs_scenario_json = "scenario_json" not in column_names
+
+    if "dispute_id" not in column_names:
+        patches.append(("dispute_id", "VARCHAR(64) NOT NULL DEFAULT ''"))
+    if "case_type" not in column_names:
+        patches.append(("case_type", "VARCHAR(64) NOT NULL DEFAULT ''"))
+    if "outcome" not in column_names:
+        patches.append(("outcome", "VARCHAR(16) NOT NULL DEFAULT ''"))
+
+    if not patches and not needs_scenario_json:
+        return
+
+    logger.info(
+        "%s 开始补齐 dispute_cases 列：%s scenario_json=%s",
+        DB_LOG_PREFIX,
+        [name for name, _ in patches],
+        needs_scenario_json,
+    )
+    with engine.begin() as conn:
+        for col_name, col_def in patches:
+            conn.execute(text(f"ALTER TABLE dispute_cases ADD COLUMN {col_name} {col_def}"))
+        if needs_scenario_json:
+            if dialect == "mysql":
+                conn.execute(text("ALTER TABLE dispute_cases ADD COLUMN scenario_json TEXT NULL"))
+                conn.execute(
+                    text("UPDATE dispute_cases SET scenario_json = '{}' WHERE scenario_json IS NULL")
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text("ALTER TABLE dispute_cases ADD COLUMN scenario_json TEXT NOT NULL DEFAULT '{}'")
+                )
+            else:
+                conn.execute(text("ALTER TABLE dispute_cases ADD COLUMN scenario_json TEXT NULL"))
+                conn.execute(
+                    text("UPDATE dispute_cases SET scenario_json = '{}' WHERE scenario_json IS NULL")
+                )
+    logger.info("%s dispute_cases 补列完成", DB_LOG_PREFIX)
+
+
 # ---------- 元数据建表：应用启动时按模型创建缺失表 ----------
 def init_db() -> None:
     """
@@ -134,6 +186,7 @@ def init_db() -> None:
         engine = get_engine()
         Base.metadata.create_all(bind=engine)
         _apply_schema_patches(engine)
+        _patch_dispute_cases_columns(engine)
         logger.info("%s 数据库建表完成", DB_LOG_PREFIX)
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 数据库建表失败：%s", DB_LOG_PREFIX, exc)

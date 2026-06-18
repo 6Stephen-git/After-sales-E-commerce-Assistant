@@ -37,7 +37,11 @@ def async_review(review_input_dict: dict[str, Any], merchant_id: str) -> bool:
     try:
         review_input = ReviewInput.model_validate(review_input_dict)
         review_output = review(input=review_input)
-        saved = save_case_to_db(review=review_output, merchant_id=merchant_id)
+        saved = save_case_to_db(
+            review=review_output,
+            merchant_id=merchant_id,
+            dispute_id=review_input.dispute_id,
+        )
         logger.info("%s 异步复盘任务结束，写入结果=%s", AGENT5_LOG_PREFIX, saved)
         return saved
     except Exception as exc:  # noqa: BLE001

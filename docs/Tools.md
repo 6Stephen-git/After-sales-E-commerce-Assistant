@@ -100,19 +100,19 @@
 - 约束：结构化 JSON 输出 `{"script": "..."}`；禁用词命中时重试一次；禁止调用模板文件或数据库
 - 说明：对话语境（blocked/actionable 举证）由 Agent2 策略 JSON 一次产出，Agent3 不再独立调用对话分析 LLM
 
-## Agent 4 — 情绪监控员
+## Agent 4 — 卖家情绪监控员
 
 
-| 工具名                 | 功能     | 来源         | 技术选型 |
-| ------------------- | ------ | ---------- | ---- |
-| `analyze_sentiment` | 分析文本情绪 | 本地 BERT 模型 | 本地推理 |
+| 工具名 | 功能 | 来源 | 技术选型 |
+| --- | --- | --- | --- |
+| `analyze_seller_emotion` | 分析卖家消息情绪 | MiMo LLM | `AGENT4_LLM_MODEL`，失败时关键词兜底 |
 
 
-`**analyze_sentiment**`
+`**analyze_seller_emotion**`
 
-- 输入：`text: str`
-- 输出：`dict` 含 `label: str`（"negative"/"neutral"/"positive"）和 `intensity: float`（0-1）
-- 约束：模型在 `__init__` 只加载一次，后续复用。禁止调用 LLM API 做情感分析（理由：本地模型延迟 < 5ms，零成本）。
+- 输入：`text: str`，`chat_history: list`（可选）
+- 输出：`dict` 含 `label`、`intensity`、`emotion_note`
+- 约束：通过 `POST /emotion/monitor` 触发，不嵌入 `/analyze` 主链路
 
 ## Agent 5 — 复盘分析师
 

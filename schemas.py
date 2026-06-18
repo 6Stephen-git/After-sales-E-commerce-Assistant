@@ -365,7 +365,7 @@ class StrategyInput(BaseModel):
     order_amount: float = Field(default=0.0, description="纠纷订单金额")
     chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表（用于语义分析）")
     chat_turns: List[ChatTurn] = Field(default_factory=list, description="带角色的近期对话")
-    emotion_note: Optional[str] = Field(default=None, description="Agent 4 情绪摘要（可选）")
+    emotion_note: Optional[str] = Field(default=None, description="买家情绪摘要（预留，主链路未接入）")
     precomputed_customer_value: Optional["CustomerValueOutput"] = Field(
         default=None,
         description="Controller 预计算的客户价值结果（可选，传入则跳过 Agent2 内重复调用）",
@@ -400,7 +400,7 @@ class CustomerValueInput(BaseModel):
         default=False,
         description="本单优待通道门槛：red_flags 或低证据缺证时为 true",
     )
-    emotion_note: Optional[str] = Field(default=None, description="Agent 4 输出的情绪描述（可选）")
+    emotion_note: Optional[str] = Field(default=None, description="买家情绪摘要（预留，主链路未接入）")
 
 
 class CustomerValueScoreItem(BaseModel):
@@ -444,7 +444,7 @@ class MaliciousDetectionInput(BaseModel):
     swap_flag_count: int = Field(default=0, description="历史调包/少件标记次数")
     related_account_count: int = Field(default=0, description="关联账号数量")
     chat_history: List[str] = Field(default_factory=list, description="聊天记录文本列表")
-    emotion_note: Optional[str] = Field(default=None, description="情绪摘要（可选）")
+    emotion_note: Optional[str] = Field(default=None, description="买家情绪摘要（预留）")
 
 
 class MaliciousDetectionOutput(BaseModel):
@@ -572,7 +572,7 @@ class ScriptInput(BaseModel):
     facts: FactOutput = Field(..., description="Agent 1 的输出")
     order_id: str = Field(..., description="订单号")
     order_amount: float = Field(default=0.0, description="订单金额")
-    emotion_note: Optional[str] = Field(default=None, description="来自 Agent 4 的细腻情绪描述，用于优化话术语气")
+    emotion_note: Optional[str] = Field(default=None, description="买家情绪语气提示（预留，主链路未接入）")
     chat_history: List[ChatTurn] = Field(default_factory=list, description="近期对话轮次，供话术嵌入当下语境")
 
 class ScriptOutput(BaseModel):
@@ -590,33 +590,51 @@ class ScriptOutput(BaseModel):
 # ============================================================
 
 class EmotionOutput(BaseModel):
-    alert_triggered: bool = Field(default=False, description="是否触发预警")
-    alert_message: str = Field(default="", description="预警提示文本")
-    alert_reason: str = Field(default="", description="触发原因")
+    alert_triggered: bool = Field(default=False, description="是否触发高强度预警")
+    alert_message: str = Field(default="", description="高强度预警提示文本")
+    alert_reason: str = Field(default="", description="高强度触发原因")
+    early_warn_triggered: bool = Field(default=False, description="是否触发轻度情绪预警（下条发送前轻确认）")
+    early_warn_message: str = Field(default="", description="轻度预警提示文本")
     sentiment: str = Field(default="neutral", description="情绪标签：negative/neutral/positive")
     intensity: float = Field(default=0.0, ge=0.0, le=1.0, description="情绪强度")
-    emotion_note: Optional[str] = Field(default=None, description="对当前情绪状态的细腻描述，例如：'顾客虽然同意方案，但仍有些勉强，希望尽快解决问题'")
+    emotion_note: Optional[str] = Field(default=None, description="卖家情绪细腻描述与风险提示")
 
 # ============================================================
 # 七、Agent 5 — 复盘分析师
 # ============================================================
 
+class CaseScenario(BaseModel):
+    """判例情境画像，对齐 case_studies 结构，用于入库与相似检索。"""
+
+    dispute_type: str = Field(default="", description="纠纷类型/品类")
+    customer_value: str = Field(default="", description="客户价值通道或高/中/低")
+    evidence_quality: str = Field(default="", description="证据质量 high/medium/low")
+    responsibility: str = Field(default="", description="责任归属：商责/买责/不清/混合")
+    strategy_direction: str = Field(default="", description="策略方向 defend/negotiate/compensate")
+    risk_level: str = Field(default="", description="风险等级（可选）")
+    order_amount: Optional[float] = Field(default=None, description="订单金额（可选）")
+
+
 class ReviewInput(BaseModel):
     """Agent 5 输入"""
+
     dispute_id: str = Field(..., description="纠纷编号")
     full_timeline: dict = Field(..., description="完整纠纷轨迹（对话记录+AI各阶段建议+商家操作）")
     final_outcome: str = Field(..., description="最终结果：胜/败/和解/升级")
     ai_strategy_adopted: bool = Field(default=False, description="商家是否采纳AI建议")
+    outcome_note: str = Field(default="", description="纠纷结果补充说明")
 
 
 class ReviewOutput(BaseModel):
     """Agent 5 输出：经验卡片"""
+
     case_type: str = Field(..., description="纠纷类型标签")
     key_facts: str = Field(..., description="关键事实摘要（一句话）")
     merchant_action_taken: str = Field(..., description="商家实际采取的行动")
     outcome: str = Field(..., description="最终结果")
     lesson_text: str = Field(..., description="经验教训（自然语言）")
     tags: List[str] = Field(default_factory=list, description="可复用策略标签")
+    scenario: CaseScenario = Field(default_factory=CaseScenario, description="情境画像")
 
 
 # ============================================================
@@ -629,7 +647,7 @@ class AnalysisReport(BaseModel):
     facts: FactOutput = Field(..., description="事实分析结果")
     strategy: StrategyOutput = Field(..., description="策略分析结果（含处置方向、胜率、置信度、客户价值、恶意检测）")
     scripts: ScriptOutput = Field(..., description="生成话术")
-    emotion_alert: Optional[EmotionOutput] = Field(default=None, description="情绪预警（如有）")
+    emotion_alert: Optional[EmotionOutput] = Field(default=None, description="分析报告内情绪预警（预留；实时卖家预警走 /emotion/monitor）")
     buyer_profile: Optional[BuyerProfile] = Field(default=None, description="买家画像摘要（供前端参考信息区展示）")
     similar_cases: List[SimilarCase] = Field(default_factory=list, description="相似历史判例（供前端参考信息区展示）")
     matched_rules: List[MatchedRule] = Field(

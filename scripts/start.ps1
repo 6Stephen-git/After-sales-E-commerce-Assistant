@@ -42,22 +42,20 @@ if (-not (Test-Path -LiteralPath $NodeModules)) {
     }
 }
 
+# ---------- Redis：Celery 队列与纠纷缓存依赖 ----------
+& (Join-Path $PSScriptRoot "ensure-redis.ps1") -Python $Python
+if ($LASTEXITCODE -ne 0) {
+    exit 1
+}
+
 Write-Host "[start] backend  http://127.0.0.1:${BackendPort}" -ForegroundColor Green
 Write-Host "[start] frontend http://127.0.0.1:${FrontendPort}" -ForegroundColor Green
+Write-Host "[start] celery   agent5.async_review (Redis queue)" -ForegroundColor Green
+Write-Host "[start] opening 3 windows: EA Backend | EA Celery | EA Frontend" -ForegroundColor Gray
 Write-Host "[start] close each service window to stop" -ForegroundColor Gray
 
-# ---------- launch backend in new window ----------
-$BackendArgs = @(
-    "-NoExit",
-    "-Command",
-    "& '$Python' -m uvicorn backend.main:app --host 127.0.0.1 --port $BackendPort --reload"
-)
-Start-Process -FilePath "powershell.exe" -ArgumentList $BackendArgs -WorkingDirectory $Root
-
-# ---------- launch frontend in new window ----------
-$FrontendArgs = @(
-    "-NoExit",
-    "-Command",
-    "npm run dev"
-)
-Start-Process -FilePath "powershell.exe" -ArgumentList $FrontendArgs -WorkingDirectory $FrontendDir
+# ---------- 各服务独立窗口（-File 避免中文路径在 -Command 里转义失败） ----------
+$PsArgs = @("-NoExit", "-ExecutionPolicy", "Bypass")
+Start-Process -FilePath "powershell.exe" -ArgumentList ($PsArgs + "-File", (Join-Path $PSScriptRoot "run-backend.ps1"))
+Start-Process -FilePath "powershell.exe" -ArgumentList ($PsArgs + "-File", (Join-Path $PSScriptRoot "run-celery.ps1"))
+Start-Process -FilePath "powershell.exe" -ArgumentList ($PsArgs + "-File", (Join-Path $PSScriptRoot "run-frontend.ps1"))

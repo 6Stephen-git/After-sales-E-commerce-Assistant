@@ -7,6 +7,7 @@ from backend.cache.materials_store import (
     clear_all_cache,
     clear_dispute_cache,
     clear_materials_cache,
+    load_materials,
     merge_materials,
 )
 from backend.cache.redis_client import is_redis_cache_enabled, reset_redis_client
@@ -21,6 +22,7 @@ __all__ = [
     "get_cached_facts",
     "get_cached_report",
     "is_redis_cache_enabled",
+    "load_materials",
     "merge_materials",
     "reset_redis_client",
     "save_facts",

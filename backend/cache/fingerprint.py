@@ -29,7 +29,6 @@ FP_REPORT_EXTRA_FIELDS = (
     "order_amount",
     "buyer_id",
     "merchant_id",
-    "emotion_note",
 )
 
 

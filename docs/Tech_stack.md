@@ -19,8 +19,7 @@
 ## AI 模型
 
 - **多模态（图片分析）**：qwen-vl-flash，用于 Agent 1
-- **LLM（文本推理生成）**：小米 MiMo（OpenAI 兼容），mimo-v2.5-pro 用于 Agent 2，mimo-v2.5 用于 Agent 3、Agent 5、Agent1
-- **情感分析（本地推理）**：BERT-base 微调模型，CPU 运行，用于 Agent 4
+- **LLM（文本推理生成）**：小米 MiMo（OpenAI 兼容），mimo-v2.5-pro 用于 Agent 2 策略，mimo-v2.5 用于 Agent 1/3/4/5
 
 ## 外部 API
 

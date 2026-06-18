@@ -37,7 +37,10 @@ if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
   (cd "$FRONTEND_DIR" && npm install)
 fi
 
-echo "[启动] 后端 http://127.0.0.1:${BACKEND_PORT}  |  前端 http://127.0.0.1:${FRONTEND_PORT}"
+# ---------- Redis：Celery 队列与纠纷缓存依赖 ----------
+bash "$ROOT/scripts/ensure-redis.sh" "$PYTHON"
+
+echo "[启动] 后端 http://127.0.0.1:${BACKEND_PORT}  |  前端 http://127.0.0.1:${FRONTEND_PORT}  |  Celery 判例复盘队列"
 echo "[启动] 按 Ctrl+C 停止全部服务。"
 
 # ---------- 退出时回收子进程 ----------
@@ -49,8 +52,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ---------- 同终端后台启动后端与前端 ----------
+# ---------- 同终端后台启动后端、Celery 与前端 ----------
 (cd "$ROOT" && "$PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload) &
+PIDS+=($!)
+
+(cd "$ROOT" && "$PYTHON" -m celery -A backend.tasks.review_task worker --loglevel=info) &
 PIDS+=($!)
 
 (cd "$FRONTEND_DIR" && npm run dev) &

@@ -48,9 +48,13 @@ class DisputeCase(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     merchant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dispute_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True)
+    case_type: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False, default="")
     case_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     lesson_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tags: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    scenario_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 

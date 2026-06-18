@@ -21,8 +21,9 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from backend.defaults import default_merchant_id
 from backend.db.connection import get_engine  # noqa: E402
-from backend.db.models import BuyerProfileRecord  # noqa: E402
+from backend.db.models import BuyerProfileRecord, DisputeCase  # noqa: E402
 from backend.cache.tool_cache import get_cached_cases, get_cached_profile, save_cases, save_profile
 from backend.tools.llm_client import chat_completion  # noqa: E402
 from backend.tools.text_signals import (  # noqa: E402
@@ -186,22 +187,59 @@ def query_buyer_profile(buyer_id: str, merchant_id: str = "") -> BuyerProfile:
 
 
 # ---------- 对外工具：相似判例检索 ----------
-def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]:
+def _score_case_row(*, dispute_desc: str, row: DisputeCase) -> float:
+    """按标签与 scenario 字段对单行判例打分。"""
+    score = 0.0
+    desc = dispute_desc.lower()
+    if not desc:
+        return score
+
+    if row.case_type and row.case_type.lower() in desc:
+        score += 2.0
+    if row.case_summary:
+        for token in dispute_desc.split():
+            if len(token) > 1 and token in row.case_summary:
+                score += 0.5
+                break
+
+    tags_text = row.tags or ""
+    if tags_text and any(token in tags_text for token in dispute_desc.split() if len(token) > 1):
+        score += 0.8
+
+    try:
+        scenario = json.loads(row.scenario_json or "{}")
+    except json.JSONDecodeError:
+        scenario = {}
+    if isinstance(scenario, dict):
+        dispute_type = str(scenario.get("dispute_type") or "")
+        if dispute_type and dispute_type in dispute_desc:
+            score += 1.5
+        evidence = str(scenario.get("evidence_quality") or "")
+        if evidence and evidence in desc:
+            score += 0.5
+
+    return score
+
+
+def search_similar_cases(
+    dispute_desc: str,
+    top_k: int = 3,
+    merchant_id: str = "",
+) -> List[SimilarCase]:
     """
     按纠纷描述检索相似历史判例。
 
     参数:
         dispute_desc: 纠纷自然语言描述。
-        top_k: 返回条数上限，须为正整数。
+        top_k: 返回条数上限。
+        merchant_id: 商家标识，用于数据隔离。
 
     返回:
         SimilarCase 列表。
-
-    异常:
-        ValueError: top_k <= 0。
     """
     normalized_desc = str(dispute_desc or "").strip()
-    logger.info("%s 开始检索相似判例，top_k=%s", AGENT2_LOG_PREFIX, top_k)
+    normalized_merchant = str(merchant_id or "").strip() or default_merchant_id()
+    logger.info("%s 开始检索相似判例 merchant_id=%s top_k=%s", AGENT2_LOG_PREFIX, normalized_merchant, top_k)
 
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
@@ -211,8 +249,41 @@ def search_similar_cases(dispute_desc: str, top_k: int = 3) -> List[SimilarCase]
         return cached_cases
 
     cases: list[SimilarCase] = []
-    if normalized_desc:
+    if not normalized_desc:
         save_cases(normalized_desc, top_k, cases)
+        return cases
+
+    try:
+        engine = get_engine()
+        with Session(engine) as session:
+            rows = session.scalars(
+                select(DisputeCase)
+                .where(DisputeCase.merchant_id == normalized_merchant)
+                .order_by(DisputeCase.id.desc())
+                .limit(50)
+            ).all()
+        scored: list[tuple[float, DisputeCase]] = [
+            (_score_case_row(dispute_desc=normalized_desc, row=row), row) for row in rows
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        for score, row in scored[:top_k]:
+            if score <= 0:
+                continue
+            summary = (row.case_summary or "").strip()
+            merchant_action = summary[:120] if summary else "见判例摘要"
+            cases.append(
+                SimilarCase(
+                    case_id=str(row.id),
+                    similarity=min(1.0, round(score / 3.0, 3)),
+                    merchant_action=merchant_action,
+                    outcome=row.outcome or "",
+                    lesson=(row.lesson_text or "").strip(),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s 相似判例检索失败：%s", AGENT2_LOG_PREFIX, exc)
+
+    save_cases(normalized_desc, top_k, cases)
     return cases
 
 
