@@ -298,16 +298,18 @@ export function use_dispute() {
       }
       const stage_messages = {
         merge: '正在合并上下文...',
-        agent1: '正在提取事实...',
-        agent2_tools: '正在检索规则、画像与判例...',
+        agent1: '正在提取事实与参考信息...',
+        agent2_tools: '正在分析风险信号与匹配规则...',
         agent2: '正在生成策略建议...',
         agent3: '正在生成推荐话术...'
       }
       const merge_partial_report = (partial) => {
-        report.value = {
-          ...(report.value || {}),
-          ...(partial || {})
+        const current = report.value || {}
+        const next = { ...current, ...(partial || {}) }
+        if (partial?.strategy) {
+          next.strategy = { ...(current.strategy || {}), ...partial.strategy }
         }
+        report.value = next
       }
       const append_reasoning_delta = (delta_text) => {
         const normalized = String(delta_text || '')

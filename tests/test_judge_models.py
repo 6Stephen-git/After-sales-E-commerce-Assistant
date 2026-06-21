@@ -1,5 +1,7 @@
 """
-Judge 评分模型与 JSON Schema 一致性测试。
+Judge 评分模型与 JSON Schema 一致性核心测试。
+
+原则：schema 对齐、总分推导、禁忌 fail 规则与 hard_failures 容错各保留一条路径。
 """
 
 import json
@@ -7,12 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-# ---------- 与仓库根对齐的导入路径（单测可直接 pytest 运行） ----------
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from eval.pipeline.judge_models import JudgeResult, JudgeScores, derive_overall_score
+from eval.pipeline.judge_models import JudgeResult, JudgeScores
 
 
 def test_judge_score_fields_match_schema_required_fields():
@@ -24,28 +25,8 @@ def test_judge_score_fields_match_schema_required_fields():
     assert "report_readability" not in required_scores
 
 
-def test_judge_result_accepts_new_scores():
-    """JudgeResult 应接受本轮新增的规则边界、恶意风险、客户价值和话术可靠性评分。"""
-    payload = {
-        "case_id": "CASE-JUDGE",
-        "pass": True,
-        "overall_score": 88,
-        "hard_failures": [],
-        "forbidden_violation_count": 0,
-        "scores": {name: 5 for name in JudgeScores.model_fields},
-        "fail_reasons": [],
-        "warnings": [],
-        "suggested_fix_area": "",
-        "judge_summary": "通过",
-    }
-    result = JudgeResult.model_validate(payload)
-    assert result.pass_ is True
-    assert result.scores.rule_boundary_ability == 5
-    assert result.scores.script_reliability == 5
-
-
-def test_derive_overall_score_from_ma04_like_dimensions():
-    """分项 4~5 时不应把均值 4.5 误当 overall_score=45。"""
+def test_derive_overall_score_and_new_score_fields():
+    """分项 4~5 时不应误算低分；新增评分维度可校验。"""
     scores = JudgeScores(
         expectation_alignment=5,
         forbidden_output_safety=5,
@@ -75,33 +56,54 @@ def test_derive_overall_score_from_ma04_like_dimensions():
     )
     assert result.overall_score >= 85
     assert result.pass_ is True
+    assert result.scores.rule_boundary_ability == 5
+    assert result.scores.script_reliability == 5
 
 
-def test_forbidden_output_safety_one_does_not_auto_fail_without_hard_failures():
-    """禁忌分项打 1 分不单独 fail，由总分反映；无 hard_failures 时其余项高仍可 pass。"""
-    scores = {name: 5 for name in JudgeScores.model_fields}
-    scores["forbidden_output_safety"] = 1
-    result = JudgeResult.model_validate(
+def test_forbidden_violation_fail_policy():
+    """单项禁忌打 1 分不单独 fail；触犯 2 条及以上必须 fail。"""
+    scores_one = {name: 5 for name in JudgeScores.model_fields}
+    scores_one["forbidden_output_safety"] = 1
+    mild = JudgeResult.model_validate(
         {
             "case_id": "CASE-FORBIDDEN-SCORE",
             "pass": False,
             "overall_score": 20,
             "hard_failures": [],
             "forbidden_violation_count": 1,
-            "scores": scores,
+            "scores": scores_one,
             "fail_reasons": [],
             "warnings": [],
             "suggested_fix_area": "",
             "judge_summary": "触犯禁忌但仅降分项",
         }
     )
-    assert result.scores.forbidden_output_safety == 1
-    assert result.overall_score >= 80
-    assert result.pass_ is True
+    assert mild.scores.forbidden_output_safety == 1
+    assert mild.overall_score >= 80
+    assert mild.pass_ is True
+
+    scores_two = {name: 5 for name in JudgeScores.model_fields}
+    severe = JudgeResult.model_validate(
+        {
+            "case_id": "CASE-FORBIDDEN-TWO",
+            "pass": True,
+            "overall_score": 95,
+            "hard_failures": [],
+            "forbidden_violation_count": 2,
+            "scores": scores_two,
+            "fail_reasons": [],
+            "warnings": [],
+            "suggested_fix_area": "",
+            "judge_summary": "触犯两项禁忌",
+        }
+    )
+    assert severe.scores.forbidden_output_safety == 1
+    assert severe.pass_ is False
+    assert severe.hard_failures
 
 
 def test_hard_failures_string_coerced_to_list():
-    """Judge LLM 将 hard_failures 写成字符串时不应导致校验失败。"""
+    """Judge LLM 将 hard_failures 写成字符串时应强制 fail。"""
     scores = {name: 4 for name in JudgeScores.model_fields}
     result = JudgeResult.model_validate(
         {
@@ -119,25 +121,3 @@ def test_hard_failures_string_coerced_to_list():
     )
     assert result.hard_failures == ["报告事实与情景冲突"]
     assert result.pass_ is False
-
-
-def test_two_forbidden_violations_auto_fail():
-    """触犯 2 条及以上禁忌必须 fail。"""
-    scores = {name: 5 for name in JudgeScores.model_fields}
-    result = JudgeResult.model_validate(
-        {
-            "case_id": "CASE-FORBIDDEN-TWO",
-            "pass": True,
-            "overall_score": 95,
-            "hard_failures": [],
-            "forbidden_violation_count": 2,
-            "scores": scores,
-            "fail_reasons": [],
-            "warnings": [],
-            "suggested_fix_area": "",
-            "judge_summary": "触犯两项禁忌",
-        }
-    )
-    assert result.scores.forbidden_output_safety == 1
-    assert result.pass_ is False
-    assert result.hard_failures

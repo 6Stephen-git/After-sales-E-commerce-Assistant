@@ -155,11 +155,11 @@ def test_run_should_hit_report_cache_on_same_materials() -> None:
     Redis C 层命中时，第二次调用不应再触发 extract。
     """
     extract_call_count = {"count": 0}
-    original_extract = assisted_controller_module.extract
+    original_extract = assisted_controller_module.run_agent1_extract
 
     def counting_extract(materials):
         extract_call_count["count"] += 1
-        return original_extract(materials=materials)
+        return original_extract(materials)
 
     materials = {
         "order_id": "ORDER10006",
@@ -188,7 +188,7 @@ def test_run_should_hit_report_cache_on_same_materials() -> None:
 
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
         with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
-            with patch.object(assisted_controller_module, "extract", side_effect=counting_extract):
+            with patch.object(assisted_controller_module, "run_agent1_extract", side_effect=counting_extract):
                 first_report = run(dispute_id="DISPUTE-C-005", new_materials=materials)
                 second_report = run(dispute_id="DISPUTE-C-005", new_materials={})
 

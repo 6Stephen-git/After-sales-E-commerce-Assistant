@@ -20,22 +20,42 @@ venv/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.env*
 
-# IDE
+# IDE / 本地工具
 .vscode/
 .idea/
 *.swp
+.cursor/
+.lazyweb/
 
 # OS
 .DS_Store
 Thumbs.db
 
+# 面试与求职文档（仅本地）
+docs/interview-*.md
+
 # 规则抓取输出（核对后再决定是否提交）
 data/rules_raw/
 data/rule_match_lexicon_review_queue.json
+
+# 规则抓取脚本（公开仓库不展示；本地保留）
+scripts/crawl_rule_documents.py
 
 # 测试 SQLite 产物
 tests/tmp_*.sqlite3
 
 # 情景跑批与 Judge 产出
 eval/output/
+
+# 不上传至 GitHub 的测试（保留本地回归）
+tests/test_init.py
+tests/test_rule_plan.py
+tests/test_rule_plan_category_gate.py
+tests/test_agent1_tools.py
+tests/test_vision_tool_cache.py
+tests/test_resolve_category_slug.py
+tests/test_text_signals.py
+tests/test_judge_models.py
+tests/eval/

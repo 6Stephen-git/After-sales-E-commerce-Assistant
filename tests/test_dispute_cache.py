@@ -1,7 +1,7 @@
 """
-纠纷 Redis 缓存单元测试。
+纠纷 Redis 缓存核心测试：指纹、材料合并、B/C 层与降级。
 
-覆盖：指纹稳定性、材料增量合并、B/C 层 hit/miss、reset 失效、Redis 降级。
+原则：每类行为保留一条代表路径。
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -26,9 +25,7 @@ from schemas import AnalysisReport, EVIDENCE_LOW, FactOutput, ScriptOutput, Stra
 
 @pytest.fixture(autouse=True)
 def reset_cache_state() -> None:
-    """
-    每个用例前清理本地缓存并重置 Redis 客户端单例。
-    """
+    """每个用例前清理本地缓存并重置 Redis 客户端单例。"""
     clear_all_cache()
     reset_redis_client()
     yield
@@ -36,12 +33,9 @@ def reset_cache_state() -> None:
     reset_redis_client()
 
 
-# ---------- 指纹：相同材料应得到相同 hash ----------
-def test_fingerprint_should_be_stable_for_same_materials() -> None:
-    """
-    相同材料多次计算指纹应一致。
-    """
-    materials = {
+def test_fingerprint_stability_and_sensitivity() -> None:
+    """相同材料指纹稳定；聊天/金额变化应影响对应层指纹。"""
+    base = {
         "chat_history": [{"role": "buyer", "content": "有质量问题"}],
         "image_urls": ["mock://a"],
         "buyer_text": "退款",
@@ -50,43 +44,22 @@ def test_fingerprint_should_be_stable_for_same_materials() -> None:
         "buyer_id": "b1",
         "merchant_id": "m1",
     }
-    assert compute_fp_agent1(materials) == compute_fp_agent1(dict(materials))
-    assert compute_fp_report(materials) == compute_fp_report(dict(materials))
-
-
-# ---------- 指纹：关键字段变化应导致 hash 变化 ----------
-def test_fingerprint_should_change_when_chat_or_amount_changes() -> None:
-    """
-    聊天或金额变化时，对应层指纹应变化。
-    """
-    base = {
-        "chat_history": [{"role": "buyer", "content": "原消息"}],
-        "image_urls": [],
-        "buyer_text": "退款",
-        "order_id": "O1",
-        "order_amount": 99.0,
-        "buyer_id": "b1",
-        "merchant_id": "m1",
-    }
-    fp_agent1_base = compute_fp_agent1(base)
-    fp_report_base = compute_fp_report(base)
+    assert compute_fp_agent1(base) == compute_fp_agent1(dict(base))
+    assert compute_fp_report(base) == compute_fp_report(dict(base))
 
     changed_chat = dict(base)
     changed_chat["chat_history"] = [{"role": "buyer", "content": "新消息"}]
-    assert compute_fp_agent1(changed_chat) != fp_agent1_base
-    assert compute_fp_report(changed_chat) != fp_report_base
+    assert compute_fp_agent1(changed_chat) != compute_fp_agent1(base)
+    assert compute_fp_report(changed_chat) != compute_fp_report(base)
 
     changed_amount = dict(base)
     changed_amount["order_amount"] = 199.0
-    assert compute_fp_agent1(changed_amount) == fp_agent1_base
-    assert compute_fp_report(changed_amount) != fp_report_base
+    assert compute_fp_agent1(changed_amount) == compute_fp_agent1(base)
+    assert compute_fp_report(changed_amount) != compute_fp_report(base)
 
 
-# ---------- 材料层：同 dispute_id 增量合并 chat/image ----------
-def test_merge_materials_should_append_incrementally() -> None:
-    """
-    同纠纷二次合并应追加 chat_history 与 image_urls。
-    """
+def test_merge_materials_incremental_and_snapshot() -> None:
+    """默认增量追加 chat/image；snapshot 模式覆盖旧会话。"""
     first = merge_materials(
         "D-001",
         {
@@ -106,11 +79,6 @@ def test_merge_materials_should_append_incrementally() -> None:
     assert len(second["chat_history"]) == 2
     assert len(second["image_urls"]) == 2
 
-
-def test_merge_materials_snapshot_should_replace_not_append() -> None:
-    """
-    snapshot 模式下二次请求应覆盖旧 chat/image，不保留历史会话。
-    """
     merge_materials(
         "D-snap",
         {
@@ -131,11 +99,8 @@ def test_merge_materials_snapshot_should_replace_not_append() -> None:
     assert merged["image_urls"] == ["mock://banana"]
 
 
-# ---------- B/C 层：mock Redis 下 hit/miss ----------
 def test_result_cache_should_hit_after_save() -> None:
-    """
-    写入 B/C 层后，相同材料应命中缓存。
-    """
+    """写入 B/C 层后，相同材料应命中缓存。"""
     materials = {
         "chat_history": [{"role": "buyer", "content": "测试"}],
         "image_urls": [],
@@ -145,23 +110,12 @@ def test_result_cache_should_hit_after_save() -> None:
         "buyer_id": "b2",
         "merchant_id": "m2",
     }
-    facts = FactOutput(
-        goods_received=True,
-        defect_type="未知",
-        evidence_quality=EVIDENCE_LOW,
-        confidence=0.5,
-    )
+    facts = FactOutput(goods_received=True, defect_type="未知", evidence_quality=EVIDENCE_LOW, confidence=0.5)
     report = AnalysisReport(
         dispute_id="D-002",
         facts=facts,
-        strategy=StrategyOutput(
-            disposition="defend",
-            confidence=0.5,
-        ),
-        scripts=ScriptOutput(
-            script="您好，这单我在跟进，核实清楚后马上回复您。",
-            response_mode="neutral_negotiate",
-        ),
+        strategy=StrategyOutput(disposition="defend", confidence=0.5),
+        scripts=ScriptOutput(script="您好，这单我在跟进。", response_mode="neutral_negotiate"),
     )
 
     mock_client = MagicMock()
@@ -182,7 +136,6 @@ def test_result_cache_should_hit_after_save() -> None:
         with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
             save_facts("D-002", materials, facts)
             save_report("D-002", materials, report)
-
             cached_facts = get_cached_facts("D-002", materials)
             cached_report = get_cached_report("D-002", materials)
 
@@ -192,11 +145,8 @@ def test_result_cache_should_hit_after_save() -> None:
     assert cached_report.strategy.disposition == "defend"
 
 
-# ---------- 降级：Redis 读失败应视为 miss ----------
 def test_result_cache_should_miss_when_redis_read_fails() -> None:
-    """
-    Redis 读异常时不应抛错，应返回 None。
-    """
+    """Redis 读异常时不应抛错，应返回 None。"""
     materials = {
         "chat_history": [],
         "image_urls": [],

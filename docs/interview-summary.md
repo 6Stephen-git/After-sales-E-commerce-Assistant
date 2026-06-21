@@ -8,7 +8,11 @@
 
 面向电商中小商家的 **售后纠纷 AI 应诉助手**：商家与买家人工对话，AI 侧边栏实时输出 **事实摘要 → 策略建议 → 可发送话术**，降低「不懂规则、举证无效、情绪化让步」带来的损失。
 
-**当前可演示主链路**：仅 **辅助模式（assisted）**。智能模式（AI 代聊）、Agent4 情绪监控、Agent5 复盘 HTTP 触发 **已实现模块但未接入主链路**。
+**当前可演示范围**：
+
+- **主链路（`/analyze`）**：辅助模式 assisted，Agent1→2→3 端到端可跑
+- **旁路 API**：卖家情绪 `POST /emotion/monitor`（Agent4，前端发消息时已集成）；纠纷复盘 `POST /review`（Agent5 + Celery，API 已就绪，纠纷页关闭入口待接）
+- **未实现**：智能模式（AI 代聊）、平台物流真实 API
 
 ---
 
@@ -26,6 +30,8 @@ flowchart TB
 
     subgraph API["FastAPI routers"]
         AN["/analyze | /analyze/stream"]
+        EM["/emotion/monitor"]
+        RV["/review"]
         MC["/merchants/config"]
         BP["/merchants/{id}/buyers/{hash}"]
     end
@@ -49,7 +55,9 @@ flowchart TB
         REDIS[(Redis)]
     end
 
-    DV --> UD --> AN
+    DV --> UD --> AN & EM
+    EM --> A4[Agent4 monitor]
+    RV --> A5[Agent5 Celery]
     AN --> AC
     AC --> CACHE
     AC --> B0 --> B1 --> A2 --> A3
@@ -68,8 +76,8 @@ flowchart TB
 | Agent1 事实还原 | `agent1/fact_extractor.py` | 文本+视觉+物流 → 结构化事实、争议框架、规则导航计划 | ✅ |
 | Agent2 策略参谋 | `agent2/strategist.py` | 综合判责、处置方向、动作契约、方案空间 | ✅ |
 | Agent3 话术生成 | `agent3/script_generator.py` | 在契约约束下生成店主口吻话术 | ✅ |
-| Agent4 情绪监控 | `agent4/emotion_monitor.py` | BERT/关键词情绪分析 → emotion_note | ❌ 未调用 |
-| Agent5 复盘分析 | `agent5/reviewer.py` + Celery | 纠纷关闭后提炼判例 | ❌ 无 HTTP 入口 |
+| Agent4 卖家情绪 | `agent4/emotion_monitor.py` | 卖家消息情绪分析 + 强/轻度预警 | ⚡ 独立 API，非 analyze 内嵌 |
+| Agent5 复盘分析 | `agent5/reviewer.py` + Celery | 纠纷关闭后提炼判例入库 | ⚡ `POST /review` 异步入队 |
 
 **协作原则**（`schemas.py` 文件头注释）：所有 Agent 输入输出 **必须引用全局契约**，禁止自造字段；Agent 间通过 Pydantic 模型传递，可单测、可评测对齐。
 
@@ -114,6 +122,52 @@ sequenceDiagram
 
 **阶段事件**（流式）：`stage_start` → `stage_done`（含 `partial_report`）→ `stage_delta`（Agent2 reasoning）→ `final_report` → `pipeline_done`。
 
+### 2.4 API 端点一览（`backend/main.py`）
+
+| 方法 | 路径 | 处理器 | 说明 |
+|------|------|--------|------|
+| GET | `/health` | `health_check` | 健康检查 |
+| POST | `/analyze` | `assisted_run` | 同步分析，返回 `AnalysisReport` |
+| POST | `/analyze/stream` | `analyze_stream` | SSE 流式（`ENABLE_ANALYZE_STREAM=1`） |
+| POST | `/emotion/monitor` | `emotion_monitor` | 卖家发消息前后情绪把关（Agent4） |
+| POST | `/review` | `close_dispute_review` | 结束纠纷，可选 Celery 复盘入库（Agent5） |
+| GET/PUT | `/merchants/config` | 默认商家配置 | 仅 `assisted` 合法 |
+| GET/PUT/DELETE | `/merchants/{id}/buyers/{hash}` | 买家画像 CRUD | buyer_id 为哈希 |
+
+### 2.5 卖家情绪旁路（与主链路解耦）
+
+```mermaid
+sequenceDiagram
+    participant F as 前端 useDispute
+    participant E as /emotion/monitor
+    participant A4 as Agent4
+
+    F->>F: 商家点击发送
+    alt 已处于情绪关注态
+        F->>E: 发送前复检
+        E->>A4: monitor
+        A4-->>F: EmotionOutput（可拦截发送）
+    end
+    F->>F: 写入 merchant 消息
+    F->>E: 发送后复检
+    E->>A4: monitor
+    A4-->>F: 更新 seller_emotion_alert + 弹窗/侧栏
+```
+
+**设计要点**：监控对象是**卖家**（防情绪化让步/激化），不是买家；`AnalysisReport.emotion_alert` 字段保留但主链路不写，实时预警走独立 API + 前端 `seller_emotion_alert` 状态。
+
+### 2.6 纠纷复盘旁路（Agent5）
+
+```
+POST /review（save_to_db=true）
+  → review_controller.submit_review
+  → 从 A/C 缓存组装 full_timeline
+  → Celery async_review → agent5.review → save_case_to_db
+  → clear_dispute_cache
+```
+
+前置：须先完成至少一次 `/analyze`，否则无 materials/report 缓存。
+
 ---
 
 ## 三、功能点清单（代码已实现）
@@ -129,6 +183,8 @@ sequenceDiagram
 | 一键填入话术 | `useDispute.apply_script` | 将推荐话术写入输入框 |
 | SSE 流式进度 | `routers/analyze.analyze_stream` | `ENABLE_ANALYZE_STREAM=1`；可 HTTP 降级 |
 | Agent2 推理增量展示 | `reasoning_delta_callback` | 前端实时拼接策略推理 |
+| 卖家情绪监控 | `useDispute` + `POST /emotion/monitor` | 发送前拦截/发送后预警；`EmotionAlert` + `SellerEmotionDialog` |
+| 纠纷复盘 API | `api/index.js` → `POST /review` | 后端 + Celery 就绪；纠纷页「结束纠纷」UI 待接 |
 | 商家配置 | `routers/merchants` | `mode=assisted`、`auto_threshold`（后者未驱动自动化） |
 | 买家画像 CRUD | `routers/buyers` | 按 merchant_id 隔离，buyer_id 为哈希 |
 
@@ -149,6 +205,8 @@ sequenceDiagram
 | **动作契约 ActionContract** | `strategist._infer_action_contract` | 6 种 action_type、4 种 compensation_policy |
 | **方案空间 ResolutionContract** | `resolution_contract.infer_resolution_contract` | offered/forbidden modes、验收门禁、具体补偿额 |
 | 话术生成 + 质量门禁 | `agent3_tools.generate_buyer_script` | 禁套话/踢皮球/人机味/过早亮规则/方案越界等 |
+| 卖家情绪分析 | `agent4_tools.analyze_seller_emotion` | LLM 语义 + 关键词降级；强/轻度双阈值预警 |
+| 纠纷复盘卡片 | `agent5_tools.generate_review_card` | 从 full_timeline 提炼 lesson + 入库判例 |
 | 配置化文本信号 | `data/text_signals.json` | 全品类词表，避免硬编码分支 |
 | 规则数据管线 | `scripts/crawl_*` + `import_rules_*` | 爬取 → MySQL → 词表构建 |
 
@@ -164,12 +222,14 @@ sequenceDiagram
 | 硬断言 + 防泄题 | `assert_report.py` + `spec_to_fixture.py` |
 | pytest | `tests/`（约 200+ 用例，覆盖 schemas/各 Agent/API/规则/缓存） |
 
-### 3.4 明确未接入 / 占位（面试须诚实说明）
+### 3.4 明确未实现 / 占位（面试须诚实说明）
 
-- **智能模式**：`controllers/` 仅 `assisted_controller`，`auto_threshold` 存库未用
-- **Agent4**：`emotion_alert` 恒为 `None`，前端 `EmotionAlert.vue` 已预留
-- **Agent5**：Celery `review_task` 存在，无对外 API
-- **平台物流 API**：`platform_api.query_logistics` 返回默认空值
+| 项 | 状态 |
+|----|------|
+| **智能模式**（AI 代聊） | `controllers/` 仅 `assisted_controller`；`auto_threshold` 存库未驱动自动化 |
+| **纠纷关闭 UI** | `/review` API 与 `api/index.js` 封装已有，DisputeView 未接关闭入口 |
+| **平台物流 API** | `platform_api.query_logistics` 返回默认空值 |
+| **AnalysisReport.emotion_alert** | 契约字段保留；主链路不写，实时预警走 `/emotion/monitor` |
 
 ---
 
@@ -177,7 +237,7 @@ sequenceDiagram
 
 ### 4.1 契约驱动，而非 Prompt 拼接
 
-`schemas.py`（约 630 行）是 **唯一字段真源**：枚举、输入输出、规则约束、方案模式全部集中定义。好处：
+`schemas.py`（约 560 行）是 **唯一字段真源**：枚举、输入输出、规则约束、方案模式全部集中定义。好处：
 
 - Agent 可独立单测；评测可对结构化字段做硬断言
 - 变更有迹可循，避免「各 Agent 各说各话」
@@ -216,7 +276,12 @@ Agent3 **只做口语化**，通过 `agent3_tools` 多项门禁检测越界（�
 
 ### 4.5 单路径迭代
 
-`controllers/__init__.py` 约定：智能模式后续 **独立 controller**，不与 assisted 互相导入。当前只维护一条可验证主链路，符合「迭代即替换」工程原则。
+`controllers/__init__.py` 约定：智能模式后续 **独立 controller**，不与 assisted 互相导入。当前只维护一条可验证 analyze 主链路，符合「迭代即替换」工程原则。
+
+### 4.6 主链与旁路分离
+
+- **主链** `/analyze`：事实→策略→话术，追求低延迟与可缓存
+- **旁路** `/emotion`、`/review`：按需触发，不拉长 analyze 尾延迟；Agent4 监控卖家、Agent5 在纠纷结束后异步写判例
 
 ---
 
@@ -333,14 +398,14 @@ C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。�
 
 ### 6.1 电梯稿（约 60 秒）
 
-「我做的是电商售后纠纷 AI 助手，服务中小商家。商家自己跟买家聊，系统在侧边栏给事实摘要、策略和可直接发送的话术。架构上是契约驱动的多 Agent：Agent1 做多模态事实和规则导航，Agent2 做策略并输出动作契约和方案空间，Agent3 只在契约里写话术，代码门禁防止过度承诺。规则匹配、恶意检测、客户价值等确定性逻辑用代码实现，LLM 负责语义推理。还有评测树和 LLM Judge 做回归。目前辅助模式端到端可演示，智能模式和情绪监控模块已写好待接入。」
+「我做的是电商售后纠纷 AI 助手，服务中小商家。商家自己跟买家聊，系统在侧边栏给事实摘要、策略和可直接发送的话术。架构上是契约驱动的多 Agent：Agent1 做多模态事实和规则导航，Agent2 做策略并输出动作契约和方案空间，Agent3 只在契约里写话术，代码门禁防止过度承诺。规则匹配、恶意检测、客户价值等确定性逻辑用代码实现，LLM 负责语义推理。卖家发消息时有独立的 Agent4 情绪把关 API；纠纷结束可走 Agent5 复盘入库。还有评测树和 LLM Judge 做回归。智能代聊模式尚未实现。」
 
 ### 6.2 标准版（约 5–7 分钟）
 
 1. **背景与痛点**（1 min）：规则复杂、举证难、情绪化让步  
 2. **架构**（2 min）：五 Agent 分工 + 契约 + 编排层并行 + 三级缓存；展开 **决策/表达分离**  
 3. **难点**（2 min）：规则分层匹配、证据与可决策度、恶意双轨、评测体系  
-4. **结果与边界**（1 min）：辅助模式 MVP、评测覆盖、诚实说未接入部分  
+4. **结果与边界**（1 min）：辅助模式 MVP、情绪/复盘旁路 API、评测覆盖、诚实说智能模式与物流占位  
 
 ### 6.3 深挖准备（面试官常追问）
 
@@ -348,6 +413,7 @@ C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。�
 |------|----------|
 | 为什么多 Agent 不用一个大的？ | 职责分离、可测、可替换；契约降低耦合 |
 | 如何保证话术不瞎承诺？ | ResolutionContract + compensation_policy + 代码门禁 |
+| 情绪为什么不做进 analyze？ | 卖家发消息才需把关；旁路 API 避免拉长主链延迟 |
 | 规则从哪来？ | 爬取入库 MySQL + lexicon 索引 + 运行时匹配 |
 | LLM 挂了怎么办？ | 各层有降级/模板；外部调用有重试；错误中文日志 |
 | 怎么评估效果？ | 评测树 + 硬断言 + 11 维 Judge + 硬失败规则 |
@@ -367,14 +433,15 @@ C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。�
 
 | 指标 | 参考值 | 核对方式 |
 |------|--------|----------|
-| 全局契约 | `schemas.py` ~630 行 | `wc -l schemas.py` |
-| 主链路编排 | `assisted_controller.py` ~510 行 | 含 Batch0/1 并行 |
-| 规则匹配 | `rule_matcher.py` ~877 行 | 含 LLM 选型 |
-| 评测情景 Markdown | functional 26 + pilot legacy 40+ | `eval/content/scenarios/` |
+| 全局契约 | `schemas.py` ~560 行 | `wc -l schemas.py` |
+| 主链路编排 | `assisted_controller.py` ~450 行 | 含 Batch0/1 并行 |
+| 策略 Agent | `strategist.py` ~1100 行 | `recommend` 入口 |
+| 规则匹配 | `rule_matcher.py` ~760 行 | 含 LLM 选型 |
+| 评测情景 Markdown | 约 70 个（functional + pilot/legacy，含模板/README） | `eval/content/scenarios/` |
 | Judge 维度 | 11 维 | `judge_system.md` |
 | 动作类型 / 补偿策略 | 6 / 4 | `schemas.py` 枚举 |
 | 缓存层级 | A/B/C + 工具缓存 | `backend/cache/` |
-| pytest | 200+ collected | `pytest --collect-only` |
+| pytest | 约 209 collected | `pytest --collect-only` |
 
 ---
 
@@ -394,8 +461,13 @@ C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。�
 | 规则匹配 | `backend/tools/rule_matcher.py` |
 | 规则门控 | `backend/tools/agent2_tools.py` → `needs_rule_match` |
 | 分析 API | `backend/routers/analyze.py` |
+| 情绪 API | `backend/routers/emotion.py` + `controllers/emotion_controller.py` |
+| 复盘 API | `backend/routers/review.py` + `controllers/review_controller.py` |
+| Agent4 | `backend/agents/agent4/emotion_monitor.py` |
+| Agent5 | `backend/agents/agent5/reviewer.py` + `backend/tasks/review_task.py` |
 | 前端状态 | `frontend/src/composables/useDispute.js` |
 | 评测入口 | `eval/pipeline/run_batch_eval.py` |
+| 深度学习编排 | `docs/interview-study-guide.md` |
 | 环境模板 | `.env.example` |
 
 ---
@@ -405,8 +477,8 @@ C 层命中可 **跳过整条 Agent 链**；B 层命中跳过 Agent1 重跑。�
 1. **AI 工程化**：不是套 ChatGPT，而是契约 + 门禁 + 评测闭环  
 2. **领域建模**：纠纷框架、规则通道、方案模式等业务抽象进 `schemas`  
 3. **性能意识**：并行批处理、分级缓存、规则门控降本  
-4. **诚实与演进**：清楚说明 MVP 边界与待接入模块，体现工程成熟度  
+4. **诚实与演进**：清楚说明 MVP 边界（智能模式、物流占位、复盘 UI）与旁路 API 设计  
 
 ---
 
-*文档版本：与仓库代码同步梳理；若代码变更请以 `assisted_controller` 与 `schemas.py` 为准更新本文。*
+*文档版本：与仓库代码同步；变更时优先核对 `main.py`、`assisted_controller.py`、`schemas.py`、`useDispute.js`。*

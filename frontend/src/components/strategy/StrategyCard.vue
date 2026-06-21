@@ -53,12 +53,14 @@
               <el-empty v-if="red_flag_items.length === 0" description="暂无疑点" :image-size="60" />
               <template v-else>
                 <p class="evidence-panel-title">已识别疑点</p>
-                <el-tag
-                  v-for="item in red_flag_items"
-                  :key="item"
-                  class="tag-gap"
-                  type="danger"
-                >{{ item }}</el-tag>
+                <div class="red-flag-list">
+                  <el-tag
+                    v-for="item in red_flag_items"
+                    :key="item"
+                    class="tag-gap red-flag-tag"
+                    type="danger"
+                  >{{ item }}</el-tag>
+                </div>
               </template>
             </div>
           </el-collapse-item>

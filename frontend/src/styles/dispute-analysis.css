@@ -378,6 +378,20 @@
   margin: 0 8px 8px 0;
 }
 
+.red-flag-list {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.red-flag-list :deep(.el-tag.red-flag-tag) {
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+  padding: 6px 10px;
+}
+
 .sub-block-title {
   margin: 0 0 10px;
   font-size: 14px;

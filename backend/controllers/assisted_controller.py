@@ -7,7 +7,7 @@ from __future__ import annotations
 # ---------- 标准库与类型 ----------
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from backend.agents.agent2 import recommend
@@ -114,6 +114,36 @@ def _log_quality_baseline(normalized_dispute_id: str, report: AnalysisReport) ->
         mal_level,
         mal_score,
     )
+
+
+def _serialize_similar_cases(similar_cases: list[Any] | None, *, limit: int = 2) -> list[dict[str, Any]]:
+    """
+    将相似判例列表序列化为前端可消费的 dict 数组。
+    """
+    if not similar_cases:
+        return []
+    return [item.model_dump() for item in similar_cases[:limit]]
+
+
+def _emit_stage_partial(
+    emit_event: EventEmitter | None,
+    *,
+    stage: str,
+    dispute_id: str,
+    partial_report: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """
+    推送阶段局部结果，供前端即时合并展示。
+    """
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "dispute_id": dispute_id,
+        "partial_report": partial_report,
+    }
+    if extra:
+        payload.update(extra)
+    _emit_event(emit_event, "stage_done", payload)
 
 
 def _emit_final_report(
@@ -253,7 +283,8 @@ def run_with_events(
     agent1_start = time.perf_counter()
     facts_from_cache = get_cached_facts(normalized_dispute_id, merged_materials)
     buyer_profile = None
-    similar_cases = None
+    similar_cases: list[Any] | None = None
+    facts = None
     try:
         if facts_from_cache is not None:
             facts = facts_from_cache
@@ -262,6 +293,18 @@ def run_with_events(
                 buyer_id=buyer_id,
                 merchant_id=merchant_id,
                 dispute_desc=dispute_desc,
+            )
+            agent1_partial: dict[str, Any] = {"facts": facts.model_dump()}
+            if buyer_profile is not None:
+                agent1_partial["buyer_profile"] = buyer_profile.model_dump()
+            serialized_cases = _serialize_similar_cases(similar_cases)
+            if serialized_cases:
+                agent1_partial["similar_cases"] = serialized_cases
+            _emit_stage_partial(
+                emit_event,
+                stage="agent1",
+                dispute_id=normalized_dispute_id,
+                partial_report=agent1_partial,
             )
         else:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -272,9 +315,34 @@ def run_with_events(
                     merchant_id=merchant_id,
                     dispute_desc=dispute_desc,
                 )
-                facts = future_facts.result()
-                buyer_profile, similar_cases = future_side.result()
-            save_facts(normalized_dispute_id, merged_materials, facts)
+                for future in as_completed((future_facts, future_side)):
+                    if future is future_facts:
+                        facts = future.result()
+                        save_facts(normalized_dispute_id, merged_materials, facts)
+                        _emit_stage_partial(
+                            emit_event,
+                            stage="agent1",
+                            dispute_id=normalized_dispute_id,
+                            partial_report={"facts": facts.model_dump()},
+                        )
+                        continue
+                    buyer_profile, similar_cases = future.result()
+                    reference_partial: dict[str, Any] = {}
+                    if buyer_profile is not None:
+                        reference_partial["buyer_profile"] = buyer_profile.model_dump()
+                    serialized_cases = _serialize_similar_cases(similar_cases)
+                    if serialized_cases:
+                        reference_partial["similar_cases"] = serialized_cases
+                    if reference_partial:
+                        _emit_stage_partial(
+                            emit_event,
+                            stage="agent1",
+                            dispute_id=normalized_dispute_id,
+                            partial_report=reference_partial,
+                        )
+
+        if facts is None:
+            raise RuntimeError(f"{ASSISTED_LOG_PREFIX} Agent1 未产出事实结果")
 
         agent1_elapsed = _elapsed_ms(agent1_start)
         logger.info(
@@ -291,9 +359,7 @@ def run_with_events(
                 "stage": "agent1",
                 "elapsed_ms": agent1_elapsed,
                 "dispute_id": normalized_dispute_id,
-                "partial_report": {"facts": facts.model_dump()},
                 "cache_hit": facts_from_cache is not None,
-                # 新增：透传可决策度
                 "decision_readiness": facts.decision_readiness,
                 "decision_readiness_note": facts.decision_readiness_note,
             },
@@ -316,13 +382,23 @@ def run_with_events(
     )
     tools_start = time.perf_counter()
     try:
+        def emit_tools_partial(partial_report: dict[str, Any]) -> None:
+            """Agent2 工具批子步骤完成后立即推送局部报告。"""
+            _emit_stage_partial(
+                emit_event,
+                stage="agent2_tools",
+                dispute_id=normalized_dispute_id,
+                partial_report=partial_report,
+            )
+
         customer_value, malicious_detection, rule_result, rule_match_skipped = run_agent2_tool_batch(
             facts=facts,
             buyer_profile=buyer_profile,
-            similar_cases=similar_cases,
+            similar_cases=similar_cases or [],
             order_amount=order_amount,
             chat_history_texts=chat_history_texts,
             chat_turns=chat_turns,
+            on_partial=emit_tools_partial if emit_event is not None else None,
         )
         if rule_match_skipped:
             logger.info(
@@ -344,9 +420,6 @@ def run_with_events(
                 "dispute_id": normalized_dispute_id,
                 "parallel": True,
                 "rule_match_skipped": rule_match_skipped,
-                "partial_report": {
-                    "matched_rules": [item.model_dump() for item in matched_rules],
-                },
             },
         )
         logger.info(

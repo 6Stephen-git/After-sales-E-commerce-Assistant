@@ -1,44 +1,45 @@
 """
-Agent4（情绪监控员）模块测试
-覆盖：卖家情绪预警、阈值、工具层关键词兜底
+Agent4（情绪监控员）核心契约测试。
+
+原则：预警阈值、early_warn 与工具层 LLM/关键词兜底各保留一条路径。
 """
 
 import os
 import sys
 from unittest.mock import patch
 
-
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-
 from backend.agents.agent4.emotion_monitor import monitor
 from backend.tools.agent4_tools import analyze_seller_emotion
-
 
 _MERCHANT_CTX = {"alert_threshold": 0.8, "chat_history": []}
 
 
 class TestAgent4Monitor:
-    def test_monitor_should_trigger_alert_for_aggressive_seller_text(self):
-        """卖家攻击性文本应触发预警。"""
-        output = monitor(
+    def test_monitor_alert_thresholds(self):
+        """攻击性文本触发 alert；克制文本与空文本不触发。"""
+        aggressive = monitor(
             text="你爱买不买，随便你投诉，我不承担！",
             context={**_MERCHANT_CTX, "chat_history": [{"role": "buyer", "content": "我要退款"}]},
         )
-        assert output.sentiment == "negative"
-        assert output.alert_triggered is True
-        assert output.alert_reason and "超过阈值" in output.alert_reason
+        assert aggressive.sentiment == "negative"
+        assert aggressive.alert_triggered is True
+        assert aggressive.alert_reason and "超过阈值" in aggressive.alert_reason
 
-    def test_monitor_should_not_trigger_alert_for_calm_seller_text(self):
-        """卖家克制文本不应触发预警。"""
-        output = monitor(
+        calm = monitor(
             text="不好意思让您久等了，我这边马上帮您核实处理。",
             context={**_MERCHANT_CTX, "alert_threshold": 0.95},
         )
-        assert output.alert_triggered is False
-        assert output.alert_message == ""
+        assert calm.alert_triggered is False
+        assert calm.alert_message == ""
+
+        empty = monitor(text="", context=_MERCHANT_CTX)
+        assert empty.sentiment == "neutral"
+        assert empty.intensity == 0.0
+        assert empty.alert_triggered is False
 
     def test_monitor_should_trigger_early_warn_for_mild_negative_text(self, monkeypatch):
         """轻度负面情绪应触发 early_warn，供下一条发送前轻确认。"""
@@ -57,13 +58,6 @@ class TestAgent4Monitor:
         assert output.early_warn_triggered is True
         assert output.alert_triggered is False
         assert output.early_warn_message
-
-    def test_monitor_boundary_should_return_neutral_for_empty_text(self):
-        """空文本边界：应返回 neutral 且不触发预警。"""
-        output = monitor(text="", context=_MERCHANT_CTX)
-        assert output.sentiment == "neutral"
-        assert output.intensity == 0.0
-        assert output.alert_triggered is False
 
 
 class TestAgent4Tools:

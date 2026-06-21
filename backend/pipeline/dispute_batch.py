@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from backend.agents.agent1 import extract
 from backend.cache.helpers import as_list
@@ -118,13 +118,22 @@ def run_agent2_tool_batch(
     order_amount: float,
     chat_history_texts: list[str],
     chat_turns: list[ChatTurn],
+    on_partial: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[CustomerValueOutput, MaliciousDetectionOutput, RuleMatchResult, bool]:
     """
     Batch1：客户价值 + 恶意检测并行 → needs_rule_match 门控 → 条文匹配。
 
+    参数:
+        on_partial: 子步骤完成时回调 partial_report 片段，供流式接口即时推送。
+
     返回:
         (customer_value, malicious_detection, rule_result, rule_match_skipped)
     """
+
+    def _emit_partial(partial: dict[str, Any]) -> None:
+        """将工具批局部结果透传给流式回调。"""
+        if on_partial is not None:
+            on_partial(partial)
     partial_strategy_input = StrategyInput(
         facts=facts,
         buyer_profile=buyer_profile,
@@ -148,10 +157,25 @@ def run_agent2_tool_batch(
         customer_value = future_value.result()
         malicious_detection = future_malicious.result()
 
+    _emit_partial(
+        {
+            "strategy": {
+                "malicious_detection": malicious_detection.model_dump(),
+                "customer_value": customer_value.model_dump(),
+            }
+        }
+    )
+
     if needs_rule_match(facts, malicious_detection, customer_value):
         rule_result = match_rules_from_facts(facts)
         logger.info("%s 规则匹配完成 matched=%s", LOG_PREFIX, len(rule_result.matched_rules))
+        _emit_partial(
+            {
+                "matched_rules": [item.model_dump() for item in rule_result.display_rules],
+            }
+        )
         return customer_value, malicious_detection, rule_result, False
 
     logger.info("%s 简单案跳过规则匹配", LOG_PREFIX)
+    _emit_partial({"matched_rules": []})
     return customer_value, malicious_detection, RuleMatchResult(), True
