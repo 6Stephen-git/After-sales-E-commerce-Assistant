@@ -22,7 +22,7 @@ def _mock_logistics_signed(monkeypatch):
     monkeypatch.setattr(
         fact_extractor_module,
         "query_logistics",
-        lambda order_id="": LogisticsInfo(
+        lambda **_kwargs: LogisticsInfo(
             is_shipped=True,
             is_signed=True,
             stagnant_days=0,
@@ -37,7 +37,7 @@ def test_extract_with_complete_materials(monkeypatch):
     monkeypatch.setattr(
         fact_extractor_module,
         "analyze_image",
-        lambda image_url="", guidance="": {
+        lambda **_kwargs: {
             "visual_description": "衣物袖子区域可见破洞",
             "findings": ["袖子破洞"],
             "defect_type": "外观破损",

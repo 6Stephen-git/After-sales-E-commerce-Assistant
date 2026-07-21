@@ -519,11 +519,11 @@ def _collect_category_slugs(
     return slugs
 
 
-def _analyze_single_image(image_url: str, guidance: str) -> dict[str, Any]:
+def _analyze_single_image(image_url: str, guidance: str, merchant_id: str) -> dict[str, Any]:
     """
     包装单图视觉分析，供线程池并发调用。
     """
-    return analyze_image(image_url=image_url, guidance=guidance)
+    return analyze_image(image_url=image_url, guidance=guidance, merchant_id=merchant_id)
 
 
 # ---------- 主入口：物流 + 多模态 + 规则化疑点，输出 FactOutput ----------
@@ -547,6 +547,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         raise ValueError(f"{LOG_PREFIX} 输入 materials 必须是 dict")
 
     order_id = str(materials.get("order_id", "") or "").strip()
+    merchant_id = str(materials.get("merchant_id", "") or "").strip()
     buyer_text = str(materials.get("buyer_text", "") or "").strip()
     image_urls = _collect_image_urls(materials=materials)
     text_context = _collect_text(materials=materials)
@@ -562,7 +563,7 @@ def extract(materials: dict[str, Any]) -> FactOutput:
     if not text_context:
         missing_evidence.append("缺少买家文字描述或聊天记录")
 
-    logistics_info = query_logistics(order_id=order_id) if order_id else None
+    logistics_info = query_logistics(order_id=order_id, merchant_id=merchant_id) if order_id else None
     logistics_normal = None if logistics_info is None else (not logistics_info.is_abnormal)
 
     issue_result: dict[str, Any] | None = None
@@ -588,7 +589,12 @@ def extract(materials: dict[str, Any]) -> FactOutput:
         max_workers = max(1, min(3, len(image_cap)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             image_futures = [
-                executor.submit(_analyze_single_image, image_url=url, guidance=vision_guidance)
+                executor.submit(
+                    _analyze_single_image,
+                    image_url=url,
+                    guidance=vision_guidance,
+                    merchant_id=merchant_id,
+                )
                 for url in image_cap
             ]
             vision_results = [future.result() for future in image_futures]

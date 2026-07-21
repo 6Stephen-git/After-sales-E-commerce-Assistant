@@ -174,6 +174,72 @@ def _patch_dispute_cases_columns(engine: Engine) -> None:
     logger.info("%s dispute_cases 补列完成", DB_LOG_PREFIX)
 
 
+# ---------- 一致性约束补丁：为已有 MySQL 表补齐 attempt 与复盘唯一约束 ----------
+def _ensure_no_duplicate_pairs(engine: Engine, table_name: str, columns: tuple[str, ...]) -> None:
+    """
+    在新增唯一约束前检查历史重复数据，禁止静默删除或覆盖已有业务记录。
+    """
+    quoted_columns = ", ".join(columns)
+    statement = text(
+        f"SELECT {quoted_columns}, COUNT(*) AS duplicate_count "
+        f"FROM {table_name} GROUP BY {quoted_columns} HAVING COUNT(*) > 1 LIMIT 1"
+    )
+    with engine.connect() as conn:
+        duplicate = conn.execute(statement).first()
+    if duplicate is not None:
+        raise RuntimeError(
+            f"{DB_LOG_PREFIX} 无法为 {table_name} 新增唯一约束：存在历史重复数据，"
+            "请先人工核对并清理后重启服务"
+        )
+
+
+def _patch_consistency_constraints(engine: Engine) -> None:
+    """
+    迁移 AnalysisJob attempt 和 DisputeCase 幂等唯一约束。
+
+    生产目标数据库为 MySQL；SQLite 的新库由 create_all 直接生成正确结构，
+    已存在 SQLite 表不做破坏性重建。
+    """
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    dialect = engine.dialect.name
+    if dialect != "mysql":
+        return
+
+    if "analysis_jobs" in table_names:
+        columns = {column["name"] for column in inspector.get_columns("analysis_jobs")}
+        unique_names = {item["name"] for item in inspector.get_unique_constraints("analysis_jobs")}
+        with engine.begin() as conn:
+            if "attempt" not in columns:
+                conn.execute(
+                    text("ALTER TABLE analysis_jobs ADD COLUMN attempt INT NOT NULL DEFAULT 1")
+                )
+            if "uq_analysis_jobs_merchant_key_attempt" not in unique_names:
+                if "uq_analysis_jobs_merchant_key" in unique_names:
+                    conn.execute(text("ALTER TABLE analysis_jobs DROP INDEX uq_analysis_jobs_merchant_key"))
+                conn.execute(
+                    text(
+                        "ALTER TABLE analysis_jobs ADD CONSTRAINT "
+                        "uq_analysis_jobs_merchant_key_attempt "
+                        "UNIQUE (merchant_id, idempotency_key, attempt)"
+                    )
+                )
+        logger.info("%s analysis_jobs attempt 与唯一约束已核对", DB_LOG_PREFIX)
+
+    if "dispute_cases" in table_names:
+        unique_names = {item["name"] for item in inspector.get_unique_constraints("dispute_cases")}
+        if "uq_dispute_cases_merchant_dispute" not in unique_names:
+            _ensure_no_duplicate_pairs(engine, "dispute_cases", ("merchant_id", "dispute_id"))
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE dispute_cases ADD CONSTRAINT "
+                        "uq_dispute_cases_merchant_dispute UNIQUE (merchant_id, dispute_id)"
+                    )
+                )
+            logger.info("%s dispute_cases 复盘唯一约束已补齐", DB_LOG_PREFIX)
+
+
 # ---------- 元数据建表：应用启动时按模型创建缺失表 ----------
 def init_db() -> None:
     """
@@ -187,6 +253,7 @@ def init_db() -> None:
         Base.metadata.create_all(bind=engine)
         _apply_schema_patches(engine)
         _patch_dispute_cases_columns(engine)
+        _patch_consistency_constraints(engine)
         logger.info("%s 数据库建表完成", DB_LOG_PREFIX)
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 数据库建表失败：%s", DB_LOG_PREFIX, exc)

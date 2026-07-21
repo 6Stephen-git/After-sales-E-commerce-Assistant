@@ -11,6 +11,8 @@ import logging
 import re
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.db.connection import get_engine
@@ -151,7 +153,7 @@ def save_case_to_db(review: ReviewOutput, merchant_id: str, dispute_id: str) -> 
         dispute_id: 纠纷编号。
 
     返回:
-        写入成功 True，否则 False。
+        写入成功 True，否则 False。相同商家、纠纷重复执行时更新同一条判例。
     """
     logger.info(
         "%s 开始写入经验卡片 merchant_id=%s dispute_id=%s",
@@ -165,23 +167,48 @@ def save_case_to_db(review: ReviewOutput, merchant_id: str, dispute_id: str) -> 
         tags_json = json.dumps(review.tags or [], ensure_ascii=False)
         scenario_json = review.scenario.model_dump_json()
 
-        engine = get_engine()
-        with Session(engine) as session:
-            record = DisputeCase(
-                merchant_id=merchant_id.strip(),
-                dispute_id=dispute_id.strip(),
-                case_type=review.case_type,
-                outcome=review.outcome,
-                case_summary=case_summary,
-                lesson_text=review.lesson_text,
-                tags=tags_json,
-                scenario_json=scenario_json,
+        normalized_merchant_id = merchant_id.strip()
+        normalized_dispute_id = dispute_id.strip()
+
+        def save_with_session(session: Session) -> None:
+            """
+            在行锁范围内更新已有判例，或创建首次复盘卡片。
+            """
+            statement = (
+                select(DisputeCase)
+                .where(
+                    DisputeCase.merchant_id == normalized_merchant_id,
+                    DisputeCase.dispute_id == normalized_dispute_id,
+                )
+                .with_for_update()
             )
-            session.add(record)
-            session.commit()
+            record = session.scalar(statement)
+            if record is None:
+                record = DisputeCase(
+                    merchant_id=normalized_merchant_id,
+                    dispute_id=normalized_dispute_id,
+                )
+                session.add(record)
+            record.case_type = review.case_type
+            record.outcome = review.outcome
+            record.case_summary = case_summary
+            record.lesson_text = review.lesson_text
+            record.tags = tags_json
+            record.scenario_json = scenario_json
+
+        engine = get_engine()
+        try:
+            with Session(engine) as session:
+                save_with_session(session)
+                session.commit()
+        except IntegrityError:
+            # 两个 worker 同时首次插入时，由数据库唯一约束裁决；失败方回查并更新。
+            with Session(engine) as session:
+                save_with_session(session)
+                session.commit()
 
         logger.info(
-            "%s 经验卡片写入成功 merchant_id=%s dispute_id=%s case_type=%s",
+            "%s 经验卡片幂等写入成功 merchant_id=%s dispute_id=%s case_type=%s",
             AGENT5_LOG_PREFIX,
             merchant_id,
             dispute_id,

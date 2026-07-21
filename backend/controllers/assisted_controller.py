@@ -27,6 +27,7 @@ from backend.cache import (
     save_facts,
     save_report,
 )
+from backend.defaults import default_merchant_id
 from schemas import (
     AnalysisReport,
     ChatTurn,
@@ -191,14 +192,15 @@ def _emit_final_report(
     )
 
 
-def clear_cache(dispute_id: str | None = None) -> None:
+def clear_cache(dispute_id: str | None = None, merchant_id: str | None = None) -> None:
     """
     清理辅助模式缓存，用于集成测试或手工重置。
     """
     if dispute_id is None:
         clear_all_cache()
         return
-    clear_dispute_cache(dispute_id)
+    normalized_merchant_id = str(merchant_id or "").strip() or default_merchant_id()
+    clear_dispute_cache(normalized_merchant_id, dispute_id)
 
 
 # ---------- 对外主流程：校验 → 合并 → 缓存短路 → Agent1/2/3 → 组装 AnalysisReport ----------
@@ -218,6 +220,9 @@ def run_with_events(
         raise ValueError(f"{ASSISTED_LOG_PREFIX} new_materials 必须是 dict")
 
     normalized_dispute_id = dispute_id.strip()
+    normalized_merchant_id = str(new_materials.get("merchant_id", "") or "").strip() or default_merchant_id()
+    new_materials = dict(new_materials)
+    new_materials["merchant_id"] = normalized_merchant_id
     logger.info("%s 开始处理纠纷：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
     total_start = time.perf_counter()
     _emit_event(
@@ -227,12 +232,12 @@ def run_with_events(
     )
 
     if bool(new_materials.get("reset_context")):
-        clear_dispute_cache(normalized_dispute_id)
+        clear_dispute_cache(normalized_merchant_id, normalized_dispute_id)
 
     # 1) 合并本次传入与历史缓存，得到 Agent1 所需的完整 materials
     merge_start = time.perf_counter()
     try:
-        merged_materials = merge_materials(normalized_dispute_id, new_materials)
+        merged_materials = merge_materials(normalized_merchant_id, normalized_dispute_id, new_materials)
         merge_elapsed = _elapsed_ms(merge_start)
         logger.info(
             "%s 材料合并完成：%s stage=merge elapsed_ms=%s",
@@ -255,7 +260,7 @@ def run_with_events(
         )
         raise RuntimeError(f"{ASSISTED_LOG_PREFIX} {message}") from exc
 
-    cached_report = get_cached_report(normalized_dispute_id, merged_materials)
+    cached_report = get_cached_report(normalized_merchant_id, normalized_dispute_id, merged_materials)
     if cached_report is not None:
         logger.info("%s C 层短路返回：%s", ASSISTED_LOG_PREFIX, normalized_dispute_id)
         _emit_final_report(
@@ -281,7 +286,7 @@ def run_with_events(
         {"stage": "agent1", "dispute_id": normalized_dispute_id},
     )
     agent1_start = time.perf_counter()
-    facts_from_cache = get_cached_facts(normalized_dispute_id, merged_materials)
+    facts_from_cache = get_cached_facts(normalized_merchant_id, normalized_dispute_id, merged_materials)
     buyer_profile = None
     similar_cases: list[Any] | None = None
     facts = None
@@ -318,7 +323,7 @@ def run_with_events(
                 for future in as_completed((future_facts, future_side)):
                     if future is future_facts:
                         facts = future.result()
-                        save_facts(normalized_dispute_id, merged_materials, facts)
+                        save_facts(normalized_merchant_id, normalized_dispute_id, merged_materials, facts)
                         _emit_stage_partial(
                             emit_event,
                             stage="agent1",
@@ -554,7 +559,7 @@ def run_with_events(
         similar_cases=similar_cases[:2],
         matched_rules=matched_rules,
     )
-    save_report(normalized_dispute_id, merged_materials, report)
+    save_report(normalized_merchant_id, normalized_dispute_id, merged_materials, report)
     logger.info(
         "%s 报告组装完成：%s total_elapsed_ms=%s",
         ASSISTED_LOG_PREFIX,

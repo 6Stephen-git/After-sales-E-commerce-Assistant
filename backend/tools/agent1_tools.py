@@ -477,7 +477,7 @@ def _analyze_image_legacy(*, endpoint: str, api_key: str, image_url: str) -> dic
 
 
 # ---------- 生产路径：读环境变量、HTTP POST、失败返回 error 字典（不抛） ----------
-def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
+def analyze_image(image_url: str, guidance: str = "", merchant_id: str = "") -> dict[str, Any]:
     """
     调用多模态服务，从单张图片 URL 提取视觉事实字段。
 
@@ -486,6 +486,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
 
     参数:
         image_url: 公网可访问地址或 data:image/...;base64,... ；空字符串直接返回错误 dict。
+        merchant_id: 商家标识；为空时跳过视觉 Redis 缓存，避免跨租户复用。
 
     返回:
         视觉特征 dict 或统一错误结构 dict（不抛异常，便于 Agent1 合并进 uncertainty）。
@@ -504,7 +505,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
         # 默认视觉模型与 .env.example 一致；覆盖时请设环境变量 VISION_API_MODEL
         model = os.getenv("VISION_API_MODEL", "").strip() or "qwen3-vl-flash"
         logger.info("%s 视觉走百炼多模态协议，endpoint=%s model=%s", LOG_PREFIX, endpoint, model)
-        cached = get_cached_vision(image_url, model, guidance)
+        cached = get_cached_vision(merchant_id, image_url, model, guidance)
         if cached is not None:
             return cached
         result = _analyze_image_dashscope(
@@ -515,7 +516,7 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
             guidance=guidance,
         )
         if not result.get("error"):
-            save_vision(image_url, model, guidance, result)
+            save_vision(merchant_id, image_url, model, guidance, result)
         return result
 
     logger.warning(
@@ -524,12 +525,12 @@ def analyze_image(image_url: str, guidance: str = "") -> dict[str, Any]:
         endpoint,
     )
     legacy_model = "legacy"
-    cached = get_cached_vision(image_url, legacy_model, guidance)
+    cached = get_cached_vision(merchant_id, image_url, legacy_model, guidance)
     if cached is not None:
         return cached
     legacy_result = _analyze_image_legacy(endpoint=endpoint, api_key=api_key, image_url=image_url)
     if legacy_result.get("error"):
         return legacy_result
     result = _normalize_vision_dict(legacy_result)
-    save_vision(image_url, legacy_model, guidance, result)
+    save_vision(merchant_id, image_url, legacy_model, guidance, result)
     return result

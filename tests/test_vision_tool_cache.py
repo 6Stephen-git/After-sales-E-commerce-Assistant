@@ -66,10 +66,10 @@ def test_vision_cache_hit_and_guidance_miss() -> None:
     mock_client, _storage = _mock_redis_storage()
 
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
-        with patch("backend.cache.layer_redis.get_redis", return_value=mock_client):
-            save_vision(image_ref, model, "诉求A", payload)
-            assert get_cached_vision(image_ref, model, "诉求A") is not None
-            assert get_cached_vision(image_ref, model, "诉求B") is None
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            save_vision("merchant-1", image_ref, model, "诉求A", payload)
+            assert get_cached_vision("merchant-1", image_ref, model, "诉求A") is not None
+            assert get_cached_vision("merchant-1", image_ref, model, "诉求B") is None
 
 
 def test_analyze_image_should_use_cache_without_second_http_call() -> None:
@@ -120,10 +120,10 @@ def test_analyze_image_should_use_cache_without_second_http_call() -> None:
         "VISION_API_MODEL": "qwen3-vl-flash",
     }
     with patch.dict(os.environ, env, clear=False):
-        with patch("backend.cache.layer_redis.get_redis", return_value=mock_client):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
             with patch("backend.tools.agent1_tools.httpx.Client", FakeHttpxClient):
-                first = analyze_image("mock://box", guidance="包装问题")
-                second = analyze_image("mock://box", guidance="包装问题")
+                first = analyze_image("mock://box", guidance="包装问题", merchant_id="merchant-1")
+                second = analyze_image("mock://box", guidance="包装问题", merchant_id="merchant-1")
 
     assert "error" not in first
     assert http_call_count["count"] == 1
@@ -134,9 +134,9 @@ def test_logistics_and_cases_cache() -> None:
     """物流同 order_id 命中；判例按描述隔离。"""
     mock_client, _storage = _mock_redis_storage()
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
-        with patch("backend.cache.layer_redis.get_redis", return_value=mock_client):
-            first_logistics = query_logistics("ORDER-9001")
-            second_logistics = query_logistics("ORDER-9001")
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            first_logistics = query_logistics("ORDER-9001", merchant_id="merchant-1")
+            second_logistics = query_logistics("ORDER-9001", merchant_id="merchant-1")
             assert isinstance(first_logistics, LogisticsInfo)
             assert second_logistics == first_logistics
 
@@ -149,9 +149,9 @@ def test_logistics_and_cases_cache() -> None:
                     lesson="及时沟通",
                 )
             ]
-            save_cases("描述A", 3, cases)
-            assert get_cached_cases("描述A", 3) is not None
-            assert get_cached_cases("描述B", 3) is None
+            save_cases("merchant-1", "描述A", 3, cases)
+            assert get_cached_cases("merchant-1", "描述A", 3) is not None
+            assert get_cached_cases("merchant-1", "描述B", 3) is None
 
             assert search_similar_cases("买家称手机划痕", top_k=3) == []
 
@@ -188,7 +188,7 @@ def test_profile_cache_should_hit_without_second_db_query() -> None:
 
     mock_client, _storage = _mock_redis_storage()
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
-        with patch("backend.cache.layer_redis.get_redis", return_value=mock_client):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
             with patch("backend.tools.agent2_tools.Session", return_value=mock_session):
                 with patch("backend.tools.agent2_tools.get_engine", return_value=MagicMock()):
                     first = query_buyer_profile("buyer_hash_1", merchant_id="merchant_1")
@@ -202,5 +202,5 @@ def test_profile_cache_should_hit_without_second_db_query() -> None:
 def test_tool_cache_should_bypass_when_redis_disabled() -> None:
     """ENABLE_REDIS_CACHE=0 时工具层应直查且不写入缓存。"""
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "0"}, clear=False):
-        assert get_cached_vision("mock://x", "qwen3-vl-flash", "") is None
+        assert get_cached_vision("merchant-1", "mock://x", "qwen3-vl-flash", "") is None
         assert isinstance(query_logistics("ORDER-1"), LogisticsInfo)

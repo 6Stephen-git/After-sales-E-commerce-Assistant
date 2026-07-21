@@ -16,10 +16,12 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from backend.cache.fingerprint import compute_fp_agent1, compute_fp_report
+from backend.cache.fingerprint import compute_fp_agent1, compute_fp_report, merchant_cache_scope
 from backend.cache.materials_store import clear_all_cache, merge_materials
-from backend.cache.redis_client import reset_redis_client
-from backend.cache.result_cache import get_cached_facts, get_cached_report, save_facts, save_report
+from backend.cache import redis_client
+from backend.cache.redis_client import get_redis, reset_redis_client
+from backend.cache.result_cache import _facts_key, get_cached_facts, get_cached_report, save_facts, save_report
+from backend.cache.tool_cache import get_cached_cases, save_cases
 from schemas import AnalysisReport, EVIDENCE_LOW, FactOutput, ScriptOutput, StrategyOutput
 
 
@@ -61,6 +63,7 @@ def test_fingerprint_stability_and_sensitivity() -> None:
 def test_merge_materials_incremental_and_snapshot() -> None:
     """默认增量追加 chat/image；snapshot 模式覆盖旧会话。"""
     first = merge_materials(
+        "merchant-1",
         "D-001",
         {
             "chat_history": [{"role": "buyer", "content": "第一条"}],
@@ -68,6 +71,7 @@ def test_merge_materials_incremental_and_snapshot() -> None:
         },
     )
     second = merge_materials(
+        "merchant-1",
         "D-001",
         {
             "chat_history": [{"role": "buyer", "content": "第二条"}],
@@ -80,6 +84,7 @@ def test_merge_materials_incremental_and_snapshot() -> None:
     assert len(second["image_urls"]) == 2
 
     merge_materials(
+        "merchant-1",
         "D-snap",
         {
             "chat_history": [{"role": "buyer", "content": "手机有划痕"}],
@@ -87,6 +92,7 @@ def test_merge_materials_incremental_and_snapshot() -> None:
         },
     )
     merged = merge_materials(
+        "merchant-1",
         "D-snap",
         {
             "chat_history": [{"role": "buyer", "content": "香蕉坏了"}],
@@ -129,15 +135,14 @@ def test_result_cache_should_hit_after_save() -> None:
 
     mock_client.setex.side_effect = fake_setex
     mock_client.get.side_effect = fake_get
-    mock_client.expire.return_value = True
     mock_client.ping.return_value = True
 
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
         with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
-            save_facts("D-002", materials, facts)
-            save_report("D-002", materials, report)
-            cached_facts = get_cached_facts("D-002", materials)
-            cached_report = get_cached_report("D-002", materials)
+            save_facts("m2", "D-002", materials, facts)
+            save_report("m2", "D-002", materials, report)
+            cached_facts = get_cached_facts("m2", "D-002", materials)
+            cached_report = get_cached_report("m2", "D-002", materials)
 
     assert cached_facts is not None
     assert cached_facts.defect_type == "未知"
@@ -162,4 +167,69 @@ def test_result_cache_should_miss_when_redis_read_fails() -> None:
 
     with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
         with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
-            assert get_cached_report("D-003", materials) is None
+            assert get_cached_report("merchant-3", "D-003", materials) is None
+
+
+def test_result_cache_keys_are_tenant_scoped_and_fixed_ttl() -> None:
+    """B/C key 不含原始标识；不同商家隔离，读取不调用 expire 续期。"""
+    materials = {
+        "chat_history": [],
+        "image_urls": [],
+        "buyer_text": "退款",
+        "order_id": "ORDER-SECRET",
+        "buyer_id": "buyer-secret",
+        "merchant_id": "merchant-a",
+    }
+    facts = FactOutput(goods_received=True, defect_type="未知", evidence_quality=EVIDENCE_LOW, confidence=0.5)
+    storage: dict[str, str] = {}
+    mock_client = MagicMock()
+    mock_client.setex.side_effect = lambda key, _ttl, value: storage.__setitem__(key, value)
+    mock_client.get.side_effect = storage.get
+
+    key = _facts_key("merchant-a", "DISPUTE-SECRET", compute_fp_agent1(materials))
+    assert key.startswith(f"ea:v2:b:{merchant_cache_scope('merchant-a')}:")
+    assert "merchant-a" not in key
+    assert "DISPUTE-SECRET" not in key
+
+    with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1", "FACTS_CACHE_TTL_SECONDS": "86400"}, clear=False):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            save_facts("merchant-a", "DISPUTE-SECRET", materials, facts)
+            assert get_cached_facts("merchant-b", "DISPUTE-SECRET", materials) is None
+            assert get_cached_facts("merchant-a", "DISPUTE-SECRET", materials) is not None
+
+    assert mock_client.setex.call_args.args[1] == 86400
+    mock_client.expire.assert_not_called()
+
+
+def test_empty_cases_use_short_negative_ttl() -> None:
+    """无匹配判例仅缓存 60 秒，避免长期掩盖后续新复盘数据。"""
+    storage: dict[str, str] = {}
+    mock_client = MagicMock()
+    mock_client.setex.side_effect = lambda key, _ttl, value: storage.__setitem__(key, value)
+    mock_client.get.side_effect = storage.get
+
+    with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1", "CASES_EMPTY_CACHE_TTL_SECONDS": "60"}, clear=False):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            save_cases("merchant-a", "描述不存在判例", 3, [])
+            assert get_cached_cases("merchant-a", "描述不存在判例", 3) == []
+
+    assert mock_client.setex.call_args.args[1] == 60
+
+
+def test_redis_reconnects_after_cooldown() -> None:
+    """首次连接失败进入冷却；冷却结束后 Redis 恢复可自动重连。"""
+    healthy_client = MagicMock()
+    healthy_client.ping.return_value = True
+    with patch.dict(
+        os.environ,
+        {
+            "ENABLE_REDIS_CACHE": "1",
+            "REDIS_CACHE_URL": "redis://localhost:6379/1",
+            "REDIS_RECONNECT_COOLDOWN_SECONDS": "1",
+        },
+        clear=False,
+    ):
+        with patch("backend.cache.redis_client.redis.Redis.from_url", side_effect=[RuntimeError("连接失败"), healthy_client]):
+            with patch.object(redis_client.time, "monotonic", side_effect=[0.0, 0.0, 2.0]):
+                assert get_redis() is None
+                assert get_redis() is healthy_client

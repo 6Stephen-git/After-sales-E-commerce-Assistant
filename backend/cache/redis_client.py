@@ -1,5 +1,5 @@
 """
-Redis 缓存客户端：连接、JSON 读写、TTL 续期与异常降级。
+Redis 缓存客户端：连接、固定 TTL JSON 读写与故障冷却恢复。
 """
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import redis
@@ -15,7 +16,7 @@ import redis
 CACHE_LOG_PREFIX = "[DisputeCache]"
 logger = logging.getLogger(__name__)
 _redis_client: redis.Redis | None = None
-_redis_connect_failed: bool = False
+_redis_retry_after_monotonic: float = 0.0
 
 
 def is_redis_cache_enabled() -> bool:
@@ -26,19 +27,6 @@ def is_redis_cache_enabled() -> bool:
     return raw in {"1", "true", "yes", "on", "y"}
 
 
-def get_cache_ttl_seconds() -> int:
-    """
-    读取 DISPUTE_CACHE_TTL_SECONDS，默认 86400 秒。
-    """
-    raw = os.getenv("DISPUTE_CACHE_TTL_SECONDS", "86400").strip()
-    try:
-        ttl = int(raw)
-    except ValueError:
-        logger.warning("%s DISPUTE_CACHE_TTL_SECONDS 无效：%s，回退 86400", CACHE_LOG_PREFIX, raw)
-        return 86400
-    return max(60, ttl)
-
-
 def get_agent_cache_version() -> str:
     """
     读取 AGENT_CACHE_VERSION，用于 B/C 层 key 后缀。
@@ -47,21 +35,48 @@ def get_agent_cache_version() -> str:
     return version or "1"
 
 
+def _reconnect_cooldown_seconds() -> float:
+    """
+    读取 Redis 重连冷却时间，避免 Redis 故障期间每次请求都触发连接探测。
+    """
+    raw = os.getenv("REDIS_RECONNECT_COOLDOWN_SECONDS", "10").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning("%s REDIS_RECONNECT_COOLDOWN_SECONDS 无效，使用 10 秒", CACHE_LOG_PREFIX)
+        return 10.0
+
+
+def _mark_redis_unavailable(reason: Exception | str) -> None:
+    """
+    失效当前客户端并进入冷却窗口，使主链路将 Redis 视为安全 miss。
+    """
+    global _redis_client, _redis_retry_after_monotonic
+    _redis_client = None
+    cooldown = _reconnect_cooldown_seconds()
+    _redis_retry_after_monotonic = time.monotonic() + cooldown
+    logger.warning(
+        "%s Redis 不可用，缓存已降级为安全 miss；%.1f 秒后自动重连。原因=%s",
+        CACHE_LOG_PREFIX,
+        cooldown,
+        reason,
+    )
+
+
 def get_redis() -> redis.Redis | None:
     """
-    获取 Redis 客户端；未启用缓存或连接失败时返回 None（失败只尝试一次，避免重复打日志）。
+    获取 Redis 客户端；故障冷却期间返回 None，冷却结束后自动尝试重连。
     """
-    global _redis_client, _redis_connect_failed
+    global _redis_client
     if not is_redis_cache_enabled():
         return None
     if _redis_client is not None:
         return _redis_client
-    if _redis_connect_failed:
+    if time.monotonic() < _redis_retry_after_monotonic:
         return None
     redis_url = os.getenv("REDIS_CACHE_URL", "redis://localhost:6379/1").strip()
     if not redis_url:
-        logger.warning("%s REDIS_CACHE_URL 为空，跳过 Redis 缓存", CACHE_LOG_PREFIX)
-        _redis_connect_failed = True
+        _mark_redis_unavailable("REDIS_CACHE_URL 为空")
         return None
     connect_timeout = 2.0
     try:
@@ -81,13 +96,7 @@ def get_redis() -> redis.Redis | None:
         logger.info("%s Redis 缓存连接成功：%s", CACHE_LOG_PREFIX, redis_url)
         return _redis_client
     except Exception as exc:  # noqa: BLE001
-        _redis_connect_failed = True
-        logger.warning(
-            "%s Redis 连接失败，已降级为进程内材料缓存（B/C 层不写入 Redis）：%s。"
-            "请启动 Redis 或于 .env 设置 ENABLE_REDIS_CACHE=0",
-            CACHE_LOG_PREFIX,
-            exc,
-        )
+        _mark_redis_unavailable(exc)
         return None
 
 
@@ -95,9 +104,9 @@ def reset_redis_client() -> None:
     """
     重置 Redis 客户端单例，供测试隔离使用。
     """
-    global _redis_client, _redis_connect_failed
+    global _redis_client, _redis_retry_after_monotonic
     _redis_client = None
-    _redis_connect_failed = False
+    _redis_retry_after_monotonic = 0.0
 
 
 def get_json(key: str) -> dict[str, Any] | list[Any] | None:
@@ -109,28 +118,37 @@ def get_json(key: str) -> dict[str, Any] | list[Any] | None:
         return None
     try:
         raw = client.get(key)
-        if raw is None:
-            return None
-        refresh_ttl(key)
-        return json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s Redis 读取失败 key=%s：%s", CACHE_LOG_PREFIX, key, exc)
+        _mark_redis_unavailable(exc)
+        return None
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        logger.warning("%s Redis 缓存 JSON 无法解析 key=%s：%s", CACHE_LOG_PREFIX, key, exc)
         return None
 
 
-def set_json(key: str, value: dict[str, Any] | list[Any]) -> bool:
+def set_json(key: str, value: dict[str, Any] | list[Any], ttl_seconds: int) -> bool:
     """
-    写入 JSON 值并设置 TTL；写失败返回 False。
+    写入 JSON 值并设置固定 TTL；写失败返回 False。
     """
     client = get_redis()
     if client is None:
         return False
     try:
         payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        client.setex(key, get_cache_ttl_seconds(), payload)
+    except (TypeError, ValueError) as exc:
+        logger.warning("%s Redis 缓存 JSON 序列化失败 key=%s：%s", CACHE_LOG_PREFIX, key, exc)
+        return False
+    try:
+        client.setex(key, max(1, ttl_seconds), payload)
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s Redis 写入失败 key=%s：%s", CACHE_LOG_PREFIX, key, exc)
+        _mark_redis_unavailable(exc)
         return False
 
 
@@ -145,6 +163,7 @@ def delete(key: str) -> None:
         client.delete(key)
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s Redis 删除失败 key=%s：%s", CACHE_LOG_PREFIX, key, exc)
+        _mark_redis_unavailable(exc)
 
 
 def delete_by_pattern(pattern: str) -> int:
@@ -161,17 +180,5 @@ def delete_by_pattern(pattern: str) -> int:
             deleted += 1
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s Redis 批量删除失败 pattern=%s：%s", CACHE_LOG_PREFIX, pattern, exc)
+        _mark_redis_unavailable(exc)
     return deleted
-
-
-def refresh_ttl(key: str) -> None:
-    """
-    命中缓存时续期 TTL（滑动过期）。
-    """
-    client = get_redis()
-    if client is None:
-        return
-    try:
-        client.expire(key, get_cache_ttl_seconds())
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("%s Redis TTL 续期失败 key=%s：%s", CACHE_LOG_PREFIX, key, exc)

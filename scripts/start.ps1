@@ -50,7 +50,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "[start] backend  http://127.0.0.1:${BackendPort}" -ForegroundColor Green
 Write-Host "[start] frontend http://127.0.0.1:${FrontendPort}" -ForegroundColor Green
-Write-Host "[start] celery   agent5.async_review (Redis queue)" -ForegroundColor Green
+Write-Host "[start] celery   analysis.run + agent5.async_review (Redis queue)" -ForegroundColor Green
 Write-Host "[start] opening 3 windows: EA Backend | EA Celery | EA Frontend" -ForegroundColor Gray
 Write-Host "[start] close each service window to stop" -ForegroundColor Gray
 

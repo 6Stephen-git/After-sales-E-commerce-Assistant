@@ -9,6 +9,8 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -17,6 +19,8 @@ if ROOT_DIR not in sys.path:
 from backend.agents.agent5.reviewer import review
 import backend.agents.agent5.reviewer as reviewer_module
 from backend.tasks.review_task import async_review
+import backend.tools.agent5_tools as agent5_tools_module
+from backend.db.models import Base, DisputeCase
 from backend.tools.agent5_tools import save_case_to_db
 from schemas import CaseScenario, ReviewInput
 
@@ -86,6 +90,7 @@ class TestAgent5Persistence:
         mock_engine.return_value = MagicMock()
         session = MagicMock()
         mock_session_cls.return_value.__enter__.return_value = session
+        session.scalar.return_value = None
 
         card = review(
             ReviewInput(
@@ -109,11 +114,50 @@ class TestAgent5Persistence:
         )
         assert save_case_to_db(review=invalid_card, merchant_id="", dispute_id="D5-005") is False
 
+    def test_save_case_to_db_should_upsert_same_merchant_and_dispute(self, tmp_path, monkeypatch):
+        """同一商家、纠纷的重复复盘应更新同一行，不得累积重复判例。"""
+        database_path = tmp_path / "agent5.sqlite3"
+        engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+        Base.metadata.create_all(engine)
+        monkeypatch.setattr(agent5_tools_module, "get_engine", lambda: engine)
+
+        first = review(
+            ReviewInput(
+                dispute_id="D5-UPSERT",
+                full_timeline={"strategy": "defend", "fact_summary": "首次复盘"},
+                final_outcome="胜",
+                ai_strategy_adopted=True,
+            )
+        )
+        second = review(
+            ReviewInput(
+                dispute_id="D5-UPSERT",
+                full_timeline={"strategy": "compensate", "fact_summary": "二次复盘"},
+                final_outcome="和解",
+                ai_strategy_adopted=False,
+            )
+        )
+
+        assert save_case_to_db(first, "M-UPSERT", "D5-UPSERT") is True
+        assert save_case_to_db(second, "M-UPSERT", "D5-UPSERT") is True
+
+        with Session(engine) as session:
+            rows = list(
+                session.scalars(
+                    select(DisputeCase).where(
+                        DisputeCase.merchant_id == "M-UPSERT",
+                        DisputeCase.dispute_id == "D5-UPSERT",
+                    )
+                )
+            )
+        assert len(rows) == 1
+        assert rows[0].outcome == "和解"
+
 
 class TestAgent5Task:
     @patch("backend.tasks.review_task.save_case_to_db", return_value=True)
     def test_async_review_valid_and_invalid(self, _mock_save):
-        """合法异步输入走通；缺失必填字段返回 False。"""
+        """合法异步输入走通；缺失必填字段应抛异常交给 Celery 重试。"""
         valid_payload = {
             "dispute_id": "D5-006",
             "full_timeline": {
@@ -125,11 +169,12 @@ class TestAgent5Task:
             "ai_strategy_adopted": True,
             "outcome_note": "",
         }
-        assert async_review(review_input_dict=valid_payload, merchant_id="M006") is True
+        assert async_review.run(review_input_dict=valid_payload, merchant_id="M006") is True
 
         invalid_payload = {
             "dispute_id": "D5-007",
             "full_timeline": {},
             "ai_strategy_adopted": False,
         }
-        assert async_review(review_input_dict=invalid_payload, merchant_id="M007") is False
+        with pytest.raises(Exception):
+            async_review.run(review_input_dict=invalid_payload, merchant_id="M007")

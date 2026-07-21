@@ -19,8 +19,14 @@ AGENT5_LOG_PREFIX = "[Agent5]"
 logger = logging.getLogger(__name__)
 
 
-# ---------- 异步任务入口：反序列化输入并持久化经验卡片 ----------
-@celery_app.task(name="agent5.async_review")
+# ---------- 异步任务入口：失败抛出给 Celery，由有限重试而非伪成功处理 ----------
+@celery_app.task(
+    name="agent5.async_review",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 2},
+)
 def async_review(review_input_dict: dict[str, Any], merchant_id: str) -> bool:
     """
     异步执行 Agent5 复盘并写入判例库。
@@ -30,7 +36,7 @@ def async_review(review_input_dict: dict[str, Any], merchant_id: str) -> bool:
         merchant_id: 当前商家标识。
 
     返回:
-        bool: 全流程成功返回 True，否则 False。
+        bool: 全流程成功返回 True；失败抛出异常交由 Celery 记录和有限重试。
     """
     logger.info("%s 异步复盘任务开始，merchant_id=%s", AGENT5_LOG_PREFIX, merchant_id)
 
@@ -42,8 +48,10 @@ def async_review(review_input_dict: dict[str, Any], merchant_id: str) -> bool:
             merchant_id=merchant_id,
             dispute_id=review_input.dispute_id,
         )
+        if not saved:
+            raise RuntimeError("复盘判例写入失败")
         logger.info("%s 异步复盘任务结束，写入结果=%s", AGENT5_LOG_PREFIX, saved)
         return saved
     except Exception as exc:  # noqa: BLE001
-        logger.error("%s 异步复盘任务失败：%s", AGENT5_LOG_PREFIX, exc)
-        return False
+        logger.exception("%s 异步复盘任务失败，将交由 Celery 重试：%s", AGENT5_LOG_PREFIX, exc)
+        raise

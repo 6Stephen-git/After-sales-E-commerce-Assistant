@@ -11,6 +11,32 @@ from typing import Any
 from backend.cache.helpers import as_list
 
 
+# ---------- 缓存键标识：统一哈希敏感业务标识，避免 Redis key 泄露租户或订单信息 ----------
+def hash_cache_identifier(value: Any) -> str:
+    """
+    将缓存业务标识归一化后取 SHA-256 前 128 位。
+
+    参数:
+        value: 商家、纠纷、订单、买家或材料等任意可字符串化的业务标识。
+    返回:
+        固定 32 位十六进制摘要，仅用于 Redis key 分段，不等同于请求幂等哈希。
+    """
+    normalized = str(value or "").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+
+
+def merchant_cache_scope(merchant_id: str) -> str:
+    """
+    生成商家缓存命名空间分段。
+
+    参数:
+        merchant_id: 已由调用方标准化的商家标识。
+    返回:
+        商家标识的 128 位摘要，保证所有业务缓存按租户隔离。
+    """
+    return hash_cache_identifier(merchant_id)
+
+
 # ---------- Agent1 指纹字段（事实还原相关） ----------
 FP_AGENT1_FIELDS = (
     "chat_history",

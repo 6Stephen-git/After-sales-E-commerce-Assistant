@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -45,6 +45,9 @@ class DisputeCase(Base):
     """
 
     __tablename__ = "dispute_cases"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "dispute_id", name="uq_dispute_cases_merchant_dispute"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     merchant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -96,3 +99,64 @@ class PlatformRule(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+# ---------- 分析任务表：保存长耗时分析的可恢复状态与最终报告 ----------
+class AnalysisJob(Base):
+    """
+    分析任务。
+
+    一个请求对应一个可追踪任务；任务状态和最终报告由 MySQL 持久化，
+    使浏览器断线后能按 job_id 恢复，而不是重新调用 LLM。
+    """
+
+    __tablename__ = "analysis_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_id",
+            "idempotency_key",
+            "attempt",
+            name="uq_analysis_jobs_merchant_key_attempt",
+        ),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    merchant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dispute_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    report_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    next_event_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+# ---------- 分析事件表：为 SSE 重连提供可按序补发的阶段事件 ----------
+class AnalysisEvent(Base):
+    """
+    分析任务事件。
+
+    sequence 在单个任务内严格递增；浏览器通过 Last-Event-ID 或 after
+    只读取未消费事件，保证重连时不会遗漏最终报告。
+    """
+
+    __tablename__ = "analysis_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "sequence", name="uq_analysis_events_job_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())

@@ -20,6 +20,13 @@ if ROOT_DIR not in sys.path:
 from schemas import VALID_DISPOSITIONS
 
 
+# ---------- 执行前提：分析 E2E 需要 API、Celery worker 与 Redis 同时运行 ----------
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_E2E_ANALYSIS", "0") != "1",
+    reason="分析 E2E 依赖独立 Celery worker；设置 RUN_E2E_ANALYSIS=1 后执行",
+)
+
+
 # ---------- 依赖守卫：未安装 httpx 时跳过该测试文件 ----------
 httpx = pytest.importorskip("httpx")
 
@@ -56,6 +63,33 @@ def _build_analyze_payload(
     }
 
 
+# ---------- 任务等待：E2E 使用 eager worker，仍通过状态接口验证异步协议 ----------
+def _submit_and_wait_for_report(client: Any, payload: dict[str, Any]) -> Any:
+    """
+    创建分析任务并轮询终态报告。
+
+    参数:
+        client: 直连后端的 HTTP 客户端。
+        payload: /analyze 请求体。
+    返回:
+        成功任务的状态响应。
+    """
+    created = client.post("/analyze", json=payload)
+    assert created.status_code == 202
+    job_id = created.json()["job_id"]
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        status_response = client.get(f"/analyze/{job_id}")
+        assert status_response.status_code == 200
+        status = status_response.json()
+        if status["status"] == "succeeded":
+            return status
+        if status["status"] in {"failed", "cancelled"}:
+            pytest.fail(f"分析任务未成功：{status}")
+        time.sleep(0.1)
+    pytest.fail(f"分析任务超时：job_id={job_id}")
+
+
 # ---------- 场景 E1：首次分析应返回完整报告 ----------
 def test_e2e_first_analysis_should_return_valid_report(backend_server: str) -> None:
     """
@@ -69,10 +103,9 @@ def test_e2e_first_analysis_should_return_valid_report(backend_server: str) -> N
     )
 
     with _e2e_http_client(base_url=backend_server) as client:
-        response = client.post("/analyze", json=payload)
+        response = _submit_and_wait_for_report(client, payload)
 
-    assert response.status_code == 200
-    report = response.json()
+    report = response.json()["report"]
     assert report["dispute_id"] == "E2E-001"
     assert report["facts"]["defect_type"] == "破洞"
     assert report["strategy"]["disposition"] in VALID_DISPOSITIONS
@@ -100,18 +133,18 @@ def test_e2e_fragmented_dialog_should_update_facts_after_second_analyze(backend_
     ]
 
     with _e2e_http_client(base_url=backend_server) as client:
-        first_response = client.post(
-            "/analyze",
-            json=_build_analyze_payload(
+        first_response = _submit_and_wait_for_report(
+            client,
+            _build_analyze_payload(
                 dispute_id="E2E-002",
                 merchant_id="M-E2E-001",
                 messages=first_messages,
                 image_urls=[],
             ),
         )
-        second_response = client.post(
-            "/analyze",
-            json=_build_analyze_payload(
+        second_response = _submit_and_wait_for_report(
+            client,
+            _build_analyze_payload(
                 dispute_id="E2E-002",
                 merchant_id="M-E2E-001",
                 messages=second_messages,
@@ -119,12 +152,10 @@ def test_e2e_fragmented_dialog_should_update_facts_after_second_analyze(backend_
             ),
         )
 
-    assert first_response.status_code == 200
-    first_report = first_response.json()
+    first_report = first_response.json()["report"]
     assert first_report["facts"]["defect_type"] is None
 
-    assert second_response.status_code == 200
-    second_report = second_response.json()
+    second_report = second_response.json()["report"]
     assert second_report["facts"]["defect_type"] == "破洞"
     assert "缺少举证图片" not in second_report["facts"]["missing_evidence"]
 
@@ -144,7 +175,7 @@ def test_e2e_analyze_should_reject_empty_dispute_id(backend_server: str) -> None
     with _e2e_http_client(base_url=backend_server) as client:
         response = client.post("/analyze", json=payload)
 
-    assert response.status_code == 400
+    assert response.status_code == 422
 
 
 # ---------- 场景 E4：商家配置读写与模式校验 ----------

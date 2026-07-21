@@ -10,18 +10,29 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
-from typing import Any, Callable
+from atexit import register
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, TypeVar
 
 import httpx
 
 LOG_PREFIX = "[LLM]"
-DEFAULT_MODEL = "mimo-v2.5"
+DEFAULT_MODEL = "deepseek-v4-flash"
 # 默认：连接 15s、读取 90s（LLM 首 token 常超过 12s；过短会误报 read timed out）
 _DEFAULT_CONNECT = 15.0
 _DEFAULT_READ = 90.0
-RETRY_BACKOFF_SECONDS = [0.2, 0.4, 0.8]
+_DEFAULT_POOL_TIMEOUT = 15.0
+_DEFAULT_MAX_CONNECTIONS = 20
+_DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 10
+_DEFAULT_MAX_ATTEMPTS = 3
+_DEFAULT_RETRY_BASE_SECONDS = 0.5
+_DEFAULT_RETRY_MAX_SECONDS = 8.0
 logger = logging.getLogger(__name__)
+_http_client: httpx.Client | None = None
+ResultType = TypeVar("ResultType")
 
 
 # ---------- 超时配置：区分连接与读响应，避免弱网/慢模型误判为失败 ----------
@@ -40,13 +51,191 @@ def _parse_timeout_seconds(raw: str, fallback: float) -> float:
         return fallback
 
 
+def _parse_positive_int(raw: str, fallback: int) -> int:
+    """
+    解析正整数配置；非法值回退默认值并记录原因。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return fallback
+    try:
+        value = int(text)
+        return value if value > 0 else fallback
+    except ValueError:
+        logger.warning("%s 环境变量整数值非法，已使用默认值 fallback=%s", LOG_PREFIX, fallback)
+        return fallback
+
+
 def _build_httpx_timeout() -> httpx.Timeout:
     """
-    构建 httpx 超时：连接、读-body 分离；可通过 LLM_HTTP_CONNECT_TIMEOUT / LLM_HTTP_READ_TIMEOUT 调整。
+    构建 httpx 超时：连接、读-body、连接池等待分离。
+
+    可通过 LLM_HTTP_CONNECT_TIMEOUT、LLM_HTTP_READ_TIMEOUT 与
+    LLM_HTTP_POOL_TIMEOUT 调整，避免把连接池耗尽误判为上游模型慢。
     """
     connect = _parse_timeout_seconds(os.getenv("LLM_HTTP_CONNECT_TIMEOUT", ""), _DEFAULT_CONNECT)
     read = _parse_timeout_seconds(os.getenv("LLM_HTTP_READ_TIMEOUT", ""), _DEFAULT_READ)
-    return httpx.Timeout(connect=connect, read=read, write=connect, pool=connect)
+    pool = _parse_timeout_seconds(os.getenv("LLM_HTTP_POOL_TIMEOUT", ""), _DEFAULT_POOL_TIMEOUT)
+    return httpx.Timeout(connect=connect, read=read, write=connect, pool=pool)
+
+
+def _build_httpx_limits() -> httpx.Limits:
+    """
+    构建连接池上限，限制单个 Celery worker 对上游 LLM 的并发连接数。
+    """
+    max_connections = _parse_positive_int(
+        os.getenv("LLM_HTTP_MAX_CONNECTIONS", ""),
+        _DEFAULT_MAX_CONNECTIONS,
+    )
+    max_keepalive = min(
+        _parse_positive_int(
+            os.getenv("LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS", ""),
+            _DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+        ),
+        max_connections,
+    )
+    return httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+    )
+
+
+# ---------- HTTP 客户端生命周期：同一进程复用连接池，退出时释放空闲连接 ----------
+def _get_http_client() -> httpx.Client:
+    """
+    返回进程内共享的同步 HTTP 客户端。
+
+    Celery 每个 worker 进程各自维护连接池；不跨进程共享 socket，
+    既复用 keep-alive 连接，也避免在 fork 后错误复用父进程连接。
+    """
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.Client(timeout=_build_httpx_timeout(), limits=_build_httpx_limits())
+    return _http_client
+
+
+def _close_http_client() -> None:
+    """
+    在解释器退出时关闭共享客户端，释放连接池中的空闲连接。
+    """
+    global _http_client
+    if _http_client is not None:
+        _http_client.close()
+        _http_client = None
+
+
+register(_close_http_client)
+
+
+# ---------- 失败分类：只重试具有瞬时特征的网络、限流与服务端异常 ----------
+def _is_retryable_exception(exc: Exception) -> bool:
+    """
+    判断调用失败是否值得重试。
+
+    4xx 请求错误通常由参数、鉴权或权限导致，除 429 限流外不重试；
+    网络层异常与 5xx 则可能随时间恢复。
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return isinstance(exc, httpx.RequestError)
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """
+    解析服务端 Retry-After 秒数或 HTTP 日期；非法、过期值返回 None。
+    """
+    value = response.headers.get("Retry-After", "").strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay_seconds(exc: Exception, attempt_index: int) -> float:
+    """
+    计算下一次重试等待时间。
+
+    429 优先遵守 Retry-After；其他可重试失败使用带随机抖动的指数退避，
+    防止多个 worker 同时重试造成上游雪崩。
+    """
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        retry_after = _retry_after_seconds(exc.response)
+        if retry_after is not None:
+            return retry_after
+    base = _parse_timeout_seconds(
+        os.getenv("LLM_HTTP_RETRY_BASE_SECONDS", ""),
+        _DEFAULT_RETRY_BASE_SECONDS,
+    )
+    maximum = _parse_timeout_seconds(
+        os.getenv("LLM_HTTP_RETRY_MAX_SECONDS", ""),
+        _DEFAULT_RETRY_MAX_SECONDS,
+    )
+    delay = min(maximum, base * (2 ** (attempt_index - 1)))
+    return delay + random.uniform(0, delay * 0.2)
+
+
+def _max_attempts() -> int:
+    """
+    获取单次 LLM 调用最大尝试次数，包含首次调用。
+    """
+    return _parse_positive_int(os.getenv("LLM_HTTP_MAX_ATTEMPTS", ""), _DEFAULT_MAX_ATTEMPTS)
+
+
+def _run_with_retries(
+    operation: Callable[[], ResultType],
+    *,
+    request_name: str,
+    retry_allowed: Callable[[], bool] | None = None,
+) -> ResultType | None:
+    """
+    执行单次上游操作并按失败类型有限重试。
+
+    retry_allowed 用于流式场景：已向调用方发出任何 delta 后返回 False，
+    从而绝不重放请求并造成重复文本。
+    """
+    attempts = _max_attempts()
+    for attempt_index in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001
+            can_retry = (
+                _is_retryable_exception(exc)
+                and attempt_index < attempts
+                and (retry_allowed is None or retry_allowed())
+            )
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if not can_retry:
+                logger.error(
+                    "%s %s调用失败且不再重试：attempt=%s/%s status=%s reason=%s",
+                    LOG_PREFIX,
+                    request_name,
+                    attempt_index,
+                    attempts,
+                    status_code,
+                    exc,
+                )
+                return None
+            delay = _retry_delay_seconds(exc, attempt_index)
+            logger.warning(
+                "%s %s调用失败，准备重试：attempt=%s/%s status=%s wait_seconds=%.3f reason=%s",
+                LOG_PREFIX,
+                request_name,
+                attempt_index,
+                attempts,
+                status_code,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    return None
 
 
 # ---------- 基础校验：消息列表结构 ----------
@@ -81,7 +270,8 @@ def _resolve_endpoint(raw_endpoint: str) -> str:
         return endpoint
     if endpoint.endswith("/v1"):
         return f"{endpoint}/chat/completions"
-    return endpoint
+    # 裸 Base URL（如 https://api.deepseek.com）自动补全路径
+    return f"{endpoint}/chat/completions"
 
 
 # ---------- 响应解析：提取首个 choices 文本 ----------
@@ -179,87 +369,75 @@ def chat_completion(
     if stream_enabled:
         payload["stream"] = True
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    timeout = _build_httpx_timeout()
     logger.info(
-        "%s 开始请求：endpoint=%s model=%s env_key=%s fallback_env_key=%s stream=%s connect_timeout=%s read_timeout=%s",
+        "%s 开始请求：endpoint=%s model=%s env_key=%s fallback_env_key=%s stream=%s",
         LOG_PREFIX,
         endpoint,
         model,
         model_env_key,
         fallback_model_env_key,
         stream_enabled,
-        timeout.connect,
-        timeout.read,
     )
 
-    for attempt in range(3):
-        attempt_index = attempt + 1
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                if stream_enabled:
-                    with client.stream("POST", endpoint, headers=headers, json=payload) as response:
-                        response.raise_for_status()
-                        chunks: list[str] = []
-                        for line in response.iter_lines():
-                            if not line:
-                                continue
-                            normalized_line = line.strip()
-                            if not normalized_line.startswith("data:"):
-                                continue
-                            data_text = normalized_line[5:].strip()
-                            if data_text == "[DONE]":
-                                break
-                            try:
-                                response_data = json.loads(data_text)
-                            except json.JSONDecodeError:
-                                continue
-                            delta_text = _extract_stream_delta(response_data=response_data)
-                            if not delta_text:
-                                continue
-                            chunks.append(delta_text)
-                            stream_delta_callback(delta_text)
-                        if not chunks:
-                            raise ValueError("流式响应未返回可用文本增量")
-                        content = "".join(chunks).strip()
-                        if content:
-                            logger.info("%s 请求成功：已获得流式响应文本", LOG_PREFIX)
-                            return content
-                        raise ValueError("流式响应文本为空")
-                else:
-                    response = client.post(endpoint, headers=headers, json=payload)
-                    response.raise_for_status()
-                    response_data = response.json()
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "%s 第%d次调用失败：HTTP状态异常，status=%s，原因=%s",
-                LOG_PREFIX,
-                attempt_index,
-                exc.response.status_code,
-                exc,
-            )
-        except httpx.RequestError as exc:
-            logger.error("%s 第%d次调用失败：网络请求异常，原因=%s", LOG_PREFIX, attempt_index, exc)
-        except ValueError as exc:
-            logger.error("%s 第%d次调用失败：响应JSON解析失败，原因=%s", LOG_PREFIX, attempt_index, exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("%s 第%d次调用失败：未知异常，原因=%s", LOG_PREFIX, attempt_index, exc)
-        else:
-            if stream_enabled:
-                logger.error("%s 第%d次调用失败：流式响应结构不符合约定", LOG_PREFIX, attempt_index)
-            else:
-                content = _extract_content(response_data=response_data)
-                if content is not None:
-                    logger.info("%s 请求成功：已获得响应文本", LOG_PREFIX)
-                    return content
-                logger.error("%s 第%d次调用失败：响应结构不符合约定", LOG_PREFIX, attempt_index)
+    if not stream_enabled:
+        def request_text() -> str:
+            """
+            执行非流式请求并校验 OpenAI 兼容响应结构。
+            """
+            response = _get_http_client().post(endpoint, headers=headers, json=payload)
+            response.raise_for_status()
+            content = _extract_content(response.json())
+            if content is None:
+                raise ValueError("响应结构不符合 OpenAI chat/completions 约定")
+            return content
 
-        if attempt == 2:
-            logger.error("%s 调用终止：达到最大重试次数", LOG_PREFIX)
-            return None
-        time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+        content = _run_with_retries(request_text, request_name="非流式")
+        if content is not None:
+            logger.info("%s 请求成功：已获得响应文本", LOG_PREFIX)
+        return content
 
-    logger.error("%s 调用终止：未知错误", LOG_PREFIX)
-    return None
+    stream_has_emitted_delta = False
+
+    def request_stream() -> str:
+        """
+        执行流式请求；一旦向调用方回调 delta，禁止后续重放本次生成。
+        """
+        nonlocal stream_has_emitted_delta
+        chunks: list[str] = []
+        with _get_http_client().stream("POST", endpoint, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                normalized_line = line.strip()
+                if not normalized_line.startswith("data:"):
+                    continue
+                data_text = normalized_line[5:].strip()
+                if data_text == "[DONE]":
+                    break
+                try:
+                    response_data = json.loads(data_text)
+                except json.JSONDecodeError:
+                    continue
+                delta_text = _extract_stream_delta(response_data=response_data)
+                if not delta_text:
+                    continue
+                chunks.append(delta_text)
+                stream_delta_callback(delta_text)
+                stream_has_emitted_delta = True
+        content = "".join(chunks).strip()
+        if not content:
+            raise ValueError("流式响应未返回可用文本增量")
+        return content
+
+    content = _run_with_retries(
+        request_stream,
+        request_name="流式",
+        retry_allowed=lambda: not stream_has_emitted_delta,
+    )
+    if content is not None:
+        logger.info("%s 请求成功：已获得流式响应文本", LOG_PREFIX)
+    return content
 
 
 def _is_valid_tool_chat_messages(messages: list[dict[str, Any]]) -> bool:
@@ -353,7 +531,6 @@ def chat_completion_assistant_message(
             payload["tool_choice"] = tool_choice
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    timeout = _build_httpx_timeout()
     logger.info(
         "%s 开始 tool 请求：model=%s tools=%s",
         LOG_PREFIX,
@@ -361,35 +538,18 @@ def chat_completion_assistant_message(
         len(tools or []),
     )
 
-    for attempt in range(3):
-        attempt_index = attempt + 1
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                response = client.post(endpoint, headers=headers, json=payload)
-                response.raise_for_status()
-                response_data = response.json()
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "%s tool 第%d次失败：HTTP %s",
-                LOG_PREFIX,
-                attempt_index,
-                exc.response.status_code,
-            )
-        except httpx.RequestError as exc:
-            logger.error("%s tool 第%d次失败：网络异常 %s", LOG_PREFIX, attempt_index, exc)
-        except ValueError as exc:
-            logger.error("%s tool 第%d次失败：JSON 解析 %s", LOG_PREFIX, attempt_index, exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("%s tool 第%d次失败：%s", LOG_PREFIX, attempt_index, exc)
-        else:
-            message = _extract_assistant_message(response_data=response_data)
-            if message is not None:
-                logger.info("%s tool 请求成功", LOG_PREFIX)
-                return message
-            logger.error("%s tool 第%d次失败：响应无 assistant message", LOG_PREFIX, attempt_index)
+    def request_assistant_message() -> dict[str, Any]:
+        """
+        执行带工具定义的请求，并验证响应中存在 assistant message。
+        """
+        response = _get_http_client().post(endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        message = _extract_assistant_message(response.json())
+        if message is None:
+            raise ValueError("响应无 assistant message")
+        return message
 
-        if attempt == 2:
-            return None
-        time.sleep(RETRY_BACKOFF_SECONDS[attempt])
-
-    return None
+    message = _run_with_retries(request_assistant_message, request_name="tool")
+    if message is not None:
+        logger.info("%s tool 请求成功", LOG_PREFIX)
+    return message

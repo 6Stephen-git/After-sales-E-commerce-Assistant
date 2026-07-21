@@ -23,6 +23,9 @@ if os.path.exists(TEST_DB_PATH):
 os.environ["DB_URL"] = f"sqlite+pysqlite:///{TEST_DB_PATH.replace(os.sep, '/')}"
 
 from backend.main import app  # noqa: E402
+from backend.db.connection import get_engine  # noqa: E402
+from backend.services.analysis_job_service import append_event, mark_succeeded  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
 
 # ---------- 测试客户端：确保 startup 事件触发建表 ----------
@@ -43,9 +46,14 @@ def test_health_should_return_ok_status(api_client):
     assert "version" in payload
 
 
-# ---------- /analyze：辅助控制器链路 ----------
-def test_analyze_should_return_analysis_report(api_client):
-    """/analyze 应返回完整分析报告结构。"""
+# ---------- /analyze：创建异步任务并返回可恢复的 job_id ----------
+def test_analyze_should_create_analysis_job(api_client, monkeypatch):
+    """/analyze 应入队一次并返回可供 SSE 订阅的任务标识。"""
+    queued_job_ids: list[str] = []
+    monkeypatch.setattr(
+        "backend.routers.analyze.run_analysis_job.delay",
+        lambda job_id: queued_job_ids.append(job_id),
+    )
     request_body = {
         "dispute_id": "D-API-001",
         "merchant_id": "M-API-001",
@@ -59,12 +67,71 @@ def test_analyze_should_return_analysis_report(api_client):
         "image_urls": ["mock://tear-tag"],
     }
     response = api_client.post("/analyze", json=request_body)
-    assert response.status_code == 200
+    assert response.status_code == 202
     payload = response.json()
-    assert payload["dispute_id"] == "D-API-001"
-    assert "facts" in payload
-    assert "strategy" in payload
-    assert "scripts" in payload
+    assert payload["status"] == "queued"
+    assert payload["reused"] is False
+    assert payload["job_id"]
+    assert queued_job_ids == [payload["job_id"]]
+
+    status_response = api_client.get(f"/analyze/{payload['job_id']}")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "queued"
+
+
+# ---------- queued 补偿：已落库但尚未领取的同一任务应在重试请求时再次入队 ----------
+def test_analyze_should_requeue_existing_queued_job(api_client, monkeypatch):
+    """同材料第二次 POST 复用 job_id，同时补偿一次 delay 调用。"""
+    queued_job_ids: list[str] = []
+    monkeypatch.setattr(
+        "backend.routers.analyze.run_analysis_job.delay",
+        lambda job_id: queued_job_ids.append(job_id),
+    )
+    request_body = {
+        "dispute_id": "D-API-REQUEUE-001",
+        "merchant_id": "M-API-REQUEUE-001",
+        "messages": [{"role": "buyer", "content": "申请退款"}],
+    }
+
+    first = api_client.post("/analyze", json=request_body)
+    second = api_client.post("/analyze", json=request_body)
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["reused"] is True
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert queued_job_ids == [first.json()["job_id"], first.json()["job_id"]]
+
+
+# ---------- SSE 补发：按 Last-Event-ID 仅推送尚未消费的持久化事件 ----------
+def test_analysis_events_should_replay_only_missing_sequences(api_client, monkeypatch):
+    """重连订阅应忽略已消费事件，并返回剩余终态事件。"""
+    monkeypatch.setattr("backend.routers.analyze.run_analysis_job.delay", lambda _job_id: None)
+    request_body = {
+        "dispute_id": "D-API-SSE-001",
+        "merchant_id": "M-API-SSE-001",
+        "messages": [{"role": "buyer", "content": "申请退款"}],
+    }
+    created = api_client.post("/analyze", json=request_body)
+    job_id = created.json()["job_id"]
+    with Session(get_engine()) as session:
+        event = append_event(
+            session,
+            job_id=job_id,
+            event_type="final_report",
+            payload={"report": {"dispute_id": "D-API-SSE-001"}},
+        )
+        last_sequence = event.sequence
+        mark_succeeded(session, job_id=job_id, report={"dispute_id": "D-API-SSE-001"})
+
+    response = api_client.get(
+        f"/analyze/{job_id}/events",
+        headers={"Last-Event-ID": str(last_sequence)},
+    )
+    assert response.status_code == 200
+    assert "id: 2" in response.text
+    assert "event: job_completed" in response.text
+    assert "event: final_report" not in response.text
 
 
 # ---------- /merchants/{id}/config：默认创建、更新回读 ----------

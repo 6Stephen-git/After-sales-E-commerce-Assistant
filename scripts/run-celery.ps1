@@ -10,4 +10,4 @@ if (Test-Path -LiteralPath $VenvPython) {
     $Python = $VenvPython
 }
 
-& $Python -m celery -A backend.tasks.review_task worker --loglevel=info -P solo
+& $Python -m celery -A backend.tasks.celery_app worker --loglevel=info -P solo

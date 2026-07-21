@@ -244,13 +244,12 @@ def search_similar_cases(
     if top_k <= 0:
         raise ValueError("top_k 必须大于 0")
 
-    cached_cases = get_cached_cases(normalized_desc, top_k)
+    cached_cases = get_cached_cases(normalized_merchant, normalized_desc, top_k)
     if cached_cases is not None:
         return cached_cases
 
     cases: list[SimilarCase] = []
     if not normalized_desc:
-        save_cases(normalized_desc, top_k, cases)
         return cases
 
     try:
@@ -282,8 +281,9 @@ def search_similar_cases(
             )
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 相似判例检索失败：%s", AGENT2_LOG_PREFIX, exc)
+        return cases
 
-    save_cases(normalized_desc, top_k, cases)
+    save_cases(normalized_merchant, normalized_desc, top_k, cases)
     return cases
 
 

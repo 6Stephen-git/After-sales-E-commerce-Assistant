@@ -28,7 +28,7 @@ def _normalize_outcome(raw: str) -> str:
     return text
 
 
-def _build_full_timeline(*, dispute_id: str, materials: dict[str, Any]) -> dict[str, Any]:
+def _build_full_timeline(*, merchant_id: str, dispute_id: str, materials: dict[str, Any]) -> dict[str, Any]:
     """从材料缓存与分析报告缓存组装复盘轨迹。"""
     timeline: dict[str, Any] = {
         "dispute_id": dispute_id,
@@ -37,7 +37,7 @@ def _build_full_timeline(*, dispute_id: str, materials: dict[str, Any]) -> dict[
         "buyer_id": materials.get("buyer_id"),
         "order_id": materials.get("order_id"),
     }
-    report = get_cached_report(dispute_id, materials)
+    report = get_cached_report(merchant_id, dispute_id, materials)
     if report is not None:
         timeline["facts"] = report.facts.model_dump()
         timeline["strategy"] = report.strategy.model_dump()
@@ -70,15 +70,19 @@ def submit_review(
         raise ValueError("dispute_id 不能为空")
 
     if not save_to_db:
-        clear_dispute_cache(normalized_dispute_id)
+        clear_dispute_cache(normalized_merchant_id, normalized_dispute_id)
         logger.info("%s 纠纷已关闭（未入库）dispute_id=%s", REVIEW_LOG_PREFIX, normalized_dispute_id)
         return {"status": "closed", "saved": False, "dispute_id": normalized_dispute_id}
 
-    materials = load_materials(normalized_dispute_id)
+    materials = load_materials(normalized_merchant_id, normalized_dispute_id)
     if not materials:
         raise ValueError("未找到纠纷缓存，请先完成一次 AI 分析后再结束纠纷")
 
-    full_timeline = _build_full_timeline(dispute_id=normalized_dispute_id, materials=materials)
+    full_timeline = _build_full_timeline(
+        merchant_id=normalized_merchant_id,
+        dispute_id=normalized_dispute_id,
+        materials=materials,
+    )
     review_input = ReviewInput(
         dispute_id=normalized_dispute_id,
         full_timeline=full_timeline,
@@ -88,6 +92,6 @@ def submit_review(
     )
 
     async_review.delay(review_input.model_dump(), normalized_merchant_id)
-    clear_dispute_cache(normalized_dispute_id)
+    clear_dispute_cache(normalized_merchant_id, normalized_dispute_id)
     logger.info("%s 复盘任务已入队 dispute_id=%s", REVIEW_LOG_PREFIX, normalized_dispute_id)
     return {"status": "accepted", "saved": True, "dispute_id": normalized_dispute_id}

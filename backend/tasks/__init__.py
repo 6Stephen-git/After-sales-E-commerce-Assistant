@@ -5,6 +5,7 @@
 """
 
 from .celery_app import celery_app
+from .analysis_task import run_analysis_job
 from .review_task import async_review
 
-__all__ = ["celery_app", "async_review"]
+__all__ = ["celery_app", "run_analysis_job", "async_review"]

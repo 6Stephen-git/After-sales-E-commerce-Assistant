@@ -1,8 +1,9 @@
 import { computed, ref } from 'vue'
-import { analyzeDispute, analyzeDisputeStream, monitorSellerEmotion } from '../api'
+import { createAnalysisJob, monitorSellerEmotion, subscribeAnalysisJob } from '../api'
 import { should_block_seller_text_locally } from '../utils/sellerEmotionLocal'
 
-const ENABLE_ANALYZE_STREAM = String(import.meta.env.VITE_ENABLE_ANALYZE_STREAM || '0') === '1'
+const ANALYSIS_JOB_STORAGE_KEY = 'ecommerce_assistant_active_analysis_job'
+const DEMO_MERCHANT_ID = String(import.meta.env.VITE_DEMO_MERCHANT_ID || 'demo-merchant')
 
 // ---------- 模块级状态：跨路由切换保留对话和分析结果 ----------
 const messages = ref([])
@@ -24,6 +25,51 @@ const message_id_seed = ref(messages.value.length + 1)
 const pending_image_id_seed = ref(1)
 let analyze_abort_controller = null
 let pagehide_abort_registered = false
+let resume_attempted = false
+
+// ---------- 会话标识：页面刷新后保留 job_id，浏览器可重新订阅尚未结束的任务 ----------
+function get_or_create_session_value(key, prefix) {
+  /**
+   * 从 sessionStorage 读取或生成当前页面会话标识。
+   *
+   * 后端正式接入后 merchant_id 应来自登录态；当前演示项目使用固定商家和会话级纠纷号，
+   * 避免多个浏览器页无意共享默认纠纷。
+   */
+  if (typeof window === 'undefined') {
+    return `${prefix}-server`
+  }
+  const existing = window.sessionStorage.getItem(key)
+  if (existing) {
+    return existing
+  }
+  const suffix = typeof window.crypto?.randomUUID === 'function'
+    ? window.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const value = `${prefix}-${suffix}`
+  window.sessionStorage.setItem(key, value)
+  return value
+}
+
+function get_active_analysis_job_id() {
+  /** 读取刷新后可恢复订阅的任务 ID。 */
+  return typeof window === 'undefined'
+    ? ''
+    : String(window.sessionStorage.getItem(ANALYSIS_JOB_STORAGE_KEY) || '')
+}
+
+function save_active_analysis_job_id(jobId) {
+  /** 在连接 SSE 前保存 job_id，避免连接中断导致前端丢失恢复锚点。 */
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem(ANALYSIS_JOB_STORAGE_KEY, jobId)
+  }
+}
+
+function clear_active_analysis_job_id(jobId) {
+  /** 仅清理当前已完成任务，避免旧订阅误删新任务 ID。 */
+  if (typeof window !== 'undefined' && get_active_analysis_job_id() === jobId) {
+    window.sessionStorage.removeItem(ANALYSIS_JOB_STORAGE_KEY)
+  }
+}
 
 // ---------- 进行中的分析：页面卸载时主动中断 HTTP ----------
 function abort_analyze_in_flight() {
@@ -274,19 +320,110 @@ export function use_dispute() {
     input_text.value = String(script_text || '').trim()
   }
 
-  // ---------- 分析请求：调用 /analyze 并刷新策略面板 ----------
+  // ---------- 阶段展示：将可补发 SSE 事件合并到策略面板 ----------
+  function apply_analysis_event(event_type, event_data) {
+    /**
+     * 消费单个分析事件。
+     *
+     * 同一事件可能在网络边界重传，局部对象合并和最终报告覆盖均保持幂等。
+     */
+    const stage_messages = {
+      merge: '正在合并上下文...',
+      agent1: '正在提取事实与参考信息...',
+      agent2_tools: '正在分析风险信号与匹配规则...',
+      agent2: '正在生成策略建议...',
+      agent3: '正在生成推荐话术...'
+    }
+    if (event_type === 'stage_start') {
+      const stage_key = String(event_data?.stage || '')
+      progress_message.value = stage_messages[stage_key] || '分析进行中...'
+      return
+    }
+    if (event_type === 'stage_done' && event_data?.partial_report) {
+      const current = report.value || {}
+      const partial = event_data.partial_report
+      report.value = {
+        ...current,
+        ...partial,
+        strategy: partial.strategy ? { ...(current.strategy || {}), ...partial.strategy } : current.strategy
+      }
+      return
+    }
+    if (event_type === 'stage_delta' && event_data?.stage === 'agent2' && event_data?.field === 'reasoning') {
+      const current = report.value || {}
+      const strategy = current.strategy || {}
+      report.value = {
+        ...current,
+        strategy: {
+          ...strategy,
+          reasoning: `${String(strategy.reasoning || '')}${String(event_data.delta || '')}`
+        }
+      }
+      return
+    }
+    if (event_type === 'final_report' && event_data?.report) {
+      report.value = event_data.report
+      progress_message.value = '分析完成'
+    }
+  }
+
+  // ---------- 任务订阅：EventSource 自动重连，后端按 Last-Event-ID 补发事件 ----------
+  async function follow_analysis_job(job_id, request_signal) {
+    /**
+     * 持续订阅已有任务直至成功、失败或取消。
+     *
+     * 订阅中断只关闭浏览器连接；任务和最终报告仍由 MySQL/Celery 维护。
+     */
+    await subscribeAnalysisJob(job_id, {
+      on_event: apply_analysis_event
+    }, { signal: request_signal })
+    progress_message.value = '分析完成'
+    clear_active_analysis_job_id(job_id)
+  }
+
+  // ---------- 刷新恢复：从 sessionStorage 找回未完成任务并重新订阅 ----------
+  async function resume_pending_analysis_job() {
+    /** 页面刷新后恢复现有 job_id 的 SSE 订阅，不重新提交分析。 */
+    const job_id = get_active_analysis_job_id()
+    if (!job_id || loading.value || analyze_abort_controller) {
+      return
+    }
+    analyze_abort_controller = new AbortController()
+    const request_signal = analyze_abort_controller.signal
+    loading.value = true
+    error_message.value = ''
+    progress_message.value = '正在恢复分析任务...'
+    try {
+      await follow_analysis_job(job_id, request_signal)
+    } catch (error) {
+      if (!is_request_aborted(error) && !request_signal.aborted) {
+        error_message.value = error.message || '恢复分析任务失败'
+        progress_message.value = ''
+      }
+    } finally {
+      if (analyze_abort_controller?.signal === request_signal) {
+        analyze_abort_controller = null
+      }
+      loading.value = false
+    }
+  }
+
+  // ---------- 分析请求：先创建任务，再订阅可重连的 SSE 事件 ----------
   async function request_ai_help() {
     abort_analyze_in_flight()
     register_pagehide_abort()
     analyze_abort_controller = new AbortController()
     const request_signal = analyze_abort_controller.signal
+    const dispute_id = get_or_create_session_value('ecommerce_assistant_dispute_id', 'dispute')
 
     loading.value = true
     error_message.value = ''
     report.value = null
-    progress_message.value = '正在提交分析请求...'
+    progress_message.value = '正在创建分析任务...'
     try {
       const payload = {
+        merchant_id: DEMO_MERCHANT_ID,
+        dispute_id,
         messages: messages.value.map((item) => ({
           role: item.role,
           content: item.content
@@ -296,99 +433,10 @@ export function use_dispute() {
           .map((item) => String(item.image_url || '').trim())
           .filter((url) => Boolean(url))
       }
-      const stage_messages = {
-        merge: '正在合并上下文...',
-        agent1: '正在提取事实与参考信息...',
-        agent2_tools: '正在分析风险信号与匹配规则...',
-        agent2: '正在生成策略建议...',
-        agent3: '正在生成推荐话术...'
-      }
-      const merge_partial_report = (partial) => {
-        const current = report.value || {}
-        const next = { ...current, ...(partial || {}) }
-        if (partial?.strategy) {
-          next.strategy = { ...(current.strategy || {}), ...partial.strategy }
-        }
-        report.value = next
-      }
-      const append_reasoning_delta = (delta_text) => {
-        const normalized = String(delta_text || '')
-        if (!normalized) {
-          return
-        }
-        const current_report = report.value || {}
-        const current_strategy = current_report.strategy || {}
-        const current_reasoning = String(current_strategy.reasoning || '')
-        report.value = {
-          ...current_report,
-          strategy: {
-            ...current_strategy,
-            reasoning: current_reasoning + normalized
-          }
-        }
-      }
-
-      if (ENABLE_ANALYZE_STREAM) {
-        let stream_error = null
-        await analyzeDisputeStream(payload, {
-          on_event: (event_type, event_data) => {
-            if (event_type === 'stage_start') {
-              const stage_key = String(event_data?.stage || '')
-              progress_message.value = stage_messages[stage_key] || '分析进行中...'
-              return
-            }
-            if (event_type === 'stage_done' && event_data?.partial_report) {
-              merge_partial_report(event_data.partial_report)
-              return
-            }
-            if (event_type === 'stage_delta' && event_data?.stage === 'agent2' && event_data?.field === 'reasoning') {
-              append_reasoning_delta(event_data.delta)
-              return
-            }
-            if (event_type === 'final_report' && event_data?.report) {
-              report.value = event_data.report
-              progress_message.value = '分析完成'
-              return
-            }
-            if (event_type === 'pipeline_error') {
-              stream_error = new Error(event_data?.message || '流式分析失败')
-            }
-          },
-          on_done: () => {
-            if (!stream_error && report.value) {
-              progress_message.value = '分析完成'
-            }
-          },
-          on_error: (error) => {
-            stream_error = error
-          }
-        }, { signal: request_signal })
-
-        if (stream_error) {
-          if (is_request_aborted(stream_error) || request_signal.aborted) {
-            return
-          }
-          const message = String(stream_error.message || '')
-          const is_stream_abort = /aborted|BodyStreamBuffer/i.test(message)
-          const can_fallback =
-            !request_signal.aborted &&
-            (message.includes('流式分析未启用') ||
-            message.includes('404') ||
-            (is_stream_abort && !report.value?.strategy))
-          if (can_fallback) {
-            progress_message.value = is_stream_abort
-              ? '流式连接中断，正在拉取完整报告...'
-              : '流式不可用，已回退普通分析...'
-            report.value = await analyzeDispute(payload, { signal: request_signal })
-            progress_message.value = '分析完成'
-          } else {
-            throw stream_error
-          }
-        }
-      } else {
-        report.value = await analyzeDispute(payload, { signal: request_signal })
-        progress_message.value = '分析完成'
-      }
+      const job = await createAnalysisJob(payload)
+      save_active_analysis_job_id(job.job_id)
+      progress_message.value = job.reused ? '正在恢复已有分析任务...' : '分析任务已提交，正在等待处理...'
+      await follow_analysis_job(job.job_id, request_signal)
     } catch (error) {
       if (is_request_aborted(error) || request_signal.aborted) {
         return
@@ -413,6 +461,13 @@ export function use_dispute() {
       error_message.value = ''
       progress_message.value = ''
     }
+  }
+
+  // ---------- 组件首次挂载：若页面刷新前有未结束任务，自动恢复订阅 ----------
+  if (!resume_attempted) {
+    resume_attempted = true
+    register_pagehide_abort()
+    void resume_pending_analysis_job()
   }
 
   return {

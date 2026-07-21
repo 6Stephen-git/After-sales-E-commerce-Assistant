@@ -1,9 +1,5 @@
 import axios from 'axios'
 
-// ---------- 分析链路耗时常超过普通接口：后端多 Agent + 外部 LLM，需单独拉长等待时间 ----------
-const ANALYZE_HTTP_TIMEOUT_MS = 600000
-const ANALYZE_STREAM_TIMEOUT_MS = 600000
-
 // ---------- Axios 实例：统一管理前端到后端的 HTTP 请求 ----------
 const httpClient = axios.create({
   baseURL: '/api',
@@ -40,126 +36,88 @@ export async function submitDisputeReview(payload) {
   }
 }
 
-// ---------- 分析请求：调用辅助模式分析接口 ----------
-export async function analyzeDispute(payload, options = {}) {
+// ---------- 创建分析任务：请求快速返回 job_id，耗时 Agent 链路由后端 worker 执行 ----------
+export async function createAnalysisJob(payload) {
   try {
     const response = await httpClient.post('/analyze', payload, {
-      timeout: ANALYZE_HTTP_TIMEOUT_MS,
-      signal: options.signal
+      timeout: 30000
     })
     return response.data
   } catch (error) {
-    if (is_request_aborted(error)) {
-      throw error
-    }
-    throw new Error(`请求分析失败：${error.message}`)
+    throw new Error(`创建分析任务失败：${error.message}`)
   }
 }
 
-// ---------- 判断是否为页面刷新/主动取消导致的中断 ----------
-function is_request_aborted(error) {
-  const name = String(error?.name || '')
-  const code = String(error?.code || '')
-  const message = String(error?.message || '')
-  return (
-    name === 'AbortError' ||
-    name === 'CanceledError' ||
-    code === 'ERR_CANCELED' ||
-    /aborted|cancel/i.test(message)
-  )
-}
+// ---------- SSE 订阅：浏览器凭事件 id 自动重连，并携带 Last-Event-ID 补发遗漏事件 ----------
+export function subscribeAnalysisJob(jobId, handlers = {}, options = {}) {
+  /**
+   * 订阅任务的阶段事件直至完成。
+   *
+   * EventSource 在网络中断后会自动重连，服务端按 Last-Event-ID 回放缺失事件。
+   * 调用方传入 AbortSignal 时只关闭订阅，不取消后端任务。
+   */
+  const { on_event } = handlers
+  const signal = options.signal
+  const eventTypes = [
+    'job_started',
+    'pipeline_start',
+    'stage_start',
+    'stage_done',
+    'stage_delta',
+    'final_report',
+    'pipeline_done',
+    'pipeline_error',
+    'job_completed',
+    'job_failed',
+    'cancel_requested',
+    'cancelled'
+  ]
 
-// ---------- 流式分析请求：按阶段消费 SSE 事件，支持先展示部分结果 ----------
-function _consume_sse_buffer(buffer, on_event) {
-  let rest = buffer
-  while (rest.includes('\n\n')) {
-    const frame_end = rest.indexOf('\n\n')
-    const frame = rest.slice(0, frame_end)
-    rest = rest.slice(frame_end + 2)
+  return new Promise((resolve, reject) => {
+    const source = new EventSource(`/api/analyze/${encodeURIComponent(jobId)}/events`)
+    let settled = false
 
-    let event_type = 'message'
-    let event_data = {}
-    for (const line of frame.split('\n')) {
-      if (line.startsWith('event:')) {
-        event_type = line.slice(6).trim()
-      } else if (line.startsWith('data:')) {
-        const raw = line.slice(5).trim()
-        try {
-          event_data = JSON.parse(raw)
-        } catch {
-          event_data = { raw }
-        }
+    const finish = (callback, value) => {
+      if (settled) {
+        return
       }
+      settled = true
+      source.close()
+      signal?.removeEventListener('abort', onAbort)
+      callback(value)
     }
-    if (typeof on_event === 'function') {
-      on_event(event_type, event_data)
-    }
-  }
-  return rest
-}
-
-export async function analyzeDisputeStream(payload, handlers = {}, options = {}) {
-  const { on_event, on_done, on_error } = handlers
-  const owns_controller = !options.signal
-  const controller = owns_controller ? new AbortController() : null
-  const signal = options.signal || controller.signal
-  const timeout_id = setTimeout(() => controller?.abort(), ANALYZE_STREAM_TIMEOUT_MS)
-  try {
-    const response = await fetch('/api/analyze/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal
-    })
-    if (!response.ok) {
-      let detail = `HTTP ${response.status}`
+    const onAbort = () => finish(reject, new DOMException('分析订阅已取消', 'AbortError'))
+    const notify = (event) => {
+      let payload = {}
       try {
-        const body = await response.json()
-        detail = body?.detail || detail
+        payload = JSON.parse(event.data || '{}')
       } catch {
-        // 忽略非 JSON 错误体
+        payload = { raw: event.data }
       }
-      throw new Error(detail)
+      if (typeof on_event === 'function') {
+        on_event(event.type, payload)
+      }
+      if (event.type === 'pipeline_error' || event.type === 'job_failed') {
+        finish(reject, new Error(payload.message || '分析任务执行失败'))
+      } else if (event.type === 'cancelled') {
+        finish(reject, new DOMException('分析任务已取消', 'AbortError'))
+      } else if (event.type === 'job_completed') {
+        finish(resolve)
+      }
     }
 
-    if (!response.body) {
-      throw new Error('流式响应不可用')
+    eventTypes.forEach((eventType) => source.addEventListener(eventType, notify))
+    source.onerror = () => {
+      // EventSource 自动重连；不能在这里 reject，否则会把瞬时网络波动误判为任务失败。
     }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (value) {
-        buffer += decoder.decode(value, { stream: true })
-        buffer = _consume_sse_buffer(buffer, on_event)
-      }
-      if (done) {
-        buffer += decoder.decode(undefined, { stream: false })
-        buffer = _consume_sse_buffer(buffer, on_event)
-        break
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true })
       }
     }
-    if (typeof on_done === 'function') {
-      on_done()
-    }
-  } catch (error) {
-    if (is_request_aborted(error)) {
-      if (typeof on_error === 'function') {
-        on_error(error)
-      }
-      return
-    }
-    if (typeof on_error === 'function') {
-      on_error(error)
-    } else {
-      throw new Error(`请求分析失败：${error.message || '未知错误'}`)
-    }
-  } finally {
-    clearTimeout(timeout_id)
-  }
+  })
 }
 
 // ---------- 配置查询：获取默认商家模式和自动化阈值 ----------

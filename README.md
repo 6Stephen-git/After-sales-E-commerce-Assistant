@@ -36,7 +36,7 @@ flowchart LR
 
   subgraph api [FastAPI]
     A1["/analyze"]
-    A2["/analyze/stream"]
+    A2["/analyze/{job_id}/events"]
     E1["/emotion/monitor"]
     R1["/review"]
   end
@@ -70,13 +70,11 @@ flowchart LR
 
 ### 主链路（Agent1 → Agent2 → Agent3）
 
-1. **合并材料**：同 `dispute_id` 下增量追加聊天与图片，或 snapshot 覆盖。
-2. **缓存短路**：材料指纹未变时命中 B 层（事实）或 C 层（完整报告），跳过重复推理。
-3. **Agent1 事实提取**：诉求 LLM + 百炼视觉（`qwen3-vl-flash`）+ 物流查询 → `FactOutput`。
-4. **Agent2 工具批**：并行客户价值、恶意检测；按门控决定是否规则匹配 → `StrategyInput`。
-5. **Agent2 策略**：规则契约 + 策略 LLM → `disposition` / `action_type` / `dialogue_context`。
-6. **Agent3 话术**：在契约约束下生成单条买家话术 → `ScriptOutput`。
-7. **聚合输出**：`AnalysisReport`（事实 + 策略 + 话术 + 匹配规则摘要）。
+1. **创建任务**：`POST /analyze` 将材料落为幂等 `job_id`，立即返回；浏览器保存该 ID。
+2. **异步执行**：Celery worker 合并材料、命中 B/C 缓存后依次运行 Agent1、Agent2、Agent3。
+3. **事件持久化**：worker 将阶段进度、局部结果和最终报告按递增序号写入 MySQL。
+4. **SSE 补发**：前端订阅任务事件；断线后 EventSource 携带 `Last-Event-ID` 自动重连，服务端只补发缺失事件。
+5. **结果兜底**：`GET /analyze/{job_id}` 返回任务状态与最终 `AnalysisReport`，完成结果不依赖长连接留存。
 
 ### 数据契约
 
@@ -163,8 +161,10 @@ python scripts/build_rule_match_lexicon.py
 
 | 方法               | 路径                              | 说明                                    |
 | ---------------- | ------------------------------- | ------------------------------------- |
-| `POST`           | `/analyze`                      | 辅助模式完整分析，返回 `AnalysisReport` JSON     |
-| `POST`           | `/analyze/stream`               | SSE 流式分析（需 `ENABLE_ANALYZE_STREAM=1`） |
+| `POST`           | `/analyze`                      | 创建或复用异步分析任务，返回 `job_id`     |
+| `GET`            | `/analyze/{job_id}`             | 查询任务状态与最终 `AnalysisReport` |
+| `GET`            | `/analyze/{job_id}/events`      | SSE 阶段事件订阅，支持 `Last-Event-ID` 补发 |
+| `POST`           | `/analyze/{job_id}/cancel`      | 请求协作式取消任务 |
 | `POST`           | `/emotion/monitor`              | 卖家情绪检测与预警                             |
 | `POST`           | `/review`                       | 关单复盘，可选写入判例库                          |
 | `GET/PUT`        | `/merchants/{id}/config`        | 商家模式与阈值配置                             |
@@ -239,8 +239,8 @@ python -m eval.pipeline.run_batch_eval --tree eval/content/scenarios/eval_tree_m
 # 单元与集成（不含 E2E 服务拉起）
 pytest tests/ --ignore=tests/eval -k "not e2e"
 
-# E2E（自动起后端进程）
-pytest tests/test_e2e_api.py
+# 分析 E2E（需先启动 Redis 和 Celery worker；PowerShell）
+$env:RUN_E2E_ANALYSIS=1; pytest tests/test_e2e_api.py
 ```
 
 ---
@@ -255,9 +255,28 @@ pytest tests/test_e2e_api.py
 | `VISION_API_*`                                         | Agent1 图片分析（百炼）       |
 | `LLM_API_*`                                            | 各 Agent 与 Judge 的文本模型 |
 | `AGENT*_LLM_MODEL`                                     | 分 Agent 模型名           |
+| `LLM_HTTP_*`                                           | LLM 超时、进程内连接池与重试策略 |
 | `DB_*`                                                 | MySQL 连接              |
-| `REDIS_*` / `ENABLE_REDIS_CACHE`                       | 缓存与 Celery            |
+| `REDIS_URL` / `REDIS_CACHE_URL`                        | Celery 用 db0；纠纷缓存用 db1 |
+| `ENABLE_REDIS_CACHE` / `AGENT_CACHE_VERSION`           | 缓存开关与 B/C 版本后缀        |
+| `MATERIALS/FACTS/REPORT/VISION/PROFILE/CASES_*_TTL`    | 各层固定 TTL（秒）            |
 | `ENABLE_ANALYZE_STREAM` / `VITE_ENABLE_ANALYZE_STREAM` | 流式分析开关                |
+
+`LLM_HTTP_MAX_ATTEMPTS` 包含首次请求。客户端只重试网络异常、429 和 5xx；429
+优先遵守上游的 `Retry-After`，其他瞬时失败使用带随机抖动的指数退避。连接池只在
+单个 FastAPI/Celery 进程内生效，跨 worker 的全局配额控制依赖后续 Redis 协调。
+流式响应已经输出任一文本分片后不会自动重试，避免重复推送；浏览器侧断线恢复由
+任务事件持久化与 SSE `Last-Event-ID` 处理。
+
+Redis 缓存 key 统一为 `ea:v2:{layer}:{merchant_hash}:...`，业务标识经 SHA-256
+截断后写入，不暴露原始商家/纠纷/订单号。读命中不续期。默认 TTL：材料/事实/报告
+24h，视觉 7 天，画像与判例 6h，空判例 60s，物流 15 分钟。缓存 key 哈希与 Job
+幂等键（完整 SHA-256 + MySQL 唯一约束）用途不同，不可混谈。
+
+分析任务使用 Redis db0 作为 Celery broker，但任务状态、报告和 SSE 事件以 MySQL
+为事实源。worker 配置 late ACK、单条预取、软/硬超时；`visibility_timeout` 必须大于
+硬超时和 Job 租约。消息可能至少一次投递，MySQL 的 `queued → running` 领取状态机
+负责吸收重复消息；Celery result backend 只供运维查看，不供前端恢复任务。
 
 
 ---

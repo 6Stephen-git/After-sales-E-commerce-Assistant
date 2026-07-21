@@ -8,6 +8,7 @@ import hashlib
 import logging
 from typing import Any
 
+from backend.cache.fingerprint import hash_cache_identifier, merchant_cache_scope
 from backend.cache.layer_redis import get_layer_json, read_env_ttl_seconds, set_layer_json
 from backend.cache.redis_client import CACHE_LOG_PREFIX, delete_by_pattern
 
@@ -25,12 +26,15 @@ def _fp(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
-def _vision_key(image_ref: str, model: str, guidance: str) -> str:
+def _vision_key(merchant_id: str, image_ref: str, model: str, guidance: str) -> str:
     """
-    生成 V 层 Redis key。
+    生成 V 层 Redis key，按商家隔离且不暴露图片引用、模型或提示词原文。
     """
     guidance_fp = _fp(guidance) if guidance.strip() else "_"
-    return f"ea:vision:{_fp(image_ref)}:{model}:{guidance_fp}"
+    return (
+        f"ea:v2:v:{merchant_cache_scope(merchant_id)}:{hash_cache_identifier(image_ref)}:"
+        f"{hash_cache_identifier(model)}:{guidance_fp}"
+    )
 
 
 def _is_cacheable_result(payload: dict[str, Any]) -> bool:
@@ -40,11 +44,18 @@ def _is_cacheable_result(payload: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and "error" not in payload
 
 
-def get_cached_vision(image_ref: str, model: str, guidance: str = "") -> dict[str, Any] | None:
+def get_cached_vision(
+    merchant_id: str,
+    image_ref: str,
+    model: str,
+    guidance: str = "",
+) -> dict[str, Any] | None:
     """
     读取 V 层缓存；miss 或结构非 dict 时返回 None。
     """
-    key = _vision_key(image_ref, model, guidance)
+    if not merchant_id.strip():
+        return None
+    key = _vision_key(merchant_id, image_ref, model, guidance)
     payload = get_layer_json(key)
     if not isinstance(payload, dict) or not _is_cacheable_result(payload):
         return None
@@ -52,13 +63,19 @@ def get_cached_vision(image_ref: str, model: str, guidance: str = "") -> dict[st
     return payload
 
 
-def save_vision(image_ref: str, model: str, guidance: str, result: dict[str, Any]) -> None:
+def save_vision(
+    merchant_id: str,
+    image_ref: str,
+    model: str,
+    guidance: str,
+    result: dict[str, Any],
+) -> None:
     """
     写入 V 层缓存；非成功结果或写入失败时静默跳过。
     """
-    if not _is_cacheable_result(result):
+    if not merchant_id.strip() or not _is_cacheable_result(result):
         return
-    key = _vision_key(image_ref, model, guidance)
+    key = _vision_key(merchant_id, image_ref, model, guidance)
     ttl = read_env_ttl_seconds(_VISION_TTL_ENV, _VISION_TTL_DEFAULT)
     if set_layer_json(key, result, ttl):
         logger.info("%s V 层写入成功：model=%s image_fp=%s", CACHE_LOG_PREFIX, model, _fp(image_ref))
@@ -68,4 +85,4 @@ def clear_vision_cache() -> int:
     """
     清理全部 V 层 key，供测试或手工重置；返回删除数量。
     """
-    return delete_by_pattern("ea:vision:*")
+    return delete_by_pattern("ea:v2:v:*")
