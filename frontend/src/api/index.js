@@ -48,6 +48,16 @@ export async function createAnalysisJob(payload) {
   }
 }
 
+// ---------- 状态查询：恢复订阅前确认任务是否仍在执行 ----------
+export async function getAnalysisJob(jobId) {
+  try {
+    const response = await httpClient.get(`/analyze/${encodeURIComponent(jobId)}`)
+    return response.data
+  } catch (error) {
+    throw new Error(`查询分析任务失败：${error.message}`)
+  }
+}
+
 // ---------- SSE 订阅：浏览器凭事件 id 自动重连，并携带 Last-Event-ID 补发遗漏事件 ----------
 export function subscribeAnalysisJob(jobId, handlers = {}, options = {}) {
   /**

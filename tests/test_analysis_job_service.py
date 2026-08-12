@@ -10,10 +10,12 @@ from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.dialects import mysql
+from sqlalchemy.schema import CreateTable
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from backend.db.models import AnalysisJob, Base
+from backend.db.models import AnalysisEvent, AnalysisJob, Base
 from backend.services.analysis_job_service import (
     append_event,
     create_or_get_job,
@@ -22,6 +24,7 @@ from backend.services.analysis_job_service import (
     mark_failed,
     mark_running,
     mark_succeeded,
+    reclaim_stale_job,
     request_cancellation,
 )
 
@@ -37,6 +40,17 @@ def _open_test_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return Session(engine)
+
+
+def test_analysis_job_request_json_should_use_mediumtext_on_mysql() -> None:
+    """MySQL 新建表应能保存带 data URL 图片的分析材料。"""
+    ddl = str(CreateTable(AnalysisJob.__table__).compile(dialect=mysql.dialect())).upper()
+    event_ddl = str(CreateTable(AnalysisEvent.__table__).compile(dialect=mysql.dialect())).upper()
+
+    assert "REQUEST_JSON MEDIUMTEXT NOT NULL" in ddl
+    assert "REPORT_JSON MEDIUMTEXT" in ddl
+    assert "REPORT_JSON MEDIUMTEXT NOT NULL" not in ddl
+    assert "PAYLOAD_JSON MEDIUMTEXT NOT NULL" in event_ddl
 
 
 # ---------- 幂等：相同材料的双击不应创建两份任务 ----------
@@ -212,3 +226,78 @@ def test_stale_running_job_should_be_reclaimed(monkeypatch: pytest.MonkeyPatch) 
             "job_reclaimed",
             "job_restarted",
         ]
+
+
+# ---------- 回收：SSE 订阅端对长时间 queued/running 无进展任务自动重投，达上限后终止 ----------
+def test_reclaim_stale_queued_job_should_requeue_until_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """陈旧 queued 任务应重投；重投达上限后标记 failed 并追加 job_failed 事件。"""
+    monkeypatch.setenv("ANALYSIS_JOB_QUEUED_STALE_SECONDS", "30")
+    with _open_test_session() as session:
+        job, _ = create_or_get_job(
+            session,
+            merchant_id="M-JOB-008",
+            dispute_id="D-JOB-008",
+            materials={"merchant_id": "M-JOB-008", "chat_history": []},
+        )
+
+        def _make_stale() -> None:
+            session.execute(
+                update(AnalysisJob)
+                .where(AnalysisJob.job_id == job.job_id)
+                .values(updated_at=datetime.utcnow() - timedelta(seconds=300))
+            )
+            session.commit()
+
+        _make_stale()
+        assert reclaim_stale_job(session, job_id=job.job_id) == "requeue"
+        _make_stale()
+        assert reclaim_stale_job(session, job_id=job.job_id) == "requeue"
+        _make_stale()
+        assert reclaim_stale_job(session, job_id=job.job_id) == "requeue"
+        _make_stale()
+        assert reclaim_stale_job(session, job_id=job.job_id) == "failed"
+
+        current = get_job(session, job.job_id)
+        assert current is not None
+        assert current.status == "failed"
+        assert "重投" in (current.error_message or "")
+        event_types = [event.event_type for event in get_events_after(session, job.job_id, 0)]
+        assert event_types.count("requeued") == 3
+        assert event_types[-1] == "job_failed"
+
+
+def test_reclaim_stale_job_should_skip_fresh_job() -> None:
+    """未过租约的 queued 任务不应被回收。"""
+    with _open_test_session() as session:
+        job, _ = create_or_get_job(
+            session,
+            merchant_id="M-JOB-009",
+            dispute_id="D-JOB-009",
+            materials={"merchant_id": "M-JOB-009", "chat_history": []},
+        )
+        assert reclaim_stale_job(session, job_id=job.job_id) == "ok"
+        assert get_job(session, job.job_id).status == "queued"
+
+
+def test_reclaim_stale_running_job_should_requeue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """陈旧 running 任务（worker 丢失）也应由订阅端重投，由 worker 按租约复核领取。"""
+    monkeypatch.setenv("CELERY_TASK_TIME_LIMIT_SECONDS", "120")
+    monkeypatch.setenv("ANALYSIS_JOB_STALE_SECONDS", "180")
+    with _open_test_session() as session:
+        job, _ = create_or_get_job(
+            session,
+            merchant_id="M-JOB-010",
+            dispute_id="D-JOB-010",
+            materials={"merchant_id": "M-JOB-010", "chat_history": []},
+        )
+        assert mark_running(session, job.job_id) is True
+        session.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.job_id == job.job_id)
+            .values(updated_at=datetime.utcnow() - timedelta(seconds=300))
+        )
+        session.commit()
+
+        assert reclaim_stale_job(session, job_id=job.job_id) == "requeue"
+        event_types = [event.event_type for event in get_events_after(session, job.job_id, 0)]
+        assert event_types == ["job_started", "requeued"]

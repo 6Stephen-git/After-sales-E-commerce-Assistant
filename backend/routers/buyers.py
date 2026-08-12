@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.cache.tool_cache import invalidate_profile, save_profile
 from backend.db.connection import get_db_session
 from backend.db.models import BuyerProfileRecord
 from schemas import BuyerProfile
@@ -153,6 +154,8 @@ def upsert_buyer_profile(
         else:
             record.profile_json = profile_json
         session.commit()
+        # MySQL 已提交：write-through 覆盖 T 层，避免读路径继续命中旧画像
+        save_profile(normalized_merchant_id, normalized_buyer_hash, profile)
         logger.info(
             "%s 买家画像写入完成，merchant_id=%s buyer_hash=%s",
             API_LOG_PREFIX,
@@ -202,6 +205,8 @@ def delete_buyer_profile(
             raise HTTPException(status_code=404, detail="买家画像不存在")
         session.delete(record)
         session.commit()
+        # 源数据已删：主动失效 T 层，避免默认画像被旧缓存挡住
+        invalidate_profile(normalized_merchant_id, normalized_buyer_hash)
         logger.info(
             "%s 买家画像删除完成，merchant_id=%s buyer_hash=%s",
             API_LOG_PREFIX,

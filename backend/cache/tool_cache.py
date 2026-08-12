@@ -1,5 +1,9 @@
 """
 工具查询缓存（T 层）：买家画像、相似判例、物流状态的 Redis 缓存。
+
+更新策略：
+- 画像：MySQL upsert 后 write-through 覆盖同 key；MySQL 删除后主动 DEL。
+- 判例/物流：源数据变更或需强制刷新时调用对应 invalidate；无写接口时仍靠 TTL。
 """
 
 from __future__ import annotations
@@ -9,7 +13,7 @@ import logging
 
 from backend.cache.fingerprint import hash_cache_identifier, merchant_cache_scope
 from backend.cache.layer_redis import get_layer_json, read_env_ttl_seconds, set_layer_json
-from backend.cache.redis_client import CACHE_LOG_PREFIX, delete_by_pattern
+from backend.cache.redis_client import CACHE_LOG_PREFIX, delete, delete_by_pattern
 from schemas import BuyerProfile, LogisticsInfo, SimilarCase
 
 
@@ -100,6 +104,8 @@ def get_cached_profile(merchant_id: str, buyer_id: str) -> BuyerProfile | None:
 def save_profile(merchant_id: str, buyer_id: str, profile: BuyerProfile) -> None:
     """
     写入买家画像缓存；标识为空或写入失败时静默跳过。
+
+    MySQL upsert 成功后应调用本函数，保证下一读命中最新画像。
     """
     normalized_merchant = merchant_id.strip()
     normalized_buyer = buyer_id.strip()
@@ -114,6 +120,24 @@ def save_profile(merchant_id: str, buyer_id: str, profile: BuyerProfile) -> None
             normalized_merchant,
             normalized_buyer,
         )
+
+
+def invalidate_profile(merchant_id: str, buyer_id: str) -> None:
+    """
+    删除单条买家画像缓存；MySQL 删除画像后必须调用，避免继续命中旧数据。
+    """
+    normalized_merchant = merchant_id.strip()
+    normalized_buyer = buyer_id.strip()
+    if not normalized_merchant or not normalized_buyer:
+        return
+    key = _profile_key(normalized_merchant, normalized_buyer)
+    delete(key)
+    logger.info(
+        "%s T 层画像已失效：merchant_id=%s buyer_id=%s",
+        CACHE_LOG_PREFIX,
+        normalized_merchant,
+        normalized_buyer,
+    )
 
 
 # ---------- 相似判例 ----------
@@ -163,6 +187,24 @@ def save_cases(merchant_id: str, dispute_desc: str, top_k: int, cases: list[Simi
         logger.info("%s T 层判例写入成功：desc_fp=%s top_k=%s", CACHE_LOG_PREFIX, _fp(normalized_desc), top_k)
 
 
+def invalidate_cases(merchant_id: str, dispute_desc: str, top_k: int) -> None:
+    """
+    删除单条相似判例检索缓存；判例库变更且已知检索键时可调用。
+    """
+    normalized_merchant = merchant_id.strip()
+    normalized_desc = dispute_desc.strip()
+    if not normalized_merchant or not normalized_desc or top_k <= 0:
+        return
+    key = _cases_key(normalized_merchant, normalized_desc, top_k)
+    delete(key)
+    logger.info(
+        "%s T 层判例已失效：desc_fp=%s top_k=%s",
+        CACHE_LOG_PREFIX,
+        _fp(normalized_desc),
+        top_k,
+    )
+
+
 # ---------- 物流 ----------
 
 
@@ -204,3 +246,16 @@ def save_logistics(merchant_id: str, order_id: str, logistics: LogisticsInfo) ->
     ttl = read_env_ttl_seconds(_LOGISTICS_TTL_ENV, _LOGISTICS_TTL_DEFAULT)
     if set_layer_json(key, logistics.model_dump(), ttl):
         logger.info("%s T 层物流写入成功：order_id=%s", CACHE_LOG_PREFIX, normalized_order)
+
+
+def invalidate_logistics(merchant_id: str, order_id: str) -> None:
+    """
+    删除单条物流缓存；订单物流状态变更后可调用以强制下次回源。
+    """
+    normalized_merchant = merchant_id.strip()
+    normalized_order = order_id.strip()
+    if not normalized_merchant or not normalized_order:
+        return
+    key = _logistics_key(normalized_merchant, normalized_order)
+    delete(key)
+    logger.info("%s T 层物流已失效：order_id=%s", CACHE_LOG_PREFIX, normalized_order)

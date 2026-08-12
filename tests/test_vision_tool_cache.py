@@ -19,7 +19,18 @@ if ROOT_DIR not in sys.path:
 
 from backend.cache.materials_store import clear_all_cache
 from backend.cache.redis_client import reset_redis_client
-from backend.cache.tool_cache import clear_tool_caches, get_cached_cases, save_cases
+from backend.cache.tool_cache import (
+    clear_tool_caches,
+    get_cached_cases,
+    get_cached_logistics,
+    get_cached_profile,
+    invalidate_cases,
+    invalidate_logistics,
+    invalidate_profile,
+    save_cases,
+    save_logistics,
+    save_profile,
+)
 from backend.cache.vision_cache import get_cached_vision, save_vision
 from backend.tools.agent1_tools import analyze_image
 from backend.tools.agent2_tools import query_buyer_profile, search_similar_cases
@@ -50,11 +61,18 @@ def _mock_redis_storage() -> tuple[MagicMock, dict[str, str]]:
     def fake_get(key: str) -> str | None:
         return storage.get(key)
 
+    def fake_delete(*keys: str) -> int:
+        removed = 0
+        for key in keys:
+            if storage.pop(key, None) is not None:
+                removed += 1
+        return removed
+
     mock_client.setex.side_effect = fake_setex
     mock_client.get.side_effect = fake_get
+    mock_client.delete.side_effect = fake_delete
     mock_client.ping.return_value = True
     mock_client.scan_iter.return_value = iter([])
-    mock_client.delete.return_value = 1
     return mock_client, storage
 
 
@@ -197,6 +215,36 @@ def test_profile_cache_should_hit_without_second_db_query() -> None:
     assert isinstance(first, BuyerProfile)
     assert db_call_count["count"] == 1
     assert second.credit_level == first.credit_level
+
+
+def test_tool_cache_write_through_and_invalidate() -> None:
+    """画像 write-through 覆盖旧值；删除/失效后应 miss；判例与物流 invalidate 生效。"""
+    mock_client, _storage = _mock_redis_storage()
+    old_profile = BuyerProfile(buyer_id="buyer_1", purchase_count=1, credit_level="low")
+    new_profile = BuyerProfile(buyer_id="buyer_1", purchase_count=9, credit_level="high")
+    logistics = LogisticsInfo(is_shipped=True, is_signed=True, stagnant_days=0, is_abnormal=False)
+
+    with patch.dict(os.environ, {"ENABLE_REDIS_CACHE": "1"}, clear=False):
+        with patch("backend.cache.redis_client.get_redis", return_value=mock_client):
+            save_profile("merchant-1", "buyer_1", old_profile)
+            save_profile("merchant-1", "buyer_1", new_profile)
+            cached = get_cached_profile("merchant-1", "buyer_1")
+            assert cached is not None
+            assert cached.purchase_count == 9
+            assert cached.credit_level == "high"
+
+            invalidate_profile("merchant-1", "buyer_1")
+            assert get_cached_profile("merchant-1", "buyer_1") is None
+
+            save_cases("merchant-1", "描述A", 3, [])
+            assert get_cached_cases("merchant-1", "描述A", 3) is not None
+            invalidate_cases("merchant-1", "描述A", 3)
+            assert get_cached_cases("merchant-1", "描述A", 3) is None
+
+            save_logistics("merchant-1", "ORDER-1", logistics)
+            assert get_cached_logistics("merchant-1", "ORDER-1") is not None
+            invalidate_logistics("merchant-1", "ORDER-1")
+            assert get_cached_logistics("merchant-1", "ORDER-1") is None
 
 
 def test_tool_cache_should_bypass_when_redis_disabled() -> None:

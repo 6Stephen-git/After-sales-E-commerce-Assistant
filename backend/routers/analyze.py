@@ -22,6 +22,7 @@ from backend.services.analysis_job_service import (
     create_or_get_job,
     get_events_after,
     get_job,
+    reclaim_stale_job,
     request_cancellation,
     serialize_job,
 )
@@ -230,6 +231,8 @@ def stream_analysis_events(
         轮询 MySQL 中的新增事件并编码为 SSE。
 
         每轮查询后立即关闭会话，避免长连接持有数据库连接池资源。
+        对长时间停留在 queued/running 且无进展的任务自动重投；重投达上限后由服务层
+        标记失败，本流随即结束，避免前端无限等待。
         """
         cursor = start_sequence
         last_heartbeat_at = time.monotonic()
@@ -237,6 +240,14 @@ def stream_analysis_events(
             with Session(get_engine()) as session:
                 events = get_events_after(session, job_id, cursor)
                 job = get_job(session, job_id)
+                reclaim_action = (
+                    reclaim_stale_job(session, job_id=job_id) if job is not None else "ok"
+                )
+                if reclaim_action != "ok":
+                    # 回收动作刚追加了 requeued / job_failed 事件，需重查本轮的完整事件，
+                    # 确保客户端能收到事件且终态判断基于最新状态。
+                    events = get_events_after(session, job_id, cursor)
+                    job = get_job(session, job_id)
 
             for event in events:
                 cursor = event.sequence
@@ -244,6 +255,18 @@ def stream_analysis_events(
 
             if job is None or (job.status in TERMINAL_STATUSES and not events):
                 return
+
+            if reclaim_action == "requeue":
+                try:
+                    run_analysis_job.delay(job_id)
+                    logger.info("%s 陈旧任务已重新入队 job_id=%s", API_LOG_PREFIX, job_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "%s 陈旧任务重投失败 job_id=%s 原因=%s",
+                        API_LOG_PREFIX,
+                        job_id,
+                        exc,
+                    )
 
             if time.monotonic() - last_heartbeat_at >= 15:
                 yield ": heartbeat\n\n"

@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { createAnalysisJob, monitorSellerEmotion, subscribeAnalysisJob } from '../api'
+import { createAnalysisJob, getAnalysisJob, monitorSellerEmotion, subscribeAnalysisJob } from '../api'
 import { should_block_seller_text_locally } from '../utils/sellerEmotionLocal'
 
 const ANALYSIS_JOB_STORAGE_KEY = 'ecommerce_assistant_active_analysis_job'
@@ -383,7 +383,11 @@ export function use_dispute() {
 
   // ---------- 刷新恢复：从 sessionStorage 找回未完成任务并重新订阅 ----------
   async function resume_pending_analysis_job() {
-    /** 页面刷新后恢复现有 job_id 的 SSE 订阅，不重新提交分析。 */
+    /**
+     * 页面刷新后恢复现有 job_id：
+     * 先查状态，终态直接取报告/错误；非终态（queued/running）才订阅 SSE，
+     * 后端会对长时间无进展的任务自动重投或终止，避免无限等待。
+     */
     const job_id = get_active_analysis_job_id()
     if (!job_id || loading.value || analyze_abort_controller) {
       return
@@ -394,6 +398,24 @@ export function use_dispute() {
     error_message.value = ''
     progress_message.value = '正在恢复分析任务...'
     try {
+      const job = await getAnalysisJob(job_id)
+      if (request_signal.aborted || !job) {
+        return
+      }
+      if (job.status === 'succeeded' && job.report) {
+        report.value = job.report
+        progress_message.value = '分析已完成'
+        clear_active_analysis_job_id(job_id)
+        return
+      }
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        error_message.value =
+          job.error_message || (job.status === 'cancelled' ? '分析任务已取消' : '分析任务失败')
+        clear_active_analysis_job_id(job_id)
+        return
+      }
+      progress_message.value =
+        job.status === 'queued' ? '任务等待 worker 处理，后端将自动重试...' : '正在恢复分析任务...'
       await follow_analysis_job(job_id, request_signal)
     } catch (error) {
       if (!is_request_aborted(error) && !request_signal.aborted) {

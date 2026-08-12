@@ -207,13 +207,29 @@ def _patch_consistency_constraints(engine: Engine) -> None:
         return
 
     if "analysis_jobs" in table_names:
-        columns = {column["name"] for column in inspector.get_columns("analysis_jobs")}
+        analysis_job_columns = {
+            column["name"]: column for column in inspector.get_columns("analysis_jobs")
+        }
+        columns = set(analysis_job_columns)
         unique_names = {item["name"] for item in inspector.get_unique_constraints("analysis_jobs")}
         with engine.begin() as conn:
             if "attempt" not in columns:
                 conn.execute(
                     text("ALTER TABLE analysis_jobs ADD COLUMN attempt INT NOT NULL DEFAULT 1")
                 )
+            request_json_column = analysis_job_columns.get("request_json")
+            request_json_type = (
+                str(request_json_column["type"]).upper()
+                if request_json_column is not None
+                else ""
+            )
+            # TEXT 的上限只有约 64 KiB；前端会将本地图片作为 data URL 随材料提交，
+            # 因此旧表必须扩容。LONGTEXT 同样兼容，避免无意义地缩小已手工扩容的列。
+            if request_json_type not in {"MEDIUMTEXT", "LONGTEXT"}:
+                conn.execute(
+                    text("ALTER TABLE analysis_jobs MODIFY COLUMN request_json MEDIUMTEXT NOT NULL")
+                )
+                logger.info("%s analysis_jobs.request_json 已升级为 MEDIUMTEXT", DB_LOG_PREFIX)
             if "uq_analysis_jobs_merchant_key_attempt" not in unique_names:
                 if "uq_analysis_jobs_merchant_key" in unique_names:
                     conn.execute(text("ALTER TABLE analysis_jobs DROP INDEX uq_analysis_jobs_merchant_key"))
@@ -237,7 +253,48 @@ def _patch_consistency_constraints(engine: Engine) -> None:
                         "uq_dispute_cases_merchant_dispute UNIQUE (merchant_id, dispute_id)"
                     )
                 )
-            logger.info("%s dispute_cases 复盘唯一约束已补齐", DB_LOG_PREFIX)
+        logger.info("%s dispute_cases 复盘唯一约束已补齐", DB_LOG_PREFIX)
+
+
+def _patch_event_payload_column_sizes(engine: Engine) -> None:
+    """
+    将分析事件与最终报告 JSON 列从 TEXT（约 64 KiB）升级为 MEDIUMTEXT（约 16 MiB）。
+
+    前端会把本地图片以 data URL 随材料提交；stage_done/final_report 事件负载与
+    最终报告均包含这些图片引用，TEXT 会触发 MySQL Data too long for column。
+    """
+    if engine.dialect.name != "mysql":
+        return
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    patches: list[tuple[str, str, str]] = []
+
+    if "analysis_events" in table_names:
+        columns = {column["name"]: column for column in inspector.get_columns("analysis_events")}
+        payload_column = columns.get("payload_json")
+        payload_type = str(payload_column["type"]).upper() if payload_column is not None else ""
+        if payload_type not in {"MEDIUMTEXT", "LONGTEXT"}:
+            patches.append(("analysis_events", "payload_json", "MEDIUMTEXT NOT NULL"))
+
+    if "analysis_jobs" in table_names:
+        columns = {column["name"]: column for column in inspector.get_columns("analysis_jobs")}
+        report_column = columns.get("report_json")
+        report_type = str(report_column["type"]).upper() if report_column is not None else ""
+        if report_type not in {"MEDIUMTEXT", "LONGTEXT"}:
+            patches.append(("analysis_jobs", "report_json", "MEDIUMTEXT NULL"))
+
+    if not patches:
+        return
+    with engine.begin() as conn:
+        for table_name, column_name, column_def in patches:
+            conn.execute(text(f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} {column_def}"))
+            logger.info(
+                "%s %s.%s 已升级为 %s",
+                DB_LOG_PREFIX,
+                table_name,
+                column_name,
+                column_def.split()[0],
+            )
 
 
 # ---------- 元数据建表：应用启动时按模型创建缺失表 ----------
@@ -254,6 +311,7 @@ def init_db() -> None:
         _apply_schema_patches(engine)
         _patch_dispute_cases_columns(engine)
         _patch_consistency_constraints(engine)
+        _patch_event_payload_column_sizes(engine)
         logger.info("%s 数据库建表完成", DB_LOG_PREFIX)
     except Exception as exc:  # noqa: BLE001
         logger.error("%s 数据库建表失败：%s", DB_LOG_PREFIX, exc)

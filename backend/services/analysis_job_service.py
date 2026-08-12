@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,11 @@ from backend.db.models import AnalysisEvent, AnalysisJob
 JOB_LOG_PREFIX = "[AnalysisJob]"
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+# queued 任务长时间未被消费时的回收阈值（秒）；超时后由 SSE 订阅端自动重投，
+# 重投次数达到上限后终止任务，避免前端无限等待。
+QUEUED_STALE_ENV = "ANALYSIS_JOB_QUEUED_STALE_SECONDS"
+QUEUED_STALE_DEFAULT = 120
+QUEUED_REQUEUE_MAX = 3
 
 
 # ---------- 序列化：稳定计算请求幂等键，重复点击只创建一个任务 ----------
@@ -74,15 +79,147 @@ def _job_stale_seconds() -> int:
     return max(configured, hard_limit + 60)
 
 
-def _is_stale_running_job(job: AnalysisJob) -> bool:
+def _db_current_time(session: Session) -> datetime:
+    """
+    从数据库读取当前时间，作为与 updated_at 比较的同一时钟。
+
+    MySQL 的 CURRENT_TIMESTAMP 随会话时区返回本地时间（本机为 UTC+8），
+    进程内 utcnow 与之相差 8 小时会把新任务误判/漏判为陈旧任务；
+    改为以数据库时钟为基准后，SQLite/MySQL 与时区配置均保持一致。
+    """
+    raw = session.scalar(text("SELECT CURRENT_TIMESTAMP"))
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return datetime.utcnow()
+    return datetime.utcnow()
+
+
+def _is_stale_running_job(job: AnalysisJob, session: Session) -> bool:
     """
     判断 running Job 是否已超过租约。
     """
     if job.status != "running" or job.updated_at is None:
         return False
-    # server_default=func.now() 在 SQLite/MySQL 默认按 UTC 产生无时区时间；
-    # 这里同样使用 utcnow，避免应用进程位于东八区时把新任务误判为陈旧任务。
-    return (datetime.utcnow() - job.updated_at).total_seconds() >= _job_stale_seconds()
+    return (_db_current_time(session) - job.updated_at).total_seconds() >= _job_stale_seconds()
+
+
+def _queued_stale_seconds() -> int:
+    """
+    读取 queued 任务回收阈值；非法值回退默认 120 秒，且不小于 30 秒。
+    """
+    raw = os.getenv(QUEUED_STALE_ENV, str(QUEUED_STALE_DEFAULT)).strip()
+    try:
+        return max(30, int(raw))
+    except ValueError:
+        logger.warning(
+            "%s %s 无效，使用默认 %s 秒",
+            JOB_LOG_PREFIX,
+            QUEUED_STALE_ENV,
+            QUEUED_STALE_DEFAULT,
+        )
+        return QUEUED_STALE_DEFAULT
+
+
+def _is_stale_queued_job(job: AnalysisJob, session: Session) -> bool:
+    """
+    判断 queued Job 是否已超过“未被 worker 消费”的租约。
+    """
+    if job.status != "queued" or job.updated_at is None:
+        return False
+    return (_db_current_time(session) - job.updated_at).total_seconds() >= _queued_stale_seconds()
+
+
+def _requeue_count(session: Session, job_id: str) -> int:
+    """
+    统计该任务已自动重投的次数（依据 requeued 事件，跨连接全局有界）。
+    """
+    statement = select(AnalysisEvent).where(
+        AnalysisEvent.job_id == job_id,
+        AnalysisEvent.event_type == "requeued",
+    )
+    return len(list(session.scalars(statement)))
+
+
+def reclaim_stale_job(session: Session, *, job_id: str) -> str:
+    """
+    回收“入队/执行后长时间没有进展”的任务，避免 SSE 无限等待。
+
+    普通轮询只做无锁读；仅在判定为陈旧任务后才加行锁复核，避免长连接反复持锁。
+
+    返回:
+        "requeue": 已追加 requeued 事件，调用方应重新投递到 Celery；
+        "failed":  重投次数达上限，已标记失败并追加 job_failed 事件；
+        "ok":      无需处理。
+    """
+    job = get_job(session, job_id)
+    if job is None or job.status in TERMINAL_STATUSES:
+        return "ok"
+    if job.status == "queued":
+        stale = _is_stale_queued_job(job, session)
+    elif job.status == "running":
+        stale = _is_stale_running_job(job, session)
+    else:
+        return "ok"
+    if not stale:
+        return "ok"
+
+    locked = session.scalar(
+        select(AnalysisJob).where(AnalysisJob.job_id == job_id).with_for_update()
+    )
+    if locked is None or locked.status in TERMINAL_STATUSES:
+        return "ok"
+    if locked.status == "queued":
+        stale = _is_stale_queued_job(locked, session)
+    elif locked.status == "running":
+        stale = _is_stale_running_job(locked, session)
+    else:
+        return "ok"
+    if not stale:
+        return "ok"
+
+    requeue_attempts = _requeue_count(session, job_id)
+    if requeue_attempts >= QUEUED_REQUEUE_MAX:
+        locked.status = "failed"
+        locked.error_message = "分析任务长时间未被消费，已自动终止（重投超过上限）"
+        _append_event_locked(
+            session,
+            locked,
+            event_type="job_failed",
+            payload={"job_id": job_id, "message": locked.error_message},
+        )
+        session.commit()
+        logger.error(
+            "%s 陈旧任务重投次数达上限，已终止 job_id=%s attempts=%s",
+            JOB_LOG_PREFIX,
+            job_id,
+            requeue_attempts,
+        )
+        return "failed"
+
+    _append_event_locked(
+        session,
+        locked,
+        event_type="requeued",
+        payload={
+            "job_id": job_id,
+            "attempt": requeue_attempts + 1,
+            "message": "任务长时间无进展，已重新投递，等待 worker 消费",
+        },
+    )
+    session.commit()
+    logger.warning(
+        "%s 陈旧任务重新投递 job_id=%s status=%s attempt=%s/%s",
+        JOB_LOG_PREFIX,
+        job_id,
+        locked.status,
+        requeue_attempts + 1,
+        QUEUED_REQUEUE_MAX,
+    )
+    return "requeue"
 
 
 # ---------- 查询：统一按任务 ID 获取记录，避免路由层直接写 ORM ----------
@@ -248,7 +385,7 @@ def mark_running(session: Session, job_id: str) -> bool:
     if job.status in TERMINAL_STATUSES:
         return False
     if job.status == "running":
-        if not _is_stale_running_job(job):
+        if not _is_stale_running_job(job, session):
             return False
         logger.warning(
             "%s 检测到陈旧任务重投，重新领取 job_id=%s stale_seconds=%s",

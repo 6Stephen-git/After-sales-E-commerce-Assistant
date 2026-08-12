@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -125,9 +126,19 @@ class AnalysisJob(Base):
     dispute_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # 分析材料可能包含 data URL 图片；MySQL TEXT 仅约 64 KiB，无法持久化普通截图。
+    # SQLite 继续使用通用 Text，MySQL 新表使用 MEDIUMTEXT（约 16 MiB）。
+    request_json: Mapped[str] = mapped_column(
+        Text().with_variant(MEDIUMTEXT(), "mysql"),
+        nullable=False,
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
-    report_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 最终报告包含 evidence_items 中的 data URL 图片引用，TEXT 仅约 64 KiB 会溢出；
+    # MySQL 使用 MEDIUMTEXT（约 16 MiB），SQLite 继续使用通用 Text。
+    report_json: Mapped[str | None] = mapped_column(
+        Text().with_variant(MEDIUMTEXT(), "mysql"),
+        nullable=True,
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     next_event_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -158,5 +169,10 @@ class AnalysisEvent(Base):
     job_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # stage_done/final_report 事件负载会携带含 data URL 图片的 facts/报告，
+    # TEXT 仅约 64 KiB 会触发 MySQL Data too long；升级为 MEDIUMTEXT。
+    payload_json: Mapped[str] = mapped_column(
+        Text().with_variant(MEDIUMTEXT(), "mysql"),
+        nullable=False,
+    )
     created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=func.now())
